@@ -1,0 +1,511 @@
+{
+  "schema": "heterollm.simulation-error-evaluation/v1",
+  "evaluation_date": "2026-10-11",
+  "overall_verdict": "not_qualified_for_general_predictive_accuracy",
+  "sources": {
+    "native_comparison": "docs/cost_logic_native_validation_2026-10-10/comparison_summary.json",
+    "native_timing_manifest": "docs/cost_logic_native_validation_2026-10-10/native_timing_manifest.json",
+    "software_precision": "docs/precision_results_2026-10-07.json",
+    "memory_precision": "docs/memory_precision_2026-10-07.json",
+    "cuda_graph_independent": "docs/cuda_graph_dispatch_validation_2026-10-08/independent_dispatch_summary.json",
+    "physical_micro_evaluation": "docs/simulation_error_2026-10-11/physical_error.json"
+  },
+  "evidence_scope": {
+    "native_pairs": 20,
+    "native_expected_pairs": 20,
+    "native_workload": {
+      "prompt_tokens": 512,
+      "output_tokens": 128,
+      "context": 768,
+      "batch": 512,
+      "ubatch": 512,
+      "threads": 16,
+      "gpu_layers": -1,
+      "flash_attn": "off",
+      "cache_type_k": "f16",
+      "cache_type_v": "f16",
+      "ctx_checkpoints": 0,
+      "warmups": 2,
+      "repetitions": 5
+    },
+    "native_repetitions": 5,
+    "native_warmups": 2,
+    "native_models": 10,
+    "native_graph_modes": [
+      "off",
+      "on"
+    ],
+    "native_timing_reused": true,
+    "native_latency_used_for_calibration": false
+  },
+  "native_latency": {
+    "metric_summary": {
+      "engine_e2e_ns": {
+        "off": {
+          "n": 10,
+          "mape_percent": 21.128834,
+          "mean_signed_error_percent": -21.128834,
+          "signed_error_range_percent": [
+            -55.017463,
+            -9.18465
+          ]
+        },
+        "on": {
+          "n": 10,
+          "mape_percent": 10.064187,
+          "mean_signed_error_percent": 1.833805,
+          "signed_error_range_percent": [
+            -20.123849,
+            30.602729
+          ]
+        },
+        "all": {
+          "n": 20,
+          "mape_percent": 15.596511,
+          "mean_signed_error_percent": -9.647515,
+          "signed_error_range_percent": [
+            -55.017463,
+            30.602729
+          ]
+        }
+      },
+      "engine_tpot_ns": {
+        "off": {
+          "n": 10,
+          "mape_percent": 20.972558,
+          "mean_signed_error_percent": -20.972558,
+          "signed_error_range_percent": [
+            -55.462407,
+            -8.203316
+          ]
+        },
+        "on": {
+          "n": 10,
+          "mape_percent": 10.843977,
+          "mean_signed_error_percent": 3.510283,
+          "signed_error_range_percent": [
+            -19.274441,
+            33.909959
+          ]
+        },
+        "all": {
+          "n": 20,
+          "mape_percent": 15.908267,
+          "mean_signed_error_percent": -8.731137,
+          "signed_error_range_percent": [
+            -55.462407,
+            33.909959
+          ]
+        }
+      },
+      "engine_ttft_ns": {
+        "off": {
+          "n": 10,
+          "mape_percent": 23.961199,
+          "mean_signed_error_percent": -23.961199,
+          "signed_error_range_percent": [
+            -41.738926,
+            -13.320061
+          ]
+        },
+        "on": {
+          "n": 10,
+          "mape_percent": 23.878974,
+          "mean_signed_error_percent": -23.878974,
+          "signed_error_range_percent": [
+            -38.603501,
+            -11.640249
+          ]
+        },
+        "all": {
+          "n": 20,
+          "mape_percent": 23.920087,
+          "mean_signed_error_percent": -23.920087,
+          "signed_error_range_percent": [
+            -41.738926,
+            -11.640249
+          ]
+        }
+      }
+    },
+    "native_noise": {
+      "engine_e2e_ns": {
+        "mean_mad_over_median_percent": 0.714393,
+        "median_mad_over_median_percent": 0.616114,
+        "max_mad_over_median_percent": 1.926009
+      },
+      "engine_tpot_ns": {
+        "mean_mad_over_median_percent": 0.743795,
+        "median_mad_over_median_percent": 0.588561,
+        "max_mad_over_median_percent": 1.748671
+      },
+      "engine_ttft_ns": {
+        "mean_mad_over_median_percent": 1.521119,
+        "median_mad_over_median_percent": 1.02523,
+        "max_mad_over_median_percent": 4.770992
+      }
+    },
+    "native_raw_range_noise": {
+      "engine_ttft_ns": {
+        "mean_range_over_median_percent": 7.03356,
+        "median_range_over_median_percent": 6.555312,
+        "max_range_over_median_percent": 13.053435
+      },
+      "engine_tpot_ns": {
+        "mean_range_over_median_percent": 4.220108,
+        "median_range_over_median_percent": 3.615244,
+        "max_range_over_median_percent": 12.755217
+      },
+      "engine_e2e_ns": {
+        "mean_range_over_median_percent": 4.039808,
+        "median_range_over_median_percent": 3.629943,
+        "max_range_over_median_percent": 12.799534
+      }
+    },
+    "worst_absolute_errors": [
+      {
+        "case_id": "qwen2_5_0_5b_q4_k_m",
+        "name": "Qwen2.5 0.5B Instruct · Q4_K_M",
+        "graph_mode": "off",
+        "metric": "engine_tpot_ns",
+        "simulation_ns": 1436277.7411042766,
+        "native_median_ns": 3224866.1417322834,
+        "native_mad_ns": 19755.90551181091,
+        "signed_error_percent": -55.46240749289646,
+        "absolute_error_percent": 55.46240749289646
+      },
+      {
+        "case_id": "qwen2_5_0_5b_q4_k_m",
+        "name": "Qwen2.5 0.5B Instruct · Q4_K_M",
+        "graph_mode": "off",
+        "metric": "engine_e2e_ns",
+        "simulation_ns": 190450214.44815093,
+        "native_median_ns": 423387000.0,
+        "native_mad_ns": 3603000.0,
+        "signed_error_percent": -55.01746287719015,
+        "absolute_error_percent": 55.01746287719015
+      },
+      {
+        "case_id": "qwen2_5_0_5b_q4_k_m",
+        "name": "Qwen2.5 0.5B Instruct · Q4_K_M",
+        "graph_mode": "off",
+        "metric": "engine_ttft_ns",
+        "simulation_ns": 8042941.327907801,
+        "native_median_ns": 13805000.0,
+        "native_mad_ns": 178000.0,
+        "signed_error_percent": -41.7389255493821,
+        "absolute_error_percent": 41.7389255493821
+      },
+      {
+        "case_id": "qwen2_5_0_5b_q4_k_m",
+        "name": "Qwen2.5 0.5B Instruct · Q4_K_M",
+        "graph_mode": "on",
+        "metric": "engine_ttft_ns",
+        "simulation_ns": 8042941.327907801,
+        "native_median_ns": 13100000.0,
+        "native_mad_ns": 625000.0,
+        "signed_error_percent": -38.60350131368091,
+        "absolute_error_percent": 38.60350131368091
+      },
+      {
+        "case_id": "llama3_2_1b_q4_k_m",
+        "name": "Llama 3.2 1B Instruct · Q4_K_M",
+        "graph_mode": "off",
+        "metric": "engine_tpot_ns",
+        "simulation_ns": 1860096.1502455215,
+        "native_median_ns": 2915488.188976378,
+        "native_mad_ns": 49842.5196850393,
+        "signed_error_percent": -36.19949628749492,
+        "absolute_error_percent": 36.19949628749492
+      },
+      {
+        "case_id": "llama3_2_1b_q4_k_m",
+        "name": "Llama 3.2 1B Instruct · Q4_K_M",
+        "graph_mode": "off",
+        "metric": "engine_e2e_ns",
+        "simulation_ns": 248687125.4682588,
+        "native_median_ns": 388212000.0,
+        "native_mad_ns": 7476999.99999994,
+        "signed_error_percent": -35.94038168107663,
+        "absolute_error_percent": 35.94038168107663
+      },
+      {
+        "case_id": "qwen3_1_7b_q8_0",
+        "name": "Qwen3 1.7B · Q8_0",
+        "graph_mode": "on",
+        "metric": "engine_ttft_ns",
+        "simulation_ns": 17234587.811748028,
+        "native_median_ns": 26094000.0,
+        "native_mad_ns": 41000.0,
+        "signed_error_percent": -33.95191303844551,
+        "absolute_error_percent": 33.95191303844551
+      },
+      {
+        "case_id": "qwen3_0_6b_f16",
+        "name": "Qwen3 0.6B · F16",
+        "graph_mode": "on",
+        "metric": "engine_tpot_ns",
+        "simulation_ns": 3545144.900898924,
+        "native_median_ns": 2647409.448818898,
+        "native_mad_ns": 14944.88188976422,
+        "signed_error_percent": 33.90995875158402,
+        "absolute_error_percent": 33.90995875158402
+      },
+      {
+        "case_id": "qwen3_1_7b_q8_0",
+        "name": "Qwen3 1.7B · Q8_0",
+        "graph_mode": "off",
+        "metric": "engine_ttft_ns",
+        "simulation_ns": 17234587.811748028,
+        "native_median_ns": 26064000.0,
+        "native_mad_ns": 160000.0,
+        "signed_error_percent": -33.87589083890413,
+        "absolute_error_percent": 33.87589083890413
+      },
+      {
+        "case_id": "llama3_2_1b_q4_k_m",
+        "name": "Llama 3.2 1B Instruct · Q4_K_M",
+        "graph_mode": "on",
+        "metric": "engine_ttft_ns",
+        "simulation_ns": 12454914.38707757,
+        "native_median_ns": 18792000.0,
+        "native_mad_ns": 457000.0,
+        "signed_error_percent": -33.72225209090267,
+        "absolute_error_percent": 33.72225209090267
+      }
+    ],
+    "graph_benefit": [
+      {
+        "case_id": "qwen3_0_6b_f16",
+        "native_e2e_reduction_percent": 30.428133055594277,
+        "simulation_e2e_reduction_percent": -0.05220172367081943,
+        "absolute_reduction_error_percentage_points": 30.480334779265096
+      },
+      {
+        "case_id": "qwen3_1_7b_q8_0",
+        "native_e2e_reduction_percent": 29.40736389592704,
+        "simulation_e2e_reduction_percent": -0.04353940042789439,
+        "absolute_reduction_error_percentage_points": 29.450903296354937
+      },
+      {
+        "case_id": "qwen3_4b_q4_k_m",
+        "native_e2e_reduction_percent": 23.253553699737374,
+        "simulation_e2e_reduction_percent": -0.047074165600213824,
+        "absolute_reduction_error_percentage_points": 23.30062786533759
+      },
+      {
+        "case_id": "qwen3_8b_q4_k_m",
+        "native_e2e_reduction_percent": 16.3652676915916,
+        "simulation_e2e_reduction_percent": -0.031221878920861812,
+        "absolute_reduction_error_percentage_points": 16.396489570512465
+      },
+      {
+        "case_id": "qwen3_8_27b_mixed",
+        "native_e2e_reduction_percent": 15.803871520958024,
+        "simulation_e2e_reduction_percent": -0.03532024207075768,
+        "absolute_reduction_error_percentage_points": 15.839191763028783
+      },
+      {
+        "case_id": "qwen2_5_0_5b_q4_k_m",
+        "native_e2e_reduction_percent": 43.6203756846573,
+        "simulation_e2e_reduction_percent": -0.11412566779693822,
+        "absolute_reduction_error_percentage_points": 43.73450135245424
+      },
+      {
+        "case_id": "qwen2_5_7b_q4_k_m",
+        "native_e2e_reduction_percent": 14.134950915248423,
+        "simulation_e2e_reduction_percent": -0.029434527758476214,
+        "absolute_reduction_error_percentage_points": 14.1643854430069
+      },
+      {
+        "case_id": "llama3_2_1b_q4_k_m",
+        "native_e2e_reduction_percent": 28.21422315641967,
+        "simulation_e2e_reduction_percent": -0.032305426361523004,
+        "absolute_reduction_error_percentage_points": 28.246528582781195
+      },
+      {
+        "case_id": "llama3_1_8b_q4_k_m",
+        "native_e2e_reduction_percent": 14.79234049861179,
+        "simulation_e2e_reduction_percent": -0.02269531240270961,
+        "absolute_reduction_error_percentage_points": 14.8150358110145
+      },
+      {
+        "case_id": "qwen3_14b_q4_k_m",
+        "native_e2e_reduction_percent": 10.179795721171104,
+        "simulation_e2e_reduction_percent": -0.021372658540230738,
+        "absolute_reduction_error_percentage_points": 10.201168379711334
+      }
+    ]
+  },
+  "software_equivalence": {
+    "status": "pass_for_listed_fixtures",
+    "prediction_numeric_fields_compared": 2464,
+    "prediction_nonzero_numeric_fields": 0,
+    "integer_counter_mismatches": 0,
+    "memory_integer_counters_pass": true,
+    "memory_dram_cases": 4,
+    "memory_nand_cases": 3,
+    "max_request_duration_error_ns": 0.49169921875,
+    "max_request_duration_relative_error": 3.905252918366966e-10,
+    "scope_limit": "Measured optimization drift for these runs and listed memory fixtures, not a universal numerical error bound and not validation against real hardware."
+  },
+  "cuda_graph_independent": {
+    "status": "rejected_as_general_predictive_calibration",
+    "prediction_qualified": false,
+    "target_llm_latency_used": false,
+    "globaltimer_measurement_count": 3,
+    "typed_activity_measurement_count": 11,
+    "queue_model_repetitions": 21,
+    "low_cpu_replication_repetitions": 21
+  },
+  "physical_micro_evaluation": {
+    "title": "Physical memory simulation error micro-evaluation",
+    "date": "2026-10-11",
+    "purpose": "Measure software path equivalence and conservation invariants for representative DRAM/NAND paths.",
+    "scope_limit": "解析正确性仅表示当前快速路径与独立详细参考循环的一致性；不等同于硬件精度或真实芯片校准。",
+    "method": {
+      "dram_reference": "DramCore subclass disabling acceleration, plus serial numeric reference in precision_dram_reference.py.",
+      "nand_reference": "NandCore subclass executing the detailed page loop.",
+      "hardware_precision": "not measured; no silicon trace or vendor timing calibration is used here."
+    },
+    "software_equivalence": [
+      {
+        "case": "dram_shared_command_mixed_followup",
+        "memory_type": "dram",
+        "request_count": 4,
+        "max_completion_absolute_error_ns": 0.0,
+        "max_completion_relative_error": 0.0,
+        "max_duration_absolute_error_ns": 0.0,
+        "timeline_max_absolute_error": 0.0,
+        "core_state_max_absolute_error": 0.0,
+        "integer_counters_pass": true,
+        "discrete_state_pass": true,
+        "serial_numeric_vs_python_max_completion_absolute_error_ns": 0.0,
+        "serial_numeric_vs_python_integer_counters_pass": true
+      },
+      {
+        "case": "nand_shared_host_partial_rmw",
+        "memory_type": "nand",
+        "request_count": 3,
+        "max_completion_absolute_error_ns": 0.0,
+        "max_completion_relative_error": 0.0,
+        "max_duration_absolute_error_ns": 0.0,
+        "timeline_max_absolute_error": 0.0,
+        "core_state_max_absolute_error": 0.0,
+        "integer_counters_pass": true,
+        "discrete_state_pass": true,
+        "serial_numeric_vs_python_max_completion_absolute_error_ns": 0.0,
+        "serial_numeric_vs_python_integer_counters_pass": true
+      },
+      {
+        "case": "nand_100000_page_write_roundoff",
+        "memory_type": "nand",
+        "request_count": 2,
+        "max_completion_absolute_error_ns": 0.49169921875,
+        "max_completion_relative_error": 4.910809128266007e-13,
+        "max_duration_absolute_error_ns": 0.49169921875,
+        "timeline_max_absolute_error": 0.49169921875,
+        "core_state_max_absolute_error": 0.49169921875,
+        "integer_counters_pass": true,
+        "discrete_state_pass": true,
+        "serial_numeric_vs_python_max_completion_absolute_error_ns": 0.0,
+        "serial_numeric_vs_python_integer_counters_pass": true
+      }
+    ],
+    "conservation_and_queue": {
+      "resource_timeline": {
+        "passed": true,
+        "bytes_moved": 140,
+        "expected_bytes": 140,
+        "busy_ns": 14.0,
+        "expected_busy_ns": 14.0,
+        "direction_switch_start_ns": 13.0,
+        "first_end_ns": 10.0,
+        "switch_ns": 3.0
+      },
+      "dram_queue_and_bytes": {
+        "passed": true,
+        "first_queue_wait_ns": 0.0,
+        "second_queue_wait_ns": 6411.5,
+        "timeline_data_bytes": 640000,
+        "result_transfer_bytes": 640000
+      },
+      "nand_queue_and_bytes": {
+        "passed": true,
+        "first_queue_wait_ns": 0.0,
+        "second_queue_wait_ns": 67539.0,
+        "timeline_host_bytes": 640000,
+        "result_host_bytes": 640000,
+        "timeline_channel_bytes": 640000,
+        "result_internal_bytes": 640000
+      }
+    },
+    "finite_buffer_pipeline": {
+      "passed": true,
+      "chunk_count": 3,
+      "buffer_capacity_bytes": 128,
+      "max_inflight_chunks": 2,
+      "serialized_upper_bound_ns": 30.0,
+      "ideal_lower_bound_ns": 30.0,
+      "chunk0_task_count": 2,
+      "chunk2_credit_dependencies": [
+        [
+          "transfer_pipeline.chunk0000.stage01"
+        ]
+      ],
+      "resource_bytes": {
+        "link": 192
+      },
+      "expected_resource_bytes": {
+        "link": 192
+      },
+      "scope": "planner metadata/dependency conservation; no packet/flit hardware calibration"
+    },
+    "capacity_boundary": {
+      "passed": true,
+      "checks": [
+        {
+          "memory_type": "dram",
+          "capacity_bytes": 128,
+          "in_bounds_pass": true,
+          "overflow_rejected": true,
+          "error": "request extends beyond modeled DRAM capacity"
+        },
+        {
+          "memory_type": "nand",
+          "capacity_bytes": 128,
+          "in_bounds_pass": true,
+          "overflow_rejected": true,
+          "error": "request extends beyond modeled NAND capacity"
+        }
+      ]
+    },
+    "pass_summary": {
+      "software_equivalence_pass": true,
+      "conservation_and_queue_pass": true,
+      "finite_buffer_pipeline_pass": true,
+      "capacity_boundary_pass": true,
+      "all_checks_pass": true
+    },
+    "elapsed_seconds": 3.063
+  },
+  "assessment": {
+    "invariants_and_software_equivalence": "pass_for_listed_fixtures",
+    "native_latency_accuracy": "fail_initial_5_to_10_percent_budget",
+    "cuda_graph_benefit_accuracy": "fail",
+    "calibration_or_generalization": "not_established",
+    "reason": "Native E2E MAPE is 15.5965% across 20 pairs; TTFT MAPE is 23.9201%; Graph benefit is predicted near zero while native benefit is positive for every model."
+  },
+  "limitations": [
+    "Native timing was reused from 2026-10-08 and not remeasured in this evaluation.",
+    "Native evidence covers one machine, one 512/128 single-sequence workload, and 10 model presets.",
+    "Software-equivalence references are independent execution paths, but are not physical hardware truth.",
+    "The listed B200/HBF presets did not execute physical-memory acceleration in the 2026-10-07 matrix.",
+    "The CUDA Graph independent study explicitly rejects general predictive calibration."
+  ],
+  "next_actions": [
+    "Diagnose TTFT and decode bias separately before changing costs.",
+    "Fix or explicitly model CUDA Graph benefit before claiming graph-mode accuracy.",
+    "Add a holdout workload with batch/context variation and repeat native timing after model changes."
+  ]
+}
