@@ -24,10 +24,11 @@ SOURCE = ROOT / "tools" / "cuda_dispatch_queue_microbench.cu"
 
 def create_plan():
     cases = []
-    def add(name, split, body, nodes=128, payload=0, blocks=1, threads=32, observe=True):
+    def add(name, split, body, nodes=128, payload=0, blocks=1, threads=32, observe=True, check_errors=True):
         bodies = body if isinstance(body, list) else [body] * nodes
         cases.append({"case_id": name, "split": split, "node_count": nodes, "extra_parameter_bytes": payload,
-                      "blocks": blocks, "threads": threads, "observe_host": observe, "requested_bodies_ns": bodies})
+                      "blocks": blocks, "threads": threads, "observe_host": observe,
+                      "check_errors": check_errors, "requested_bodies_ns": bodies})
     for body in (0, 125, 250, 375, 625, 750, 875, 1000, 1125, 1250, 1750, 2000, 4000, 5000):
         add(f"threshold_train_{body}", "train_threshold", body)
     for payload in (64, 256):
@@ -38,13 +39,21 @@ def create_plan():
     for nodes in (33, 255):
         add(f"nodes_holdout_{nodes}", "holdout_nodes", 750, nodes=nodes)
     add("geometry_holdout", "holdout_geometry", 750, blocks=32, threads=128)
-    for body in (0, 1000):
-        add(f"payload_holdout_1024_{body}", "holdout_payload", body, payload=1024)
+    # Keep the historical 1024-byte diagnostic and add the independent P2
+    # payload holdouts explicitly.  The CUDA probe has a compile-time payload
+    # type for each supported footprint; never round these to a nearby train
+    # value.
+    for payload in (160, 544, 1024):
+        for body in (0, 1000):
+            add(f"payload_holdout_{payload}_{body}", "holdout_payload", body, payload=payload)
     add("mixed_alternating_holdout", "holdout_mixed_body", [250, 7000] * 64)
     randomizer = random.Random(0xC0DE)
     add("mixed_shuffled_holdout", "holdout_mixed_body", [randomizer.choice((125, 375, 625, 1125, 1750, 4000)) for _ in range(128)])
-    add("observer_off_payload_0", "observer_control", 0, observe=False)
-    add("observer_off_payload_256", "observer_control", 0, payload=256, observe=False)
+    # The observer-off controls must also disable the per-enqueue CUDA error
+    # query.  Otherwise the control still measures the observer's API-query
+    # overhead and cannot serve as a low-perturbation comparison.
+    add("observer_off_payload_0", "observer_control", 0, observe=False, check_errors=False)
+    add("observer_off_payload_256", "observer_control", 0, payload=256, observe=False, check_errors=False)
     order = list(range(len(cases)))
     random.Random(8173).shuffle(order)
     return {"schema": "heterollm.cuda-queue-probe-plan/v1", "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -64,8 +73,29 @@ def summarize(raw, case):
     for key in ("node_count", "blocks", "threads", "extra_parameter_bytes", "requested_bodies_ns"):
         if raw.get(key) != case[key]:
             raise ValueError(f"queue probe differs from declared plan: {key}")
-    if raw.get("host_observation") != case["observe_host"] or raw.get("cuda_parameter_extent_bytes") != 32 + case["extra_parameter_bytes"]:
+    raw_mode = raw.get("host_timing_mode")
+    # host_timing_mode was added after the initial probe schema.  Infer the
+    # legacy mode when reading old evidence, while requiring new evidence to
+    # declare one of the three supported host timing boundaries.
+    if raw_mode is None:
+        raw_mode = "per_node" if raw.get("host_observation") else "none"
+    if raw_mode not in ("none", "total", "per_node"):
+        raise ValueError("unknown CPU host timing mode")
+    expected_mode = case.get("host_timing_mode")
+    if expected_mode is None:
+        # Legacy plans only declared whether host timing was observed.  A
+        # total-timing sample is still a valid observed host boundary for such
+        # a plan; none remains the only valid mode for an observer-off case.
+        if case["observe_host"] and raw_mode == "total":
+            expected_mode = "total"
+        else:
+            expected_mode = "per_node" if case["observe_host"] else "none"
+    if expected_mode not in ("none", "total", "per_node") or raw_mode != expected_mode:
+        raise ValueError("CPU host timing mode differs from plan")
+    if raw.get("host_observation") != (raw_mode != "none") or raw.get("cuda_parameter_extent_bytes") != 32 + case["extra_parameter_bytes"]:
         raise ValueError("CPU observer or actual CUDA parameter extent differs from plan")
+    if "check_errors" in case and raw.get("error_checking") != case["check_errors"]:
+        raise ValueError("per-enqueue error checking differs from plan")
     values, gaps, bodies, host_durations = [], [], [], []
     count = raw["node_count"]
     for sample in raw.get("samples", []):
@@ -74,17 +104,35 @@ def summarize(raw, case):
         bodies.extend(end - begin for begin, end in zip(sample["node_begin_ns"], sample["node_end_ns"]))
         _nonnegative(sample.get("device_event_ns"), "queue event duration")
         begin, end = sample.get("host_enqueue_begin_ns"), sample.get("host_enqueue_end_ns")
-        if not case["observe_host"]:
-            if begin != [] or end != [] or sample.get("host_release_ns") != 0:
+        release = sample.get("host_release_ns")
+        if raw_mode == "none":
+            if begin != [] or end != [] or release != 0:
                 raise ValueError("unobserved queue control contains fabricated host timing")
+            continue
+        if raw_mode == "total":
+            # Aggregate timing intentionally omits per-node host timestamps;
+            # validate only the aggregate interval and its release fence.
+            if begin not in (None, []) or end not in (None, []):
+                raise ValueError("total CPU timing must not contain per-node timestamps")
+            total_begin = sample.get("host_total_begin_ns")
+            total_end = sample.get("host_total_end_ns")
+            if total_begin is None or total_end is None or release is None:
+                raise ValueError("total CPU timing is incomplete")
+            for value in (total_begin, total_end, release):
+                _nonnegative(value, "CPU queue timestamp")
+            if total_end < total_begin or release < total_end:
+                raise ValueError("total CPU timing is inverted or released too early")
+            host_durations.append(total_end - total_begin)
             continue
         if not isinstance(begin, list) or not isinstance(end, list) or len(begin) != count or len(end) != count:
             raise ValueError("CPU enqueue timing directory is incomplete")
-        for value in [*begin, *end, sample.get("host_release_ns")]:
+        if release is None:
+            raise ValueError("CPU enqueue release timestamp is missing")
+        for value in [*begin, *end, release]:
             _nonnegative(value, "CPU queue timestamp")
         if begin[0] != 0 or any(right < left for left, right in zip(begin, end)) or any(begin[i] < end[i - 1] for i in range(1, count)):
             raise ValueError("CPU API timing is inverted or overlaps serialized enqueue")
-        if sample["host_release_ns"] < end[-1]:
+        if release < end[-1]:
             raise ValueError("GPU gate released before every CPU submission returned")
         host_durations.append(end[-1])
     if len(values) < 3:
@@ -162,7 +210,9 @@ def main():
             command = [str(executable), "--nodes", str(case["node_count"]), "--blocks", str(case["blocks"]),
                        "--threads", str(case["threads"]), "--payload-bytes", str(case["extra_parameter_bytes"]),
                        "--bodies-ns", ",".join(map(str, case["requested_bodies_ns"])),
-                       "--observe-host", str(int(case["observe_host"])), "--repetitions", str(plan["repetitions"])]
+                       "--observe-host", str(int(case["observe_host"])),
+                       "--check-errors", str(int(case.get("check_errors", True))),
+                       "--repetitions", str(plan["repetitions"])]
             result, environment = execute_observed(command)
             if result.returncode:
                 raise RuntimeError(f"queue probe {case['case_id']} failed: {result.stderr}")

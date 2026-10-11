@@ -7,6 +7,7 @@ no proportional split of a physical kernel/DRAM body is made.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 import re
 
 
@@ -227,3 +228,59 @@ def match_cuda_dispatch_tasks(tasks, source_dispatches):
                   "node_count": group["node_count"], "node_ids": group["node_ids"],
                   "launch_task_ids": tuple(matched[index])}
                  for index, group in enumerate(source_dispatches))
+
+
+def annotate_cuda_dispatch_tasks(tasks, source_dispatches):
+    """Attach capture-only source ownership to the modeled launch tasks.
+
+    The annotation is structural evidence. It records that a modeled task and
+    a source dispatch share an ownership group, including many-to-one and
+    one-to-many fusion. It never changes service, bytes, energy, work or DAG
+    dependencies, so it cannot be mistaken for a timing or physical-ledger
+    calibration.
+    """
+    mapping = match_cuda_dispatch_tasks(tasks, source_dispatches)
+    task_bindings = {}
+    for index, (group, row) in enumerate(zip(source_dispatches, mapping)):
+        task_ids = tuple(row["launch_task_ids"])
+        source_count = len(group.get("source_nodes", ()))
+        node_count = row["node_count"]
+        if source_count == 1 and node_count == 1:
+            relationship = "one_to_one"
+        elif source_count > 1 and node_count == 1:
+            relationship = "many_source_ops_to_one_cuda_node"
+        elif source_count == 1 and node_count > 1:
+            relationship = "one_source_op_to_many_cuda_nodes"
+        else:
+            relationship = "many_source_ops_to_many_cuda_nodes"
+        binding = {
+            "schema": "heterollm.cuda-source-dispatch-binding/v1",
+            "dispatch_index": row["dispatch_index"],
+            "dispatch_sequence": index,
+            "first_node_ordinal": row["first_node_ordinal"],
+            "node_count": node_count,
+            "node_ids": tuple(row["node_ids"]),
+            "source_ggml_range": tuple(
+                value for value in (group.get("first_ggml_index"), group.get("last_ggml_index"))
+                if value is not None
+            ),
+            "source_operation_count": source_count,
+            "modeled_task_ids": task_ids,
+            "relationship": relationship,
+            "evidence_kind": "capture_only_source_ownership",
+            "timing_qualified": False,
+            "physical_ledger_qualified": False,
+        }
+        for task_id in task_ids:
+            task_bindings[task_id] = binding
+    result = []
+    for task in tasks:
+        binding = task_bindings.get(task.task_id)
+        if binding is None:
+            result.append(task)
+            continue
+        result.append(replace(task, metadata={
+            **task.metadata,
+            "cuda_source_dispatch": binding,
+        }))
+    return tuple(result)

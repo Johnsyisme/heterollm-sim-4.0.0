@@ -7,6 +7,7 @@ import pytest
 from heterollm_sim.contracts import ResourceDemand, TaskCategory, TaskSpec
 from heterollm_sim.cuda_graph_costs import apply_cuda_graph_runtime_costs
 from heterollm_sim.cuda_graph_lifecycle import CudaGraphInvocation, CudaGraphRuntime, bind_cuda_graph_tasks
+from heterollm_sim.kernel_model import KernelModelProfile, apply_captured_graph_launch
 from heterollm_sim.runtime_residual import RuntimeStructureMeasurements, PHASES, DEVICE_PHASES
 
 
@@ -53,6 +54,38 @@ def bound_tasks(captured):
             'cuda_graph_node_count': 2, 'cuda_graph_topology': 'chain'}), *tasks[1:])
 
 
+def test_scalar_graph_repricing_preserves_physical_launch_ledger():
+    profile = KernelModelProfile(
+        hardware_id='gpu', runtime_id='cuda', architecture='sm_120',
+        graph_enabled=True, graph_launch_ns=5.0, launch_evidence='independent-test')
+    tasks = tuple(TaskSpec(
+        task_id=ident, request_id='request', name=ident, category=TaskCategory.COMPUTE,
+        dependencies=(), demands=(ResourceDemand('gpu.frontend', 3.0,
+            bytes_moved=bytes_moved, energy_pj=energy, work_units=work),),
+        metadata={'phase': 'kernel_launch', 'cuda_graph_captured': True, 'cuda_graph_id': 'g'})
+        for ident, bytes_moved, energy, work in (
+            ('launch1', 32, 1.5, 2.0), ('launch2', 64, 2.5, 3.0)))
+    result = apply_captured_graph_launch(tasks, profile)
+    assert result[0].demands == (ResourceDemand('gpu.frontend', 5.0,
+        bytes_moved=96, energy_pj=4.0, work_units=5.0),)
+    assert result[1].demands == (ResourceDemand('gpu.frontend', 0.0),)
+    assert result[0].metadata['graph_launch']['physical_ledger_preserved'] is True
+
+
+def test_scalar_graph_repricing_accepts_explicit_device_replay_profile():
+    profile = KernelModelProfile(
+        hardware_id='gpu', runtime_id='cuda', architecture='sm_120',
+        graph_enabled=True, graph_device_launch_ns=5.0,
+        graph_device_launch_evidence='independent-device-test')
+    task = TaskSpec('launch', 'request', 'launch', TaskCategory.COMPUTE, (),
+        (ResourceDemand('gpu.frontend', 3.0),),
+        metadata={'phase': 'kernel_launch', 'cuda_graph_captured': True, 'cuda_graph_id': 'g'})
+    result = apply_captured_graph_launch((task,), profile)
+    assert result[0].demands[0].service_ns == 5.0
+    assert result[0].metadata['graph_launch']['evidence'] == 'independent-device-test'
+    assert result[0].metadata['graph_launch']['prediction_qualified'] is False
+
+
 @pytest.mark.parametrize('captured', [False, True])
 def test_independent_host_costs_preserve_all_device_work(captured):
     before = bound_tasks(captured)
@@ -74,6 +107,61 @@ def test_independent_host_costs_preserve_all_device_work(captured):
     else:
         assert hosts[-1].task_id in after['launch1'].dependencies
         assert hosts[-1].task_id in after['launch2'].dependencies
+
+
+def test_explicit_device_replay_profile_changes_only_frontend_and_keeps_host_gate():
+    before = bound_tasks(True)
+    launches = {task.task_id for task in before if task.metadata.get('phase') == 'kernel_launch'}
+    priced = tuple(replace(task, demands=(replace(task.demands[0],
+        bytes_moved=16 if task.task_id == 'launch1' else 32,
+        energy_pj=1.0 if task.task_id == 'launch1' else 2.0,
+        work_units=2.0 if task.task_id == 'launch1' else 4.0),))
+        if task.task_id in launches else task for task in before)
+    profile = SimpleNamespace(
+        runtime_calibration=experimental_measurements(),
+        runtime_host_resource_id='cpu0.cuda_submission', graph_enabled=True,
+        runtime_measurement_mode='experimental_exact_structure',
+        graph_device_launch_ns=7.0,
+        graph_device_launch_evidence='independent-device-test',
+        graph_device_launch_qualified=False)
+    result = apply_cuda_graph_runtime_costs(priced, profile)
+    after = {task.task_id: task for task in result}
+    assert after['launch1'].demands[0].service_ns == 7.0
+    assert after['launch2'].demands[0].service_ns == 0.0
+    assert sum(d.bytes_moved for task in result for d in task.demands) == sum(
+        d.bytes_moved for task in priced for d in task.demands)
+    assert sum(d.energy_pj for task in result for d in task.demands) == pytest.approx(sum(
+        d.energy_pj for task in priced for d in task.demands))
+    assert sum(d.work_units for task in result for d in task.demands) == pytest.approx(sum(
+        d.work_units for task in priced for d in task.demands))
+    hosts = [task for task in result if '.cuda_host.' in task.task_id]
+    assert hosts[-1].task_id in after['launch1'].dependencies
+    assert hosts[-1].task_id in after['launch2'].dependencies
+    audit = hosts[0].metadata['cuda_runtime_cost']['device_dispatch']
+    assert audit['applied'] is True
+    assert audit['prediction_qualified'] is False
+    # The top-level runtime prediction includes the explicitly configured
+    # device replay envelope, so an unqualified envelope must not be reported
+    # as a qualified overall prediction.
+    assert hosts[0].metadata['cuda_runtime_cost']['prediction_qualified'] is False
+
+
+def test_ordinary_invocation_does_not_claim_explicit_graph_device_cost_source():
+    before = bound_tasks(False)
+    profile = SimpleNamespace(
+        runtime_calibration=IndependentCosts(),
+        runtime_host_resource_id='cpu0.cuda_submission', graph_enabled=False,
+        graph_device_launch_ns=7.0,
+        graph_device_launch_evidence='independent-device-test',
+        graph_device_launch_qualified=True)
+    result = apply_cuda_graph_runtime_costs(before, profile)
+    hosts = [task for task in result if '.cuda_host.' in task.task_id]
+    audit = hosts[0].metadata['cuda_runtime_cost']
+    assert audit['device_dispatch_cost_source'] == 'existing_device_profile'
+    assert audit['device_dispatch']['cost_source'] == 'existing_device_profile'
+    assert audit['device_dispatch']['applied'] is False
+    assert {task.task_id: task.demands for task in result if task.task_id in {'launch1', 'launch2'}} == {
+        task.task_id: task.demands for task in before if task.task_id in {'launch1', 'launch2'}}
 
 
 def test_graph_mode_mismatch_and_unbound_launch_fail_closed():

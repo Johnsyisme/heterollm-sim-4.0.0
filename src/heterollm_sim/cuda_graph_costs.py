@@ -4,10 +4,104 @@ Host API timings never replace GPU kernel or DRAM service. Ordinary async
 submissions are chained to one another, not to the preceding GPU kernel.
 """
 from dataclasses import replace
+import math
 from typing import Mapping
 
 from .contracts import ResourceDemand, TaskCategory, TaskSpec
 from .runtime_residual import PHASES, OPTIONAL_PHASES
+
+
+def _graph_device_dispatch_config(profile):
+    """Read the optional, explicitly owned device replay envelope.
+
+    Host lifecycle measurements and device dispatch measurements have different
+    owners.  Keep the device value opt-in and fail closed for ad-hoc profile
+    objects as well as for the validated ``KernelModelProfile`` dataclass.
+    """
+    value = getattr(profile, 'graph_device_launch_ns', None)
+    evidence = getattr(profile, 'graph_device_launch_evidence', None)
+    qualified = getattr(profile, 'graph_device_launch_qualified', False)
+    if type(qualified) is not bool:
+        raise ValueError('graph device launch qualification must be boolean')
+    if value is None:
+        if evidence is not None or qualified:
+            raise ValueError('graph device launch evidence requires graph_device_launch_ns')
+        return None, None, False
+    if getattr(profile, 'graph_launch_ns', None) is not None:
+        raise ValueError('graph_launch_ns and graph_device_launch_ns have different cost owners')
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(float(value)) or value < 0):
+        raise ValueError('graph_device_launch_ns must be a finite nonnegative number')
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError('graph device launch calibration requires evidence')
+    return float(value), evidence, qualified
+
+
+def _apply_graph_device_dispatch(launches, profile, *, captured):
+    """Apply an explicitly calibrated device replay envelope.
+
+    The returned replacements only change frontend service time.  Bytes,
+    energy and useful work from all member launch tasks are aggregated onto the
+    charged replay owner so graph repricing cannot silently lose physical
+    accounting.  With no explicit profile this is a no-op and the ordinary
+    per-kernel device model remains authoritative.
+    """
+    configured, evidence, qualified = _graph_device_dispatch_config(profile)
+    audit = {
+        'schema': 'cuda-graph-device-dispatch/v1',
+        'captured': captured,
+        'launch_task_count': len(launches),
+        # Keep the ordinary path constant-time.  The aggregate is only
+        # needed when an explicit device replay envelope is actually applied.
+        'original_device_service_ns': None,
+        'configured_graph_device_launch_ns': configured,
+        # An explicit replay envelope is only authoritative when it is
+        # actually applied to a captured graph.  Ordinary submissions retain
+        # the existing per-kernel device profile even if a graph envelope is
+        # present on the profile object.
+        'cost_source': ('explicit_graph_device_launch_ns'
+                        if captured and configured is not None
+                        else 'existing_device_profile'),
+        'evidence': evidence,
+        'prediction_qualified': bool(configured is not None and qualified),
+        'applied': False,
+    }
+    if not captured or configured is None:
+        return {}, audit
+    if not launches:
+        raise ValueError('captured CUDA Graph has no device launch tasks')
+    audit['original_device_service_ns'] = sum(
+        d.service_ns for task in launches for d in task.demands)
+    resources = {d.resource_id for task in launches for d in task.demands}
+    if len(resources) != 1 or any(len(task.demands) != 1 for task in launches):
+        raise ValueError('graph device dispatch calibration requires one frontend demand per launch')
+    first = launches[0]
+    total = {
+        'bytes_moved': sum(d.bytes_moved for task in launches for d in task.demands),
+        'energy_pj': sum(d.energy_pj for task in launches for d in task.demands),
+        'work_units': sum(d.work_units for task in launches for d in task.demands),
+    }
+    charged = replace(first.demands[0], service_ns=configured, **total)
+    replacements = {
+        first.task_id: replace(first, demands=(charged,), metadata={
+            **first.metadata,
+            'cuda_graph_device_dispatch': {**audit, 'applied': True,
+                'charged_device_service_ns': configured,
+                'cost_owner': first.task_id},
+        })}
+    for task in launches[1:]:
+        replacements[task.task_id] = replace(task, demands=tuple(
+            replace(demand, service_ns=0.0, bytes_moved=0,
+                   energy_pj=0.0, work_units=0.0)
+            for demand in task.demands), metadata={
+                **task.metadata,
+                'cuda_graph_device_dispatch': {**audit, 'applied': True,
+                    'charged_device_service_ns': configured,
+                    'cost_owner': first.task_id},
+            })
+    audit.update(applied=True, charged_device_service_ns=configured,
+                 cost_owner=first.task_id)
+    return replacements, audit
 
 
 def replace_measured_driver_submission_costs(tasks, profiles, submission_resource_id):
@@ -272,6 +366,19 @@ def apply_cuda_graph_runtime_costs(tasks, profile):
                 replacements[task.task_id] = replace(task,
                     dependencies=tuple(dict.fromkeys((*task.dependencies, last))),
                     metadata={**task.metadata, 'cuda_runtime_cost': compact_audit})
+            # Host lifecycle pricing does not imply a device replay saving.
+            # Apply one only when a separate device envelope is explicitly
+            # supplied; otherwise preserve every analytical per-kernel launch.
+            # The normal host-only profile has no device replay envelope.  Do
+            # not build a second launch tuple in that hot path; the helper
+            # still validates the profile and returns an O(1) no-op audit.
+            device_launch_ns = getattr(profile, 'graph_device_launch_ns', None)
+            dispatch_inputs = (
+                tuple(replacements.get(launch.task_id, launch) for launch in launches)
+                if device_launch_ns is not None else launches)
+            device_replacements, device_dispatch_audit = _apply_graph_device_dispatch(
+                dispatch_inputs, profile, captured=True)
+            replacements.update(device_replacements)
         else:
             per_call = costs['ordinary_submit'] / len(launches)
             deps = base
@@ -281,6 +388,21 @@ def apply_cuda_graph_runtime_costs(tasks, profile):
                 replacements[launch.task_id] = replace(launch,
                     dependencies=tuple(dict.fromkeys((*launch.dependencies, last))),
                     metadata={**launch.metadata, 'cuda_runtime_cost': compact_audit})
+            _unused_replacements, device_dispatch_audit = _apply_graph_device_dispatch(
+                launches, profile, captured=False)
+        # Host calibration alone cannot qualify a captured invocation when an
+        # explicitly configured device replay envelope is also part of the
+        # prediction.  Keep the existing host-only qualification unchanged
+        # when no envelope is configured, because the ordinary per-kernel
+        # device profile remains authoritative in that case.
+        if (captured
+                and device_dispatch_audit['configured_graph_device_launch_ns'] is not None):
+            audit['prediction_qualified'] = bool(
+                audit['prediction_qualified']
+                and device_dispatch_audit['prediction_qualified'])
+        compact_audit['prediction_qualified'] = audit['prediction_qualified']
+        audit['device_dispatch'] = device_dispatch_audit
+        audit['device_dispatch_cost_source'] = device_dispatch_audit['cost_source']
         preceding[resource] = last
         if structure_id is not None:
             revised_owner = replacements[owner.task_id]

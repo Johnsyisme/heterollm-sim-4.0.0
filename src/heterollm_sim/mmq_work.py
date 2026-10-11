@@ -19,6 +19,10 @@ MMVQ_MAX_BATCH_SIZE = {
     "Q6_K": 7,
 }
 
+# Source identity for the MMQ contract emitted by the pinned runtime tree.
+# This is separate from measured kernel timing and only gates structure use.
+MMQ_SOURCE_REVISION = "d3146f2b56c2db4711ac8391871c9e529d1946d7"
+
 _DS4_FORMATS = frozenset(("Q4_K", "Q5_K"))
 _QK_32_FORMATS = frozenset(("Q5_0", "Q8_0"))
 # Packed block sizes from ggml-common.h, not nominal bits per weight.
@@ -191,7 +195,7 @@ class MMQWork:
         fixup_signature = mmq_stage_dispatch_signature("stream_k_fixup", self)
         return {
             "model": "fixed_source_mmq_work/v1",
-            "backend_commit": "0f3a71be15af836d277c9f918adfafb45732677e",
+            "backend_commit": MMQ_SOURCE_REVISION,
             "m": self.m,
             "k": self.k,
             "n": self.n,

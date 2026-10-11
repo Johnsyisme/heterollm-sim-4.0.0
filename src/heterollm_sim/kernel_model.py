@@ -257,6 +257,14 @@ class KernelModelProfile:
     calibration_runtime_sha256: str | None = None
     hardware_limits_evidence: str | None = None
     unverified_parameters: tuple[str, ...] = ()
+    # Optional device-side envelope for one captured graph replay.  Keep these
+    # fields at the end so existing positional profile construction retains its
+    # historical argument order.  This value is deliberately separate from
+    # ``graph_launch_ns``: it is never inferred from the ordinary per-kernel
+    # analytical launch default.
+    graph_device_launch_ns: float | None = None
+    graph_device_launch_evidence: str | None = None
+    graph_device_launch_qualified: bool = False
 
     def __post_init__(self):
         for key in ('hardware_id', 'runtime_id', 'architecture'):
@@ -264,14 +272,30 @@ class KernelModelProfile:
                 raise ValueError(f'{key} is required')
         for key in ('registers_per_sm', 'shared_memory_per_sm', 'max_threads_per_sm', 'max_warps_per_sm', 'max_ctas_per_sm', 'warp_size'):
             _integer(getattr(self, key), key)
-        for key in ('launch_ns', 'graph_launch_ns', 'runtime_submission_ns'):
+        for key in ('launch_ns', 'graph_launch_ns', 'runtime_submission_ns', 'graph_device_launch_ns'):
             if getattr(self, key) is not None:
                 _number(getattr(self, key), key, zero=True)
                 if key == 'runtime_submission_ns':
                     if not self.runtime_submission_evidence:
                         raise ValueError('runtime submission calibration requires evidence')
+                elif key == 'graph_device_launch_ns':
+                    if (not isinstance(self.graph_device_launch_evidence, str)
+                            or not self.graph_device_launch_evidence.strip()):
+                        raise ValueError('graph device launch calibration requires evidence')
                 elif not self.launch_evidence:
                     raise ValueError('launch calibration requires evidence')
+        if (self.graph_device_launch_evidence is not None
+                and (not isinstance(self.graph_device_launch_evidence, str)
+                     or not self.graph_device_launch_evidence.strip())):
+            raise ValueError('graph device launch evidence must be nonempty text')
+        if self.graph_device_launch_evidence is not None and self.graph_device_launch_ns is None:
+            raise ValueError('graph device launch evidence requires graph_device_launch_ns')
+        if type(self.graph_device_launch_qualified) is not bool:
+            raise ValueError('graph_device_launch_qualified must be boolean')
+        if self.graph_device_launch_qualified and self.graph_device_launch_ns is None:
+            raise ValueError('qualified graph device launch calibration requires graph_device_launch_ns')
+        if self.graph_launch_ns is not None and self.graph_device_launch_ns is not None:
+            raise ValueError('graph_launch_ns and graph_device_launch_ns have different cost owners and cannot be combined')
         if not isinstance(self.unverified_parameters, tuple) or any(not isinstance(x, str) or not x for x in self.unverified_parameters):
             raise ValueError('unverified_parameters must be a tuple of nonempty names')
         if self.hardware_limits_evidence is not None and (not isinstance(self.hardware_limits_evidence, str) or not self.hardware_limits_evidence.strip()):
@@ -971,26 +995,58 @@ def graph_launch_phases(profile, frontend_resource, kernel_count, *, captured):
     # runtime residual record can still provide the ordinary host submission
     # rate when no device enqueue value was supplied; graph replay always uses
     # its own measured replay rate.
-    rate = profile.graph_launch_ns if captured else (
-        profile.launch_ns if profile.launch_ns is not None else profile.runtime_submission_ns
-    )
+    legacy_graph_rate = getattr(profile, 'graph_launch_ns', None)
+    device_graph_rate = getattr(profile, 'graph_device_launch_ns', None)
+    if (captured and legacy_graph_rate is not None
+            and device_graph_rate is not None):
+        raise ValueError('graph_launch_ns and graph_device_launch_ns have different cost owners')
+    if captured:
+        # ``graph_launch_ns`` is the legacy scalar replay owner.  A profile
+        # that only declares the new explicit device envelope can also use the
+        # scalar lowering path; it has no host lifecycle record to price.
+        rate = (legacy_graph_rate if legacy_graph_rate is not None
+                else device_graph_rate)
+        replay_evidence = (getattr(profile, 'launch_evidence', None)
+                           if legacy_graph_rate is not None
+                           else getattr(profile, 'graph_device_launch_evidence', None))
+    else:
+        launch_rate = getattr(profile, 'launch_ns', None)
+        runtime_submission_rate = getattr(profile, 'runtime_submission_ns', None)
+        rate = launch_rate if launch_rate is not None else runtime_submission_rate
+        replay_evidence = getattr(profile, 'launch_evidence', None)
     if rate is None:
         raise ValueError('selected runtime submission mode has no calibrated launch cost')
+    if captured and legacy_graph_rate is None and not replay_evidence:
+        raise ValueError('graph device launch calibration requires evidence')
+    launch_rate = getattr(profile, 'launch_ns', None)
+    runtime_submission_rate = getattr(profile, 'runtime_submission_ns', None)
     ordinary_rate = (
-        (profile.launch_ns if profile.launch_ns is not None else 0.0)
-        + (profile.runtime_submission_ns or 0.0)
+        (launch_rate if launch_rate is not None else 0.0)
+        + (runtime_submission_rate or 0.0)
     )
+    device_prediction_qualified = (
+        bool(getattr(profile, 'graph_device_launch_qualified', False))
+        if captured and legacy_graph_rate is None and device_graph_rate is not None
+        else None)
     return CostPhase('cuda_graph_replay' if captured else 'kernel_launch', TaskCategory.COMPUTE,
                      (ResourceDemand(frontend_resource, rate if captured else kernel_count * ordinary_rate),),
-                     {'kernel_count': kernel_count, 'submission_count': 1 if captured else kernel_count,
-                      'runtime_id': profile.runtime_id, 'evidence': profile.launch_evidence,
+                      {'kernel_count': kernel_count, 'submission_count': 1 if captured else kernel_count,
+                      'runtime_id': getattr(profile, 'runtime_id', None), 'evidence': replay_evidence,
                       'captured': captured,
+                      **({'prediction_qualified': device_prediction_qualified}
+                         if device_prediction_qualified is not None else {}),
                       'runtime_residual': {
-                          'ordinary_device_launch_ns': profile.launch_ns,
-                          'runtime_submission_ns': profile.runtime_submission_ns or 0.0,
-                          'graph_replay_ns': profile.graph_launch_ns if captured else None,
+                          'ordinary_device_launch_ns': launch_rate,
+                          'runtime_submission_ns': runtime_submission_rate or 0.0,
+                          'graph_replay_ns': rate if captured else None,
+                          'graph_device_launch_ns': (device_graph_rate
+                                                     if captured and legacy_graph_rate is None
+                                                     else None),
+                          **({'prediction_qualified': device_prediction_qualified}
+                             if device_prediction_qualified is not None else {}),
                           'fusion_launches_elided': max(0, kernel_count - 1) if captured else 0,
-                          'runtime_submission_evidence': profile.runtime_submission_evidence,
+                          'runtime_submission_evidence': getattr(
+                              profile, 'runtime_submission_evidence', None),
                       }})
 
 
@@ -1021,11 +1077,27 @@ def apply_captured_graph_launch(tasks, profile):
         if len({tuple(d.resource_id for d in t.demands) for t in members}) != 1 or len(first.demands) != 1:
             raise ValueError('a graph replay must use one device frontend resource')
         launch = graph_launch_phases(profile, first.demands[0].resource_id, len(members), captured=True)
+        # Graph replay elides service time for the per-kernel frontend tasks,
+        # but it does not erase the physical ledger attached to those tasks.
+        # Aggregate bytes, energy and useful work onto the single charged
+        # replay task before clearing the duplicate service demands.
+        ledger = {
+            'bytes_moved': sum(d.bytes_moved for task in members for d in task.demands),
+            'energy_pj': sum(d.energy_pj for task in members for d in task.demands),
+            'work_units': sum(d.work_units for task in members for d in task.demands),
+            'service_ns': sum(d.service_ns for task in members for d in task.demands),
+        }
+        charged_demand = replace(launch.demands[0], **{
+            key: ledger[key] for key in ('bytes_moved', 'energy_pj', 'work_units')})
         for ordinal, index in enumerate(indices):
             task = tasks[index]
             metadata = {**task.metadata, 'graph_launch': {**launch.metadata, 'graph_id': group,
-                         'cost_owner': first.task_id, 'charged': ordinal == 0}}
-            demands = launch.demands if ordinal == 0 else tuple(replace(d,service_ns=0.0,energy_pj=0.0) for d in task.demands)
+                         'cost_owner': first.task_id, 'charged': ordinal == 0,
+                         'physical_ledger_preserved': True,
+                         'original_device_service_ns': ledger['service_ns']}}
+            demands = (charged_demand,) if ordinal == 0 else tuple(
+                replace(d, service_ns=0.0, bytes_moved=0, energy_pj=0.0, work_units=0.0)
+                for d in task.demands)
             dependencies = task.dependencies if ordinal == 0 else tuple(dict.fromkeys((*task.dependencies, first.task_id)))
             result[index] = replace(task, demands=demands, dependencies=dependencies, metadata=metadata)
     return tuple(result)

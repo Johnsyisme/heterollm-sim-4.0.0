@@ -1,0 +1,258 @@
+{
+  "schema": "heterollm.cuda-graph-measurement-plan/v1",
+  "created_utc": "2026-10-10T00:00:00Z",
+  "status": "p0_pilot_complete_not_qualified",
+  "latest_pilot": {
+    "hardware_id": "NVIDIA GeForce RTX 5080",
+    "architecture": "sm_120",
+    "driver_api_version": "13040",
+    "cuda_runtime_version": "12080",
+    "queue_case": "16 nodes, 1 block, 32 threads, zero body, five repetitions per process",
+    "raw_output_directory": "F:/codex_project/_scratch/37-graph-measurement-p0",
+    "balanced_blocks": 8,
+    "observer_control": "host timing plus per-enqueue error queries disabled for both arms",
+    "paired_device_span_fraction_total_vs_none": {
+      "ABBA": 0.0305,
+      "BAAB": 0.0102
+    },
+    "qualification_result": "not_qualified",
+    "reason": "The two orderings disagree and the ABBA estimate exceeds the 2% perturbation budget; current desktop/GPU load is not a quiet baseline.",
+    "production_parameter_written": false,
+    "diagnostic_findings": [
+      "In a reduced five-configuration launch-gap diagnostic, replay uncovered gaps were materially below ordinary gaps but varied with geometry, body, and dependency mode.",
+      "This supports separate mode and geometry features; it does not justify one global graph scalar."
+    ]
+  },
+  "objective": "Separate host submission, driver/device dispatch, graph replay, and physical kernel/memory work, then test a cheap graph-on/off residual model on independent holdouts.",
+  "completion_conditions": [
+    "Every enabled parameter has a named hardware/runtime scope and an independent holdout result.",
+    "No holdout prediction uses that sample's measured kernel duration or LLM latency as an input.",
+    "The simulator's default path meets the runtime budget and preserves physical work, bytes, energy, and dependencies.",
+    "A graph scalar is marked qualified only after all measurement and performance gates pass; otherwise it remains diagnostic sensitivity data."
+  ],
+  "non_goals": [
+    "No universal CUDA Graph constant is inferred from one RTX 5080/Windows observation.",
+    "No empirical observer penalty is subtracted from a timed result.",
+    "No full Cartesian product of node counts, geometries, payloads, bodies, and graph modes is required.",
+    "No native LLM latency is used to fit a synthetic dispatch parameter."
+  ],
+  "guardrails": {
+    "simulation_runtime": {
+      "default_median_overhead_fraction_max": 0.10,
+      "enabled_median_overhead_fraction_max": 0.10,
+      "tail_overhead_fraction_max": 0.10,
+      "peak_memory_increase_max": "max(64 MiB, 10%)",
+      "per_event_work": "O(1)",
+      "new_event_budget": "at most one compact packet update per batch, plus at most two milestone updates per PDL edge",
+      "scope_note": "These relaxed limits apply only to simulator runtime and memory overhead. Measurement perturbation and predictive accuracy gates remain unchanged."
+    },
+    "measurement": {
+      "warmups": 2,
+      "pilot_repetitions": 5,
+      "qualification_repetitions": 11,
+      "end_to_end_repetitions": 5,
+      "run_order": "balanced ABBA/BAAB within each block; randomize block order with a recorded seed",
+      "quietness": "record CPU/GPU load and clocks outside the timed region; do not claim a quiet baseline from one nvidia-smi snapshot",
+      "clock_rule": "do not subtract CPU and GPU timestamps without a validated clock bridge"
+    },
+    "generalization": {
+      "fit_split": "train only",
+      "holdout_split": "never used for fitting, threshold selection, or relabeling",
+      "scope_key": ["gpu_uuid", "driver_version", "cuda_runtime", "os", "resource_geometry", "graph_mode"],
+      "out_of_domain": "fall back to the existing model and mark the audit partial"
+    }
+  },
+  "current_environment_snapshot": {
+    "device": "NVIDIA GeForce RTX 5080",
+    "driver": "617.14",
+    "cuda_path": "E:\\cuda",
+    "snapshot_gpu_utilization_percent": 34,
+    "snapshot_is_not_a_quiet_baseline": true,
+    "note": "The utilization value is only a preflight snapshot; it is not a calibration datum."
+  },
+  "desktop_isolation_gate": {
+    "required_for_quiet_gpu_calibration": true,
+    "current_result": "not_isolated",
+    "observed_topology": {
+      "nvidia_current_mode": "2560 x 1440",
+      "amd_current_mode": "Unknown",
+      "dwm_gpu_engine": "phys_0 (NVIDIA display path)",
+      "monitor_count": 2
+    },
+    "reason": "Both monitors are currently attached to the RTX display path; selecting AMD in an application preference cannot move the desktop compositor.",
+    "user_hardware_action": "Move the monitor cables from the RTX 5080 outputs to the motherboard video outputs, then boot or reconnect the displays. This cannot be completed through the repository or software alone.",
+    "pass_checks": [
+      "dxdiag reports a real current mode for AMD Radeon(TM) Graphics and no active desktop mode for NVIDIA",
+      "dwm.exe is absent from the NVIDIA GPU Engine counters for three consecutive samples",
+      "nvidia-smi utilization remains 0% for at least 30 seconds with no calibration process running"
+    ],
+    "fallback": "If the motherboard outputs are unavailable, keep the current topology and mark calibration as non-quiet; do not claim the RTX is idle."
+  },
+  "measurement_contract": {
+    "host_submission": {
+      "boundary": "CPU API enqueue begin/end and release",
+      "tool": "tools/run_cuda_dispatch_queue_microbench.py",
+      "status": "diagnostic_until_observer_ab_test_passes",
+      "limitations": [
+        "The default probe calls cudaPeekAtLastError on every enqueue; P0 controls can disable this with --check-errors 0.",
+        "Therefore it does not represent natural streaming supply and cannot establish that all WDDM commands are resident when the gate opens."
+      ]
+    },
+    "device_dispatch": {
+      "boundary": "signed uncovered gaps between effective kernel body envelopes; first-node dispatch is unobserved",
+      "tool": "tools/run_cuda_graph_launch_gap_microbench.py",
+      "status": "diagnostic_until_body, entry, exit, and PDL completion tails are separated",
+      "rules": [
+        "Do not add body duration, device span, or memory traffic to dispatch residuals.",
+        "Keep negative signed gaps as a diagnostic; never convert them to negative task demand.",
+        "Measure ordinary, graph first, uploaded first, and replay as separate modes."
+      ]
+    },
+    "typed_activity": {
+      "boundary": "CUPTI kernel/copy activity identity and count validation",
+      "tool": "tools/run_cuda_graph_typed_activity_microbench.py",
+      "status": "observer-on results are perturbation diagnostics until paired with observer-off runs",
+      "rule": "Never use an activity-observer overhead ratio as a correction factor."
+    },
+    "llm_end_to_end": {
+      "boundary": "serial native and simulator TTFT, TPOT, and E2E for the same physical task shape",
+      "tool": "existing native benchmark and graph validation path",
+      "status": "final validation only; never a calibration input",
+      "rule": "Use new model parameters only after synthetic train/holdout gates pass."
+    }
+  },
+  "phases": [
+    {
+      "id": "P0",
+      "name": "capability_and_perturbation_pilot",
+      "purpose": "Verify what each probe actually observes before collecting calibration data.",
+      "actions": [
+        "Run build-only checks for the launch-gap, queue, typed-activity, and graph-structure probes.",
+        "Run the ETW access check as an optional capability probe; permission failure is recorded and does not block the synthetic path.",
+        "Add a probe-level observer toggle for host timestamps, per-launch error queries, CUPTI, and flush/tail queries. Keep buffers preallocated and keep logging outside the timed region.",
+        "For each of three short cases, collect paired observer-off/on blocks in ABBA and BAAB order with the same warmups."
+      ],
+      "pass": [
+        "Paired median observer effect is at most 2% or the declared timing resolution, whichever is larger.",
+        "If this fails, observer-on data stays diagnostic and no correction is applied."
+      ],
+      "deliverable": "capability.json plus raw paired samples; no production parameter"
+    },
+    {
+      "id": "P1",
+      "name": "synthetic_train",
+      "purpose": "Identify only the low-dimensional residual terms that are distinguishable from physical work.",
+      "budget": "At most 24 configurations x 11 repetitions; no full Cartesian sweep.",
+      "train_axes": {
+        "nodes": [16, 64, 192, 384],
+        "body_ns": [0, 112, 240, 416, 592, 816, 976, 1072, 1296, 1616, 2032, 2752, 5200],
+        "extra_parameter_bytes": [0, 64, 256, 1024],
+        "geometry": [[1, 32], [1, 128], [32, 128]],
+        "graph_modes": ["ordinary", "graph_first", "graph_uploaded_first", "graph_replay"],
+        "dependency_modes": ["default", "PDL", "alternating"]
+      },
+      "rules": [
+        "Fit host submission, device dispatch, and graph replay in separate columns.",
+        "Do not fix a 2048 ns quantum or a packet period until residuals demonstrate that it is stable across the train axes.",
+        "If intermediate payloads such as 160 or 544 bytes are needed, extend the CUDA probe explicitly; never map them to the nearest supported payload."
+      ]
+    },
+    {
+      "id": "P2",
+      "name": "synthetic_holdout",
+      "purpose": "Test generalization across unseen bodies, node counts, geometries, payloads, and ordering.",
+      "budget": "At most 16 configurations x 11 repetitions, selected before P1 fitting.",
+      "holdout_axes": {
+        "nodes": [33, 127, 255, 511],
+        "body_ns": [704, 1376, 1856, 3200, 6500, 10500],
+        "geometry": [[8, 64], [96, 256]],
+        "payload_bytes": [160, 544],
+        "ordering": ["mixed_alternating", "mixed_shuffled"],
+        "dependency_modes": ["PDL", "ordinary"]
+      },
+      "qualification": {
+        "median_absolute_relative_error_max": 0.05,
+        "p90_absolute_relative_error_max": 0.10,
+        "subgroup_median_error_max": 0.10,
+        "conditional_diagnostic_rule": "A holdout prediction must use a body model from train or declared input, never that holdout's measured body span."
+      }
+    },
+    {
+      "id": "P3",
+      "name": "source_shaped_and_end_to_end_validation",
+      "purpose": "Check that the residual model transfers to owned source dispatch shapes and then to short real serving requests.",
+      "source_shaped_cases": [
+        "small dense prefill/decode",
+        "large dense prefill/decode",
+        "copy-heavy graph",
+        "PDL graph",
+        "one unsupported hybrid topology as an explicit rejection case"
+      ],
+      "llm_cases": [
+        {"prompt_tokens": 128, "output_tokens": 32, "context": 256},
+        {"prompt_tokens": 384, "output_tokens": 96, "context": 512},
+        {"prompt_tokens": 512, "output_tokens": 128, "context": 768, "role": "historical comparison only"}
+      ],
+      "rules": [
+        "Keep native and simulator runs serial and paired; the previous 20-concurrent-job result is not a speed baseline.",
+        "Use native latency only for final validation and graph on/off direction, never for fitting.",
+        "Do not divide one physical kernel, copy, or DRAM demand by source-node count."
+      ],
+      "promotion_target": "Relative MAPE reduction of at least 10% versus the same simulator baseline, with no workload subgroup worsening by more than 2 percentage points; this is a promotion target, not a claim about current accuracy."
+    },
+    {
+      "id": "P4",
+      "name": "cheap_simulator_integration",
+      "purpose": "Enable only a compact residual lookup/interpolator whose runtime cost is bounded.",
+      "implementation": [
+        "Store one immutable compact descriptor per compiled graph structure and reuse the existing bounded template cache (maximum 8).",
+        "Keep per-stream state to next packet, credit count, and last completion point; update it in O(1) per dispatch.",
+        "Reuse existing task, byte, energy, work, and dependency objects. Attach one compact audit reference per invocation instead of copying a full DAG per event.",
+        "Take the existing fast path when no in-domain qualified profile is present; do not profile with NVML or scan a full graph during simulation.",
+        "For an out-of-domain or unqualified profile, retain the current analytical cost and mark the audit partial."
+      ],
+      "promotion_gate": "All P0-P3 gates plus the simulation runtime and memory gates in guardrails must pass on serial paired runs."
+    }
+  ],
+  "execution_order": [
+    "Create a new output directory; never overwrite existing raw measurements.",
+    "Run P0 build/capability checks and record tool, device, driver, runtime, OS, and git revision.",
+    "Run P0 observer pairs; stop promotion if observer perturbation is not bounded.",
+    "Freeze the P1/P2 case roles and seed in the plan before collecting any P1 result.",
+    "Collect P1 train only, fit a scoped residual model, then collect untouched P2 holdouts.",
+    "Run P3 source-shaped and serial LLM checks; compare against the unchanged simulator baseline.",
+    "Run P4 overhead checks with the new logic disabled and enabled on the same inputs.",
+    "Only then write a profile with graph_device_launch_qualified=true; otherwise keep the value false."
+  ],
+  "existing_tool_commands": {
+    "queue_plan_only": "python tools/run_cuda_dispatch_queue_microbench.py --directory <new-output-dir> --prepare-only",
+    "launch_gap_build_only": "python tools/run_cuda_graph_launch_gap_microbench.py --build-only <new-build-dir>",
+    "etw_capability_only": "python tools/check_cuda_dispatch_etw_access.py --output <new-output-dir>/etw_access_check.json",
+      "warning": "The queue runner is preloaded-gate and supports payload extras 0/64/160/256/544/1024, including the explicit P2 holdouts 160 and 544. The paired observer runner records ABBA/BAAB blocks but does not promote results automatically. The compiled queue executable supports --host-timing-mode total for low-perturbation aggregate host timing; per-node timing and device-gated samples remain diagnostic until P0 passes."
+  },
+  "qualification_record": {
+    "required_fields": [
+      "schema",
+      "hardware_id",
+      "driver_version",
+      "cuda_runtime",
+      "os",
+      "source_revision",
+      "train_case_ids",
+      "holdout_case_ids",
+      "observer_perturbation",
+      "holdout_error_summary",
+      "simulation_overhead_summary",
+      "prediction_qualified"
+    ],
+    "caller_flag_is_not_evidence": true,
+    "default_prediction_qualified": false
+  },
+  "stop_rules": [
+    "Stop promotion if a holdout is fitted, relabeled, or fed its measured body duration.",
+    "Stop promotion if host and device costs are added for the same physical work owner.",
+    "Stop promotion if default simulation overhead exceeds 10% median, enabled overhead exceeds 10% median, or tail overhead exceeds 10%.",
+    "Stop promotion if graph on/off changes physical bytes, energy, work, or dependency ownership without an independent physical explanation.",
+    "Stop and report partial if the probe cannot distinguish first-node dispatch, PDL completion, or observer-induced work."
+  ]
+}

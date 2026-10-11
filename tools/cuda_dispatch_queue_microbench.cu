@@ -35,11 +35,12 @@ static std::vector<U64> parse_bodies(const std::string &value, int nodes) {
 struct QueueSample {
     double event_ns{};
     U64 host_release{};
+    U64 host_total_begin{}, host_total_end{};
     std::vector<U64> begin, end, host_begin, host_end;
 };
 static void submit_nodes(const Config &cfg, const std::vector<U64> &bodies, int payload,
                          cudaStream_t stream, U64 *times, unsigned int *sink,
-                         QueueSample *sample, bool observe) {
+                         QueueSample *sample, bool observe, bool check_errors) {
     for (int index = 0; index < cfg.nodes; ++index) {
         U64 begin{}; if (observe) begin = host_ns();
         switch (payload) {
@@ -47,16 +48,19 @@ static void submit_nodes(const Config &cfg, const std::vector<U64> &bodies, int 
         case 64: launch_payload<64>(stream, times, sink, index, cfg.blocks, cfg.threads, bodies[index]); break;
         case 256: launch_payload<256>(stream, times, sink, index, cfg.blocks, cfg.threads, bodies[index]); break;
         case 1024: launch_payload<1024>(stream, times, sink, index, cfg.blocks, cfg.threads, bodies[index]); break;
+        case 160: launch_payload<160>(stream, times, sink, index, cfg.blocks, cfg.threads, bodies[index]); break;
+        case 544: launch_payload<544>(stream, times, sink, index, cfg.blocks, cfg.threads, bodies[index]); break;
         default: throw std::runtime_error("unsupported payload footprint");
         }
         U64 end{}; if (observe) end = host_ns();
-        CHECK(cudaPeekAtLastError());
+        if (check_errors) CHECK(cudaPeekAtLastError());
         if (observe) { sample->host_begin.push_back(begin); sample->host_end.push_back(end); }
     }
 }
 int main(int argc, char **argv) {
     try {
-        Config cfg; int payload = 0; bool observe = true; std::string body_arg = "0";
+        Config cfg; int payload = 0; bool observe = true; bool check_errors = true;
+        std::string body_arg = "0", host_timing_mode = "per_node";
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i]; if (i + 1 >= argc) throw std::runtime_error("argument value missing");
             std::string value = argv[++i];
@@ -66,7 +70,13 @@ int main(int argc, char **argv) {
             else if (arg == "--repetitions") cfg.repetitions = std::stoi(value);
             else if (arg == "--payload-bytes") payload = std::stoi(value);
             else if (arg == "--bodies-ns") body_arg = value;
-            else if (arg == "--observe-host" && (value == "0" || value == "1")) observe = value == "1";
+            else if (arg == "--observe-host" && (value == "0" || value == "1")) {
+                observe = value == "1"; host_timing_mode = observe ? "per_node" : "none";
+            }
+            else if (arg == "--host-timing-mode" && (value == "none" || value == "total" || value == "per_node")) {
+                host_timing_mode = value; observe = value == "per_node";
+            }
+            else if (arg == "--check-errors" && (value == "0" || value == "1")) check_errors = value == "1";
             else throw std::runtime_error("unsupported queue probe option");
         }
         if (cfg.nodes < 2 || cfg.nodes > 4096 || cfg.repetitions < 3 || cfg.repetitions > 999 || cfg.blocks < 1 || cfg.blocks > 1024 || cfg.threads < 1 || cfg.threads > 1024)
@@ -81,6 +91,8 @@ int main(int argc, char **argv) {
         case 64: function = reinterpret_cast<const void *>(payload_body<64>); break;
         case 256: function = reinterpret_cast<const void *>(payload_body<256>); break;
         case 1024: function = reinterpret_cast<const void *>(payload_body<1024>); break;
+        case 160: function = reinterpret_cast<const void *>(payload_body<160>); break;
+        case 544: function = reinterpret_cast<const void *>(payload_body<544>); break;
         default: throw std::runtime_error("unsupported parameter payload");
         }
         size_t offset{}, last_size{};
@@ -107,11 +119,14 @@ int main(int argc, char **argv) {
             QueueSample sample;
             try {
                 CHECK(cudaEventRecord(ev_begin, stream));
-                submit_nodes(cfg, bodies, payload, stream, times, sink, &sample, observe);
+                if (host_timing_mode == "total") sample.host_total_begin = host_ns();
+                submit_nodes(cfg, bodies, payload, stream, times, sink, &sample, observe, check_errors);
+                if (host_timing_mode == "total") sample.host_total_end = host_ns();
                 CHECK(cudaEventRecord(ev_end, stream));
                 status = cudaEventQuery(ev_end); if (status != cudaSuccess && status != cudaErrorNotReady) CHECK(status);
             } catch (...) { release_gpu_gate(flags); cudaStreamSynchronize(stream); throw; }
-            sample.host_release = host_ns(); release_gpu_gate(flags); CHECK(cudaStreamSynchronize(stream));
+            sample.host_release = host_timing_mode == "none" ? 0 : host_ns();
+            release_gpu_gate(flags); CHECK(cudaStreamSynchronize(stream));
             if (flags[32]) throw std::runtime_error("queue gate timed out before all submissions");
             float event{}; CHECK(cudaEventElapsedTime(&event, ev_begin, ev_end)); sample.event_ns = event * 1.0e6;
             std::vector<U64> raw(cfg.nodes * cfg.blocks * 2);
@@ -133,13 +148,20 @@ int main(int argc, char **argv) {
                 for (auto &x : sample.host_begin) x -= origin_host;
                 for (auto &x : sample.host_end) x -= origin_host;
                 sample.host_release -= origin_host;
+            } else if (host_timing_mode == "total") {
+                const U64 origin_host = sample.host_total_begin;
+                sample.host_total_begin -= origin_host;
+                sample.host_total_end -= origin_host;
+                sample.host_release -= origin_host;
             }
             if (repetition >= 0) samples.push_back(std::move(sample));
         }
         std::cout << "{\"schema\":\"heterollm.cuda-dispatch-queue/v1\",\"target_llm_latency_used\":false,\"hardware_id\":\"" << prop.name
                   << "\",\"architecture\":\"sm_" << prop.major << prop.minor << "\",\"driver_version\":\"" << driver
                   << "\",\"runtime_version\":\"" << runtime << "\",\"node_count\":" << cfg.nodes << ",\"blocks\":" << cfg.blocks
-                  << ",\"threads\":" << cfg.threads << ",\"extra_parameter_bytes\":" << payload << ",\"host_observation\":" << (observe ? "true" : "false")
+                  << ",\"threads\":" << cfg.threads << ",\"extra_parameter_bytes\":" << payload << ",\"host_observation\":" << (host_timing_mode != "none" ? "true" : "false")
+                  << ",\"host_timing_mode\":\"" << host_timing_mode << "\""
+                  << ",\"error_checking\":" << (check_errors ? "true" : "false")
                   << ",\"cuda_parameter_extent_bytes\":" << parameter_extent << ",\"requested_bodies_ns\":"; array(bodies); std::cout << ",\"samples\":[";
         for (size_t i = 0; i < samples.size(); ++i) {
             if (i) std::cout << ','; const auto &s = samples[i];
@@ -147,7 +169,9 @@ int main(int argc, char **argv) {
             std::cout << ",\"node_end_ns\":"; array(s.end);
             std::cout << ",\"host_enqueue_begin_ns\":"; array(s.host_begin);
             std::cout << ",\"host_enqueue_end_ns\":"; array(s.host_end);
-            std::cout << ",\"host_release_ns\":" << (observe ? s.host_release : 0) << '}';
+            std::cout << ",\"host_total_begin_ns\":" << s.host_total_begin;
+            std::cout << ",\"host_total_end_ns\":" << s.host_total_end;
+            std::cout << ",\"host_release_ns\":" << s.host_release << '}';
         }
         std::cout << "]}\n";
         CHECK(cudaFree(times)); CHECK(cudaFree(sink)); CHECK(cudaFreeHost(flags));

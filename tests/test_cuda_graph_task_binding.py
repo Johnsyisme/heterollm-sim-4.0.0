@@ -6,7 +6,8 @@ import pytest
 
 from heterollm_sim.contracts import ResourceDemand, TaskCategory, TaskSpec
 from heterollm_sim.cuda_graph_task_binding import (
-    match_cuda_dispatch_tasks, modeled_operation_keys, source_operation_keys,
+    annotate_cuda_dispatch_tasks, match_cuda_dispatch_tasks, modeled_operation_keys,
+    source_operation_keys,
 )
 
 
@@ -45,6 +46,23 @@ def test_many_modeled_norm_events_bind_one_native_kernel_without_modification():
     assert result[0]["launch_task_ids"] == ("reduce", "apply")
     assert result[0]["node_count"] == 1
     assert (tasks, source) == before
+
+
+def test_source_dispatch_annotation_preserves_costs_and_records_fusion_cardinality():
+    rms = node("rms", "norm-0", "RMS_NORM", tensor("input", "CUDA0#embd#0"))
+    mul = node("mul", "attn_norm-0", "MUL", rms["output"], tensor("weight", "blk.0.attn_norm.weight"))
+    source = (group(0, [rms, mul]),)
+    tasks = (task("reduce", event_kind="input_norm_reduce"), task("apply", event_kind="input_norm_apply"))
+    result = annotate_cuda_dispatch_tasks(tasks, source)
+    assert [item.task_id for item in result] == [item.task_id for item in tasks]
+    assert [item.demands for item in result] == [item.demands for item in tasks]
+    assert [item.dependencies for item in result] == [item.dependencies for item in tasks]
+    binding = result[0].metadata["cuda_source_dispatch"]
+    assert binding["relationship"] == "many_source_ops_to_one_cuda_node"
+    assert binding["node_count"] == 1
+    assert binding["source_operation_count"] == 2
+    assert binding["timing_qualified"] is False
+    assert binding["physical_ledger_qualified"] is False
 
 
 def test_aggregated_physical_qkv_crossing_source_dispatches_is_rejected():

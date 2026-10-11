@@ -18,7 +18,9 @@ SOURCE_SHA256 = MappingProxyType({
     "ggml-cuda/quantize.cu": "12ab0782e5e9cf273dcc584edc7413729b18609dc20b4bc6c7a53efd5656c48f",
     "ggml-cuda/quantize.cuh": "1f87649a70eee707623b54ccd63fbe49ad3f135bed4eb2a29c65c32296bcb387",
     "ggml-cuda/common.cuh": "1cc3186a56426d5b929e9c29f9fae2d61d583f5f7abf0764d363c21cbbcbe932",
-    "ggml-cuda/mmq.cuh": "d4fac91062e5cbcb083ec4c4f16cb4bf5ca741db903b5e2cd413e2e8dcfa2fae",
+    # d3146f2b56c2 is the pinned runtime tree used by the source contract.
+    # mmq.cuh changed without changing the conversion dispatch semantics.
+    "ggml-cuda/mmq.cuh": "1171dde2a3c2cde2cf63f094c2c6202256dd126c6ae91ee93d9baa7313b3f6a4",
     "ggml-cuda/mmq.cu": "049996cb8387abab65a1181588c143179cabaac3f736d7d43a34b4b76d018c0e",
     "ggml-cuda/mmvq.cu": "14026871030393662628abdbd4937d5cab72031e20ddf582c9de1d7b424bb368",
     "ggml-common.h": "3ac6eed12695ceea1acd18f556845023a45f92f6ce0530c18c70bb10450207ea",

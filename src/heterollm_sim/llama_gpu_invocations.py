@@ -19,6 +19,7 @@ from typing import Any
 from .ir import build_model_graph_from_layer_specs, model_graph_execution_layers, model_graph_execution_view
 from .projection_descriptors import ARTIFACT_QUANTIZATION_REGISTRY
 from .runtime_adapters import _source_function
+from .mmq_work import MMQ_SOURCE_REVISION
 
 SOURCE_KEY = "llama_cpp_gpu_native_invocations"
 SCHEMA = "llama.cpp.gpu-native-invocations/v1"
@@ -436,7 +437,7 @@ def apply_llama_gpu_invocation_contract(
         device=payload.get("mmq_device_evidence",{})
         profile=scenario.resolve_component_profile(gpu[0])
         if device.get("available") is True and device.get("sm_count")==profile.tensor_core.sm_count:
-            component_metadata["llama_cpp_mmq_contract"]={"backend_commit":"0f3a71be15af836d277c9f918adfafb45732677e",
+            component_metadata["llama_cpp_mmq_contract"]={"backend_commit":MMQ_SOURCE_REVISION,
                 "compiled_int8_mma":True,"force_cublas":False,"ordinary_contiguous_2d":True,
                 "max_shared_memory_per_block_optin_bytes":device["max_shared_memory_per_block_optin_bytes"],
                 "reduction_tail_contract":payload.get("mmq_reduction_tail_contract")}

@@ -20,6 +20,10 @@ CUDA event 间隔只用于诊断，不作为额外 GPU 成本相加。设备端�
 
 本机 GPU 预设每个 kernel 的 1000ns launch 延迟来自可编辑分析默认值，尚无独立证据证明它完全属于设备侧、与 host API 耗时没有重叠。因此本轮保留该参数，并明确不宣称 CPU/设备提交成本已全面拆分验证。采样的候选物化、编译器缓存与过滤链成本，以及完成中断延迟仍不完整；报告中的 partial 标记应保留，这些缺项的数值影响尚未独立量化。
 
+设备端 Graph 重放若要作为合格预测成本启用，必须在 kernel profile 中同时提供 `graph_device_launch_ns`、`graph_device_launch_evidence`，并且只在测量计划的训练/留出、扰动和仿真开销门槛全部通过后，才允许结果字段为 `graph_device_launch_qualified=true`。这个布尔值是结果声明，不是证据；当前 profile 对象不会替调用方重新验证整份测量报告，因此默认必须保持 `false`。该字段表示一次完整 Graph 重放的设备前端服务包，与 `graph_launch_ns`（标量 Graph API 路径）分开计价；没有这个独立字段时，结构化 host 成本不会自动压低每个 kernel 的设备启动成本。未通过计划门槛的显式值只用于实验敏感性。这样可以避免把普通 `kernel_launch_ns` 或 native 总耗时误当成 Graph 设备校准。显式实验路径会保留设备任务的字节、能耗和工作量账本，并在审计元数据中标出 `prediction_qualified=false`。
+
+具体的测量边界、案例角色、执行顺序、验收门槛和仿真开销预算见 [`cuda_graph_measurement_plan_2026-10-10.json`](cuda_graph_measurement_plan_2026-10-10.json)。仿真运行时与内存预算已统一放宽到 10%；测量扰动和留出集预测门槛不随之放宽。当前计划状态是 `p0_pilot_complete_not_qualified`：探针已编译，ETW 专用会话权限检查被系统拒绝，队列观测的 ABBA/BAAB 对照尚未满足 2% 扰动门槛。当前两台显示器仍由 RTX 5080 驱动，AMD 核显没有有效显示模式；若要做真正的空闲 GPU 校准，必须先把显示器接到主板视频输出并通过显示路径检查。已有探针可以继续做诊断，但预加载 gate、设备负载和观测方式尚不足以代表自然供给，诊断数字不能直接写入生产 profile。
+
 ## 两种成本入口
 
 `runtime_measurement_mode="qualified"` 使用 `RuntimeResidualCalibration`。独立训练点和验证点分离，按结构、节点数区间和阶段检查，不允许外推。当前通用插值测量没有通过全部条件，不能宣称已经校准成功。

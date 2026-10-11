@@ -54,6 +54,54 @@ def test_training_and_holdout_are_declared_without_observed_latency():
     training = {case["requested_bodies_ns"][0] for case in plan["cases"] if case["split"] == "train_threshold"}
     held = {case["requested_bodies_ns"][0] for case in plan["cases"] if case["split"] == "holdout_threshold"}
     assert training.isdisjoint(held)
+    payload_holdouts = {case["extra_parameter_bytes"] for case in plan["cases"] if case["split"] == "holdout_payload"}
+    assert {160, 544}.issubset(payload_holdouts)
+
+
+def test_observer_off_controls_disable_per_enqueue_error_checks():
+    plan = module.create_plan()
+    controls = [case for case in plan["cases"] if case["split"] == "observer_control"]
+    assert {case["case_id"] for case in controls} == {"observer_off_payload_0", "observer_off_payload_256"}
+    assert all(case["observe_host"] is False and case["check_errors"] is False for case in controls)
+
+
+def test_total_host_timing_uses_aggregate_interval_without_node_directory():
+    raw, case = evidence()
+    raw["host_timing_mode"] = "total"
+    for sample in raw["samples"]:
+        sample["host_enqueue_begin_ns"] = []
+        sample["host_enqueue_end_ns"] = []
+        sample["host_total_begin_ns"] = 0
+        sample["host_total_end_ns"] = 2600
+        sample["host_release_ns"] = 3000
+    result = module.summarize(raw, case)
+    assert result["host_submission_span"]["median_ns"] == 2600
+
+
+def test_none_host_timing_keeps_empty_node_timing_and_zero_release():
+    raw, case = evidence()
+    raw["host_timing_mode"] = "none"
+    raw["host_observation"] = False
+    case["observe_host"] = False
+    for sample in raw["samples"]:
+        sample["host_enqueue_begin_ns"] = []
+        sample["host_enqueue_end_ns"] = []
+        sample["host_release_ns"] = 0
+    result = module.summarize(raw, case)
+    assert result["host_submission_span"] is None
+
+
+def test_total_host_timing_rejects_inverted_or_early_release():
+    raw, case = evidence()
+    raw["host_timing_mode"] = "total"
+    for sample in raw["samples"]:
+        sample["host_enqueue_begin_ns"] = []
+        sample["host_enqueue_end_ns"] = []
+        sample["host_total_begin_ns"] = 100
+        sample["host_total_end_ns"] = 2600
+        sample["host_release_ns"] = 2500
+    with pytest.raises(ValueError, match="total CPU timing"):
+        module.summarize(raw, case)
 
 
 def training_entry(body):

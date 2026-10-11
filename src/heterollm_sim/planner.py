@@ -104,7 +104,10 @@ from .control_plane_state import (
     mapping_fingerprint_status,
 )
 from .mtp import MTPRequestCursor, expected_prefix_tokens, round_accepted_prefix
-from .mmq_work import MMVQ_MAX_BATCH_SIZE, MMQWork, UnsupportedMMQ, derive_mmq_work
+from .mmq_work import (
+    MMVQ_MAX_BATCH_SIZE, MMQWork, MMQ_SOURCE_REVISION, UnsupportedMMQ,
+    derive_mmq_work,
+)
 from .mmq_level2_surfaces import mmq_stage_source_binding
 from .mmvq_issue_bound import MMVQIssueContract, derive_issue_bound
 from .mmvq_work import (
@@ -12059,7 +12062,7 @@ def _declared_mmq_work(
     if not isinstance(contract, Mapping):
         return uncovered("missing_fixed_backend_dispatch_contract")
     if (
-        contract.get("backend_commit") != "0f3a71be15af836d277c9f918adfafb45732677e"
+        contract.get("backend_commit") != MMQ_SOURCE_REVISION
         or target.metadata.get("cuda_compute_capability") != 1200
         or contract.get("compiled_int8_mma") is not True
         or contract.get("force_cublas") is not False

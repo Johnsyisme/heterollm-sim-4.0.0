@@ -9,7 +9,7 @@ from pathlib import Path
 from heterollm_sim import planner as p
 from heterollm_sim.config import scenario_from_dict
 from heterollm_sim.cuda_graph_dispatch import iter_source_dispatches
-from heterollm_sim.cuda_graph_task_binding import match_cuda_dispatch_tasks
+from heterollm_sim.cuda_graph_task_binding import annotate_cuda_dispatch_tasks, match_cuda_dispatch_tasks
 
 
 def render_html(result):
@@ -126,6 +126,13 @@ def audit_case(case, inputs, structures):
                 end = layer_start(groups, index + 1) if region == "first_layer" else len(groups)
                 source = groups[start:end]
                 mapping = match_cuda_dispatch_tasks(tasks, source)
+                annotated = annotate_cuda_dispatch_tasks(tasks, source)
+                task_bindings = [
+                    {"task_id": task.task_id, "task_name": task.name,
+                     "binding": task.metadata["cuda_source_dispatch"]}
+                    for task in annotated
+                    if "cuda_source_dispatch" in task.metadata
+                ]
                 owner = {task_id: group["dispatch_index"] for group in mapping for task_id in group["launch_task_ids"]}
                 modeled_order = [owner[task.task_id] for task in tasks if task.task_id in owner]
                 row.update(status="matched", source_dispatch_count=len(source),
@@ -133,7 +140,9 @@ def audit_case(case, inputs, structures):
                     source_multi_node_dispatches=sum(group["node_count"] > 1 for group in source),
                     modeled_owned_event_count=len(owner),
                     modeled_order_backward_transitions=sum(b < a for a, b in zip(modeled_order, modeled_order[1:])),
-                    mapping=mapping, scheduling_rewritten=False, physical_costs_modified=False)
+                    mapping=mapping, task_bindings=task_bindings,
+                    task_binding_count=len(task_bindings),
+                    scheduling_rewritten=False, physical_costs_modified=False)
             except ValueError as error:
                 row.update(status="unmatched", reason=str(error), scheduling_rewritten=False, physical_costs_modified=False)
             record["regions"].append(row)

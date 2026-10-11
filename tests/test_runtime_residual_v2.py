@@ -158,6 +158,28 @@ def test_kernel_profile_roundtrip_restores_per_phase_calibration(tmp_path):
     assert restored.runtime_calibration.costs("chain", 3) == calibration.costs("chain", 3)
 
 
+def test_kernel_profile_roundtrip_keeps_explicit_graph_device_replay_calibration(tmp_path):
+    path = tmp_path / "microbench.json"
+    _evidence(path)
+    calibration = load_runtime_residual_calibration(path)
+    profile = KernelModelProfile(
+        hardware_id="gpu-a", runtime_id="cuda-x-driver-y", architecture="sm_120",
+        runtime_calibration=calibration, runtime_host_resource_id="cpu0.cuda_submit",
+        graph_enabled=True, graph_device_launch_ns=17.0,
+        graph_device_launch_evidence="independent-device-holdout",
+        graph_device_launch_qualified=True)
+    restored = kernel_model_from_dict(to_primitive(profile))
+    assert restored.graph_device_launch_ns == 17.0
+    assert restored.graph_device_launch_evidence == "independent-device-holdout"
+    assert restored.graph_device_launch_qualified is True
+
+
+def test_graph_device_replay_calibration_cannot_be_declared_without_evidence():
+    with pytest.raises(ValueError, match="graph device launch calibration requires evidence"):
+        KernelModelProfile(hardware_id="gpu", runtime_id="cuda", architecture="sm_120",
+                           graph_enabled=True, graph_device_launch_ns=17.0)
+
+
 def test_outlying_interval_cannot_block_qualified_local_interval(tmp_path):
     import copy
     path = tmp_path / "microbench.json"
