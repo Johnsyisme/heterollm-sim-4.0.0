@@ -81,7 +81,7 @@ def _historical_sources(binding, refs):
         if before!=_unique_digest(base["source_sha256_after"],path):
             raise ValueError("historical source changed during build: "+relative)
         texts[role]=_checked_text(path,before,refs)
-    for role,relative in (("mmvq_header","ggml/src/ggml-cuda/mmvq.cuh"),("cuda_common","ggml/src/ggml-cuda/common.cuh"),
+    for role,relative in (("mmvq_header","ggml/src/ggml-cuda/mmvq.cuh"),("vecdotq_header","ggml/src/ggml-cuda/vecdotq.cuh"),("cuda_common","ggml/src/ggml-cuda/common.cuh"),
                           ("mmq_header","ggml/src/ggml-cuda/mmq.cuh"),
                           ("mmq_load_tiles","ggml/src/ggml-cuda/mmq-load-tiles.cuh"),
                           ("quantize_header","ggml/src/ggml-cuda/quantize.cuh"),

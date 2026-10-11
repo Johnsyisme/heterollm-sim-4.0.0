@@ -1,0 +1,62 @@
+{
+  "schema": "heterollm.optimization-accuracy-change/v1",
+  "status": "not_measurable",
+  "optimized_commit": "97e4c424848a364f918a90b14305a2833bf63cb7",
+  "baseline_commit": "9733a5a8cb220d4c5f1c9ffd81fc33dcb2d2f636",
+  "baseline_report": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\docs\\simulation_error_2026-10-11\\fresh_report.json",
+  "optimized_simulation_matrix": "aborted_before_20_pairs",
+  "completed_optimized_pairs": 0,
+  "expected_pairs": 20,
+  "native_reference": "same 2026-10-08 native records were available; no replacement native reference was used",
+  "overall_accuracy_change": null,
+  "overall_mape_change_percentage_points": null,
+  "reason": "The 20 prepared Graph off/on scenarios do not contain llama_cpp_gpu_native_invocations or llama_cpp_mmvq_source_contract. prepare_llama_scenario therefore leaves the new MMVQ geometry treatment inactive. A full rerun of those unchanged generic scenarios cannot measure this fix; it was stopped at the user's direction.",
+  "baseline_metrics": {
+    "TTFT": {
+      "n": 20,
+      "mape_percent": 23.92008695340906,
+      "signed_mean_percent": -23.92008695340906,
+      "p50_ape_percent": 17.809913873686906,
+      "p90_ape_percent": 33.95191303844551,
+      "max_ape_percent": 41.7389255493821,
+      "mad_ape_percent": 5.194482882687834
+    },
+    "TPOT": {
+      "n": 20,
+      "mape_percent": 15.908267187387697,
+      "signed_mean_percent": -8.731137396641115,
+      "p50_ape_percent": 11.10871165393011,
+      "p90_ape_percent": 33.90995875158402,
+      "max_ape_percent": 55.46240749289646,
+      "mad_ape_percent": 7.258239085896676
+    },
+    "E2E": {
+      "n": 20,
+      "mape_percent": 15.59651056452024,
+      "signed_mean_percent": -9.647514885234001,
+      "p50_ape_percent": 11.265461070691162,
+      "p90_ape_percent": 30.602729146880208,
+      "max_ape_percent": 55.01746287719015,
+      "mad_ape_percent": 7.609183189195161
+    }
+  },
+  "mmvq_evidence": {
+    "path": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\docs\\simulation_error_2026-10-12\\mmvq_fresh_evidence.json",
+    "rows": 8,
+    "prediction_comparison": {
+      "available": false,
+      "reason": "No independent analytical_ns estimate is bound to these exact case/shape/dispatch rows. Source geometry/count error and formal-versus-holdout repeatability are not timing prediction error. No prediction error is fabricated.",
+      "prediction_before_ns": null,
+      "prediction_after_ns": null,
+      "timing_ape_change_percent": null
+    },
+    "fitted_parameters_written": false
+  },
+  "coverage": {
+    "end_to_end_pairs_using_new_mmvq_contract": 0,
+    "static_single_segment_q5_q8_candidates_in_old_inputs": "present but unqualified without verified runtime source binding",
+    "m512_control_as_mmvq_surface": false
+  },
+  "next_required_measurement": "Build a verified source/runtime binding for the current d3146f2 runtime (including captured fusion environment and historical receipts), apply it before preparing the same GGUF scenarios, replan, then run only the affected Q5_0/Q8_0 M=1 decode cases plus an unchanged control. Do not post-edit the old submissions or add native timing coefficients.",
+  "source_change_after_matrix": "vecdotq.cuh is now included in the historical source evidence collection; this fixes source-contract applicability, not the old generic matrix outputs."
+}
