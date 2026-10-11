@@ -20,6 +20,7 @@ from .ir import build_model_graph_from_layer_specs, model_graph_execution_layers
 from .projection_descriptors import ARTIFACT_QUANTIZATION_REGISTRY
 from .runtime_adapters import _source_function
 from .mmq_work import MMQ_SOURCE_REVISION
+from .mmvq_work import SOURCE_SHA256 as MMVQ_SOURCE_SHA256
 
 SOURCE_KEY = "llama_cpp_gpu_native_invocations"
 SCHEMA = "llama.cpp.gpu-native-invocations/v1"
@@ -433,6 +434,24 @@ def apply_llama_gpu_invocation_contract(
                  unpriced_terms=payload["unpriced_terms"])
     flags={**scenario.workload.metadata,SOURCE_KEY:audit,"llama_cpp_f32_hidden_storage":True}
     component_metadata={**gpu[0].metadata,"cuda_compute_capability":cc}
+    # MMVQ geometry is independently source-qualified.  It needs no SM
+    # count/shared-memory probe and therefore remains available when callers
+    # decline the optional MMQ matrix-cost surface.
+    mmvq_refs = payload.get("source_refs", ())
+    for relative, expected in MMVQ_SOURCE_SHA256.items():
+        matches = [ref for ref in mmvq_refs
+                   if isinstance(ref, Mapping)
+                   and str(ref.get("path", "")).replace("\\", "/").endswith("/" + relative)]
+        if len(matches) != 1 or matches[0].get("sha256") != expected:
+            raise ValueError("MMVQ source identity is not proven: " + relative)
+    component_metadata["llama_cpp_mmvq_source_contract"]={
+        "compute_capability":cc, "highest_compiled_arch":cc,
+        "warp_size":32, "source_hashes":dict(MMVQ_SOURCE_SHA256),
+        "runtime_binary_sha256":payload["runtime_modules"]["ggml-cuda.dll"]["sha256"],
+        "ordinary_contiguous_2d":True, "force_cublas":False,
+        "mmvq_dispatch_enabled":True,
+    }
+    flags["llama_cpp_f32_q8_1_mmvq"] = True
     if enable_mmq_source_costs:
         device=payload.get("mmq_device_evidence",{})
         profile=scenario.resolve_component_profile(gpu[0])
@@ -441,7 +460,7 @@ def apply_llama_gpu_invocation_contract(
                 "compiled_int8_mma":True,"force_cublas":False,"ordinary_contiguous_2d":True,
                 "max_shared_memory_per_block_optin_bytes":device["max_shared_memory_per_block_optin_bytes"],
                 "reduction_tail_contract":payload.get("mmq_reduction_tail_contract")}
-            flags.update(llama_cpp_mmq_source_work=True,llama_cpp_f32_q8_1_mmvq=True)
+            flags["llama_cpp_mmq_source_work"] = True
             audit["mmq_source_costs"].update(applied=True,reason=None)
         else:audit["mmq_source_costs"].update(reason="source_mmq_device_properties_missing_or_profile_mismatch")
     if enable_conversion_cta_costs:

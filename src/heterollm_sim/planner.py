@@ -12161,14 +12161,27 @@ def _declared_mmvq_work(
     formats = tuple(value.upper() for value in workload.packed_weight_formats)
     if len(formats) != 1:
         return uncovered("unsupported_or_mixed_physical_weight_format")
-    conversion = target.metadata.get("llama_cpp_conversion_source_contract")
+    # MMVQ geometry has its own immutable source/runtime contract.  The
+    # conversion CTA surface is optional and must not be required merely to
+    # bind the vector kernel's launch geometry.  Keep the old conversion
+    # contract as a compatibility fallback for previously qualified scenarios.
+    source_contract = target.metadata.get("llama_cpp_mmvq_source_contract")
+    conversion = source_contract if isinstance(source_contract, Mapping) else target.metadata.get(
+        "llama_cpp_conversion_source_contract"
+    )
     if not isinstance(conversion, Mapping):
         return uncovered("missing_mmvq_runtime_source_contract")
     mmq = target.metadata.get("llama_cpp_mmq_contract")
-    if not isinstance(mmq, Mapping) or mmq.get("force_cublas") is not False:
+    # A dedicated MMVQ contract is sufficient for vector geometry.  The MMQ
+    # dispatch contract is required only for the legacy conversion-contract
+    # fallback, so disabling MMQ source costing cannot suppress MMVQ geometry.
+    if isinstance(source_contract, Mapping):
+        if source_contract.get("force_cublas") is not False:
+            return uncovered("incompatible_mmvq_dispatch_contract")
+    elif not isinstance(mmq, Mapping) or mmq.get("force_cublas") is not False:
         return uncovered("missing_or_incompatible_mmq_dispatch_contract")
     captured = scenario.workload.metadata.get("llama_cpp_gpu_native_invocations")
-    if not isinstance(captured, Mapping):
+    if not isinstance(captured, Mapping) or captured.get("applied") is not True:
         return uncovered("missing_mmvq_source_capture")
     refs = captured.get("source_refs")
     if not isinstance(refs, (tuple, list)):
@@ -12190,7 +12203,8 @@ def _declared_mmvq_work(
         "source_hashes": matched,
         "runtime_binary_sha256": conversion.get("runtime_binary_sha256"),
         "ordinary_contiguous_2d": conversion.get("ordinary_contiguous_2d"),
-        "force_cublas": mmq.get("force_cublas"),
+        "force_cublas": conversion.get("force_cublas") if isinstance(source_contract, Mapping)
+        else mmq.get("force_cublas"),
         "mmvq_dispatch_enabled": scenario.workload.metadata.get("llama_cpp_f32_q8_1_mmvq"),
         "has_ids": False,
         "has_fusion": False,
@@ -12220,6 +12234,81 @@ def _declared_mmvq_work(
         "formal_timing_eligible": False,
         "reason": "MMVQ source geometry is exact but no qualified resource rate exists",
     }
+
+
+def _declared_mmvq_source_limit(
+    scenario: ScenarioConfig,
+    workload: GemmWorkload,
+    target: ComponentSpec,
+    operation_metadata: Mapping[str, object],
+    *,
+    model_weight_read: bool,
+    rhs_is_activation: bool,
+) -> int:
+    """Return an MMVQ batch limit only for a complete source contract.
+
+    This gate deliberately contains no timing, rate, occupancy or fitted
+    value.  It only decides whether ``_declared_mmvq_work`` may derive the
+    fixed source geometry.  MMQ matrix-source costing remains controlled by
+    ``llama_cpp_mmq_source_work`` independently.
+    """
+    if (not model_weight_read or rhs_is_activation
+            or workload.epilogue_operations
+            or workload.epilogue_transcendental_operations
+            or workload.epilogue_output_elements
+            or workload.epilogue_name):
+        return 0
+    if (
+        "expert_index" in operation_metadata
+        or operation_metadata.get("coverage_component") in {"routed_expert", "shared_expert"}
+        or operation_metadata.get("ffn_path") in {"routed", "shared"}
+    ):
+        return 0
+    if scenario.workload.metadata.get("llama_cpp_f32_q8_1_mmvq") is not True:
+        return 0
+    formats = tuple(str(value).upper() for value in workload.packed_weight_formats)
+    # The standalone contract and this planner binding cover only the exact
+    # ordinary Q5_0/Q8_0 vector templates.  K/IQ formats require their own
+    # explicit source contract and must stay on the generic/MMQ path here.
+    if len(formats) != 1 or formats[0] not in {"Q5_0", "Q8_0"}:
+        return 0
+    limit = MMVQ_MAX_BATCH_SIZE[formats[0]]
+    if workload.m > limit:
+        return 0
+    segments = operation_metadata.get("projection_segments", ())
+    if (
+        operation_metadata.get("projection_segment_count") != 1
+        or not isinstance(segments, (tuple, list))
+        or len(segments) != 1
+        or not isinstance(segments[0], Mapping)
+    ):
+        return 0
+    segment = segments[0]
+    if (
+        segment.get("local_k") != workload.k
+        or segment.get("local_n") != workload.n
+        or str(segment.get("format", "")).upper() != formats[0]
+        or not segment.get("physical_tensor_name")
+        or not _f32_hidden_storage_enabled(scenario)
+        or workload.activation_bytes != 4 * workload.m * workload.k
+        or workload.output_bytes != 4 * workload.m * workload.n
+        or workload.accumulator_bits != 32
+    ):
+        return 0
+    source_contract = target.metadata.get("llama_cpp_mmvq_source_contract")
+    if not isinstance(source_contract, Mapping):
+        source_contract = target.metadata.get("llama_cpp_conversion_source_contract")
+    if not isinstance(source_contract, Mapping):
+        return 0
+    if not isinstance(target.metadata.get("llama_cpp_mmvq_source_contract"), Mapping) and not isinstance(
+        target.metadata.get("llama_cpp_mmq_contract"), Mapping
+    ):
+        return 0
+    captured = scenario.workload.metadata.get("llama_cpp_gpu_native_invocations")
+    if (not isinstance(captured, Mapping) or captured.get("applied") is not True
+            or not isinstance(captured.get("source_refs"), (tuple, list))):
+        return 0
+    return limit
 
 
 def _mmvq_hbm_mode(scenario: ScenarioConfig) -> str:
@@ -13140,12 +13229,19 @@ def _add_rank_gemm(
         )
         dispatch_resource_id = gpu_profile.launch_resource_id
         dispatch_energy_pj = gpu_profile.launch_energy_pj
-        mmq_work, mmq_audit, mmvq_limit = _declared_mmq_work(
+        mmq_work, mmq_audit, _unused_mmvq_limit = _declared_mmq_work(
             scenario, workload, target, gpu_profile, operation_metadata,
             model_weight_read=model_weight_read, rhs_is_activation=rhs_is_activation,
         )
         if mmq_audit is not None:
             operation_metadata["mmq_source_work"] = {**mmq_audit, "stage": "matrix"}
+        # MMVQ source geometry is independently useful for the decode path.
+        # Do not make it depend on optional MMQ matrix costing or conversion
+        # CTA pricing; the exact-contract gate remains fail-closed.
+        mmvq_limit = _declared_mmvq_source_limit(
+            scenario, workload, target, operation_metadata,
+            model_weight_read=model_weight_read, rhs_is_activation=rhs_is_activation,
+        )
         mmvq_work, mmvq_audit = (
             _declared_mmvq_work(
                 scenario, workload, target, operation_metadata,
