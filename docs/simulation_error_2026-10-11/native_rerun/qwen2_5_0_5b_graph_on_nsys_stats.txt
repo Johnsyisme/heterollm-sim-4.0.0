@@ -1,0 +1,93 @@
+
+NOTICE: Existing SQLite export found: docs\simulation_error_2026-10-11\native_rerun\qwen2_5_0_5b_graph_on.sqlite
+        It is assumed file was previously exported from: docs\simulation_error_2026-10-11\native_rerun\qwen2_5_0_5b_graph_on.nsys-rep
+        Consider using --force-export=true if needed.
+
+Processing [docs\simulation_error_2026-10-11\native_rerun\qwen2_5_0_5b_graph_on.sqlite] with [C:\Program Files\NVIDIA Corporation\Nsight Systems 2024.6.2\host-windows-x64\reports\cuda_api_sum.py]... 
+
+ ** CUDA API Summary (cuda_api_sum):
+
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                Name               
+ --------  ---------------  ---------  ----------  ---------  --------  --------  -----------  ---------------------------------
+     28.1        104289501        561    185899.3     3060.0       390  37877046    1616064.4  cudaMemcpyAsync                  
+     25.6         95019464          8  11877433.0  8683554.5   3755068  22893726    8535842.6  cuLibraryLoadData                
+     20.4         75871344          6  12645224.0     7600.0       820  75839904   30958944.7  cudaMemGetInfo                   
+     16.9         62619613        918     68213.1    16605.5       290   3452326     285765.6  cudaStreamSynchronize            
+      3.8         14074093        831     16936.3     1870.0       380   8623022     312641.3  cudaLaunchKernel                 
+      1.6          6001525       2469      2430.8     1750.0       390     57191       5489.4  cudaLaunchKernelExC_v11060       
+      0.9          3352732         48     69848.6      110.0        70   2534492     381589.0  cuKernelGetFunction              
+      0.8          2803614          2   1401807.0  1401807.0    947938   1855676     641867.7  cudaGraphInstantiate_v12000      
+      0.7          2496672          1   2496672.0  2496672.0   2496672   2496672          0.0  cudaFree                         
+      0.4          1418433         28     50658.3    38756.0     25430    178974      33360.2  cudaGraphLaunch_v10000           
+      0.2           922463          7    131780.4   109113.0      3090    504792     170924.5  cudaMalloc                       
+      0.1           518398          1    518398.0   518398.0    518398    518398          0.0  cudaGraphExecDestroy_v10000      
+      0.1           424195        169      2510.0     1180.0      1070    183669      14093.5  cudaMemset                       
+      0.1           351839          2    175919.5   175919.5      9000    342839     236059.8  cudaMallocHost                   
+      0.0           183364         48      3820.1     1990.5      1720     32661       5636.0  cuLaunchKernel                   
+      0.0           168514          1    168514.0   168514.0    168514    168514          0.0  cudaGraphDestroy_v10000          
+      0.0           132983          2     66491.5    66491.5     39871     93112      37647.1  cuMemCreate                      
+      0.0           129743        892       145.5      110.0        40      3060        152.7  cuGetProcAddress_v2              
+      0.0           113302          1    113302.0   113302.0    113302    113302          0.0  cuMemAddressReserve              
+      0.0            87962         10      8796.2     8515.0      3000     11440       2558.0  cuLibraryGetKernel               
+      0.0            81352          2     40676.0    40676.0      7660     73692      46691.7  cudaGraphExecUpdate_v10020       
+      0.0            76382          4     19095.5    10450.5      3490     51991      22175.0  cudaMemsetAsync                  
+      0.0            40594         22      1845.2     1125.0       300      5971       1817.9  cudaGetDeviceProperties_v2_v12000
+      0.0            34171          2     17085.5    17085.5     14720     19451       3345.3  cudaStreamBeginCapture_v10000    
+      0.0            27950          2     13975.0    13975.0     11490     16460       3514.3  cuMemSetAccess                   
+      0.0            19811          2      9905.5     9905.5      6750     13061       4462.6  cudaStreamEndCapture_v10000      
+      0.0            17400         18       966.7      440.0       310      9020       2015.4  cudaEventCreateWithFlags         
+      0.0            13771          1     13771.0    13771.0     13771     13771          0.0  cudaStreamCreateWithFlags        
+      0.0             5980          3      1993.3      260.0       220      5500       3036.9  cuModuleGetLoadingMode           
+      0.0             5730          4      1432.5      635.0       330      4130       1804.9  cuInit                           
+      0.0             4920          2      2460.0     2460.0      2360      2560        141.4  cuMemMap                         
+      0.0             2530          1      2530.0     2530.0      2530      2530          0.0  cuMemGetAllocationGranularity    
+      0.0             1380          2       690.0      690.0       140      1240        777.8  cudaGetDriverEntryPoint_v11030   
+      0.0              870          3       290.0      290.0       210       370         80.0  cuDeviceGetLuid                  
+      0.0              470          2       235.0      235.0       230       240          7.1  cuMemRelease                     
+
+Processing [docs\simulation_error_2026-10-11\native_rerun\qwen2_5_0_5b_graph_on.sqlite] with [C:\Program Files\NVIDIA Corporation\Nsight Systems 2024.6.2\host-windows-x64\reports\cuda_gpu_kern_sum.py]... 
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                                                  Name                                                
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ----------------------------------------------------------------------------------------------------
+     18.6          1396024        130   10738.6    7184.5      6848     18753       4872.7  void mul_mat_q<(ggml_type)6, (int)128, (bool)0>(const char *, const int *, const int *, const int *�
+     15.3          1151848        130    8860.4    7776.0      7072     12417       2191.1  void mul_mat_q_stream_k_fixup<(ggml_type)6, (int)128, (bool)0>(const int *, const int *, float *, f�
+      6.4           483123          3  161041.0  161798.0    158886    162439       1893.6  void mul_mat_vec_q<(ggml_type)8, (int)1, (bool)0, (bool)1, (bool)0>(const void *, const void *, con�
+      6.1           456053        109    4184.0    1920.0      1568     13249       4202.7  void mul_mat_vec_q<(ggml_type)6, (int)1, (bool)1, (bool)1, (bool)0>(const void *, const void *, con�
+      5.2           389169        147    2647.4    2657.0      1824      2944        200.4  void rms_norm_f32<(int)256, (bool)1, (bool)0>(const float *, float *, int, long long, long long, lo�
+      4.7           356648        130    2743.4    1840.0      1216      5696       1542.8  void mul_mat_vec_q<(ggml_type)6, (int)2, (bool)0, (bool)0, (bool)0>(const void *, const void *, con�
+      4.0           299528        239    1253.3    1280.0       960      1664        160.7  void k_bin_bcast<&op_add, float, float, float, const float *>(const T2 *, const T3 *, T4 *, unsigne�
+      4.0           297356        316     941.0     928.0       896      1120         20.2  quantize_q8_1(const float *, void *, long long, long long, long long, long long, long long, unsigne�
+      2.7           204967         12   17080.6   16497.0     16289     22880       1838.5  void mul_mat_q<(ggml_type)14, (int)128, (bool)0>(const char *, const int *, const int *, const int �
+      2.6           197164         72    2738.4    1312.0      1280      6368       2040.3  void soft_max_f32<(bool)1, (int)256, (int)256, float>(const float *, const T4 *, const float *, flo�
+      2.3           175847        154    1141.9    1088.0      1024      1824        192.3  void quantize_mmq_q8_1<(mmq_q8_1_ds_layout)0, (bool)0>(const float *, const int *, void *, long lon�
+      2.1           159719         12   13309.9   13312.0     13152     13504         82.3  void mul_mat_q_stream_k_fixup<(ggml_type)14, (int)128, (bool)0>(const int *, const int *, float *, �
+      2.1           156040         11   14185.5   12928.0     12833     20481       2876.2  void mul_mat_q<(ggml_type)12, (int)128, (bool)0>(const char *, const int *, const int *, const int �
+      2.0           148648         12   12387.3   12385.0     12321     12449         44.0  void mul_mat_q_stream_k_fixup<(ggml_type)8, (int)128, (bool)0>(const int *, const int *, float *, f�
+      2.0           146852         11   13350.2   13344.0     13216     13536         91.4  void mul_mat_q_stream_k_fixup<(ggml_type)12, (int)128, (bool)0>(const int *, const int *, float *, �
+      1.5           111141         72    1543.6    1120.0      1088      2528        600.1  void rope_neox<(bool)1, (bool)0, float, float>(const T3 *, T4 *, int, int, int, int, int, int, int,�
+      1.3            98083         24    4086.8    4096.0      4064      4128         19.8  void mul_mat_vec_f<__half, float, (int)1, (int)32, (bool)0, (bool)0>(const T1 *, const float *, con�
+      1.3            96517         46    2098.2    2112.0       864      3329       1215.5  void unary_gated_op_kernel<&op_silu, float>(const T2 *, const T2 *, T2 *, long long, long long, lon�
+      1.2            90114         24    3754.8    3744.0      3712      3808         20.3  void convert_unary<float, __half>(const void *, T2 *, long long, long long, long long, uint3, long �
+      1.2            88929         14    6352.1    6208.0      5952      7552        425.2  void mul_mat_vec_q<(ggml_type)12, (int)1, (bool)1, (bool)0, (bool)0>(const void *, const void *, co�
+      1.1            86532         72    1201.8    1216.0      1152      1312         31.3  void rope_neox<(bool)1, (bool)0, float, __half>(const T3 *, T4 *, int, int, int, int, int, int, int�
+      1.1            85378         24    3557.4    3552.0      3520      3809         62.5  void cutlass::Kernel2<cutlass_80_tensorop_s1688gemm_64x64_16x6_tn_align4>(T1::Params)               
+      1.1            84805         48    1766.8    1760.0      1216      2337        547.4  void cpy_scalar<&cpy_1_scalar<float, float>>(const char *, char *, long long, long long, long long,�
+      1.1            82531         12    6877.6    6784.0      6464      7520        327.1  void mul_mat_vec_q<(ggml_type)14, (int)1, (bool)1, (bool)0, (bool)0>(const void *, const void *, co�
+      1.1            81602         12    6800.2    6784.0      6752      6912         44.3  void mul_mat_q<(ggml_type)8, (int)128, (bool)0>(const char *, const int *, const int *, const int *�
+      1.0            73474         72    1020.5     992.0       928      1344         86.5  void k_set_rows<float, long long, __half>(const T1 *, const T2 *, T3 *, long long, long long, long �
+      0.9            68739         24    2864.1    2848.5      2784      2944         38.8  void cutlass::Kernel2<cutlass_80_wmma_tensorop_h161616gemm_32x32_128x2_tn_align8>(T1::Params)       
+      0.9            68066         48    1418.0    1520.0      1024      1600        182.2  void convert_unary<__half, float>(const void *, T2 *, long long, long long, long long, uint3, long �
+      0.9            67233         12    5602.8    5472.0      5280      6976        472.4  void mul_mat_vec_q<(ggml_type)14, (int)2, (bool)0, (bool)0, (bool)0>(const void *, const void *, co�
+      0.9            64355         11    5850.5    5632.0      5408      7233        572.4  void mul_mat_vec_q<(ggml_type)12, (int)2, (bool)0, (bool)0, (bool)0>(const void *, const void *, co�
+      0.8            63362         24    2640.1    2720.0      1920      2976        274.8  void mul_mat_f<__half2, (int)32, (int)2, (int)2, (bool)0>(const T1 *, const float *, const int *, f�
+      0.6            44900         24    1870.8    1872.0      1824      1889         19.0  void mul_mat_vec_f<__half, __half, (int)1, (int)128, (bool)0, (bool)0>(const T1 *, const float *, c�
+      0.6            42723         24    1780.1    1761.0      1376      2016        162.3  void mul_mat_f<__half2, (int)32, (int)2, (int)1, (bool)0>(const T1 *, const float *, const int *, f�
+      0.5            41379         48     862.1     864.0       832       897         13.9  k_compute_batched_ptrs(const void *, const void *, char *, const void **, void **, long long, long �
+      0.3            20929         12    1744.1    1728.0      1632      1920         95.0  void mul_mat_vec_q<(ggml_type)8, (int)1, (bool)1, (bool)1, (bool)0>(const void *, const void *, con�
+      0.3            20384         11    1853.1    1856.0      1824      1856          9.6  void quantize_mmq_q8_1<(mmq_q8_1_ds_layout)1, (bool)0>(const float *, const int *, void *, long lon�
+      0.2            15840         12    1320.0    1296.0      1248      1504         72.4  void mul_mat_vec_q<(ggml_type)8, (int)2, (bool)0, (bool)0, (bool)0>(const void *, const void *, con�
+      0.1             6720          6    1120.0    1120.0      1024      1216        105.2  void k_get_rows_float<float, float>(const T1 *, const int *, T2 *, long long, long long, uint3, uns�
+      0.0             1824          1    1824.0    1824.0      1824      1824          0.0  void mul_mat_vec_q<(ggml_type)6, (int)1, (bool)0, (bool)1, (bool)0>(const void *, const void *, con�
+
