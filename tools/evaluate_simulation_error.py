@@ -162,6 +162,12 @@ def build_report() -> dict[str, Any]:
         "schema": "heterollm.simulation-error-evaluation/v1",
         "evaluation_date": "2026-10-11",
         "overall_verdict": "not_qualified_for_general_predictive_accuracy",
+        "execution_provenance": {
+            "end_to_end_simulation_rerun": False,
+            "native_inference_rerun": False,
+            "physical_path_micro_evaluation_rerun": True,
+            "physical_path_hardware_measurement": False,
+        },
         "sources": {
             "native_comparison": "docs/cost_logic_native_validation_2026-10-10/comparison_summary.json",
             "native_timing_manifest": "docs/cost_logic_native_validation_2026-10-10/native_timing_manifest.json",
@@ -229,6 +235,7 @@ def build_report() -> dict[str, Any]:
             ),
         },
         "limitations": [
+            "The 20 end-to-end simulation outputs were reused from the 2026-10-10 frontend run; this report recomputed summaries only.",
             "Native timing was reused from 2026-10-08 and not remeasured in this evaluation.",
             "Native evidence covers one machine, one 512/128 single-sequence workload, and 10 model presets.",
             "Software-equivalence references are independent execution paths, but are not physical hardware truth.",
@@ -247,6 +254,8 @@ def markdown(report: dict[str, Any]) -> str:
     native = report["native_latency"]["metric_summary"]
     lines = [
         "# 仿真误差初评（2026-10-11）",
+        "",
+        "口径：本报告的端到端误差表复用了已有的 2026-10-10 仿真输出和 2026-10-08 native 记录，没有重新跑完整前端仿真或 native 推理；本轮只重新执行了独立的 DRAM/NAND 软件路径微评估。",
         "",
         "结论：当前版本通过了列出软件 fixture 的等价性检查，但还不能通过通用预测精度验收。20 组 native 配对的 E2E MAPE 为 15.5965%，TTFT MAPE 为 23.9201%；CUDA Graph 收益预测基本为零，而 native 每个模型都有正收益。",
         "",

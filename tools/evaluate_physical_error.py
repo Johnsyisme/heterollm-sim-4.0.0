@@ -204,6 +204,12 @@ def run() -> dict:
         "date": "2026-10-11",
         "purpose": "Measure software path equivalence and conservation invariants for representative DRAM/NAND paths.",
         "scope_limit": "解析正确性仅表示当前快速路径与独立详细参考循环的一致性；不等同于硬件精度或真实芯片校准。",
+        "execution_provenance": {
+            "current_code_path_rerun": True,
+            "end_to_end_frontend_simulation_rerun": False,
+            "native_inference_rerun": False,
+            "hardware_measurement": False,
+        },
         "method": {
             "dram_reference": "DramCore subclass disabling acceleration, plus serial numeric reference in precision_dram_reference.py.",
             "nand_reference": "NandCore subclass executing the detailed page loop.",

@@ -2,6 +2,12 @@
   "schema": "heterollm.simulation-error-evaluation/v1",
   "evaluation_date": "2026-10-11",
   "overall_verdict": "not_qualified_for_general_predictive_accuracy",
+  "execution_provenance": {
+    "end_to_end_simulation_rerun": false,
+    "native_inference_rerun": false,
+    "physical_path_micro_evaluation_rerun": true,
+    "physical_path_hardware_measurement": false
+  },
   "sources": {
     "native_comparison": "docs/cost_logic_native_validation_2026-10-10/comparison_summary.json",
     "native_timing_manifest": "docs/cost_logic_native_validation_2026-10-10/native_timing_manifest.json",
@@ -363,6 +369,12 @@
     "date": "2026-10-11",
     "purpose": "Measure software path equivalence and conservation invariants for representative DRAM/NAND paths.",
     "scope_limit": "解析正确性仅表示当前快速路径与独立详细参考循环的一致性；不等同于硬件精度或真实芯片校准。",
+    "execution_provenance": {
+      "current_code_path_rerun": true,
+      "end_to_end_frontend_simulation_rerun": false,
+      "native_inference_rerun": false,
+      "hardware_measurement": false
+    },
     "method": {
       "dram_reference": "DramCore subclass disabling acceleration, plus serial numeric reference in precision_dram_reference.py.",
       "nand_reference": "NandCore subclass executing the detailed page loop.",
@@ -487,7 +499,7 @@
       "capacity_boundary_pass": true,
       "all_checks_pass": true
     },
-    "elapsed_seconds": 3.063
+    "elapsed_seconds": 3.156
   },
   "assessment": {
     "invariants_and_software_equivalence": "pass_for_listed_fixtures",
@@ -497,6 +509,7 @@
     "reason": "Native E2E MAPE is 15.5965% across 20 pairs; TTFT MAPE is 23.9201%; Graph benefit is predicted near zero while native benefit is positive for every model."
   },
   "limitations": [
+    "The 20 end-to-end simulation outputs were reused from the 2026-10-10 frontend run; this report recomputed summaries only.",
     "Native timing was reused from 2026-10-08 and not remeasured in this evaluation.",
     "Native evidence covers one machine, one 512/128 single-sequence workload, and 10 model presets.",
     "Software-equivalence references are independent execution paths, but are not physical hardware truth.",

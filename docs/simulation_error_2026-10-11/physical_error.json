@@ -3,6 +3,12 @@
   "date": "2026-10-11",
   "purpose": "Measure software path equivalence and conservation invariants for representative DRAM/NAND paths.",
   "scope_limit": "解析正确性仅表示当前快速路径与独立详细参考循环的一致性；不等同于硬件精度或真实芯片校准。",
+  "execution_provenance": {
+    "current_code_path_rerun": true,
+    "end_to_end_frontend_simulation_rerun": false,
+    "native_inference_rerun": false,
+    "hardware_measurement": false
+  },
   "method": {
     "dram_reference": "DramCore subclass disabling acceleration, plus serial numeric reference in precision_dram_reference.py.",
     "nand_reference": "NandCore subclass executing the detailed page loop.",
@@ -127,5 +133,5 @@
     "capacity_boundary_pass": true,
     "all_checks_pass": true
   },
-  "elapsed_seconds": 3.063
+  "elapsed_seconds": 3.156
 }
