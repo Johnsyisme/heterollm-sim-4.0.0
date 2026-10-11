@@ -165,7 +165,16 @@ class PhysicalRuntimeContext:
         )
         capacity = int(getattr(config, "effective_capacity_bytes", getattr(config, "capacity_bytes", 0)) or 0)
         if capacity > 0:
-            alignment = int(getattr(config, "burst_bytes", 64) or 64)
+            # The direct-backing planner uses burst alignment for DRAM and
+            # page alignment for NAND.  Keep automatically materialized
+            # buffers on the same physical granularity; otherwise a small
+            # preceding allocation can shift a page buffer into a second
+            # NAND page and create spurious read amplification.
+            alignment = (
+                int(config.burst_bytes)
+                if isinstance(config, DramConfig)
+                else int(config.page_bytes)
+            )
             self.allocators.setdefault(key, PhysicalAddressAllocator(capacity, alignment,
                 workspace_capacity_bytes=metadata.get("workspace_capacity_bytes", 0)))
         current = _PhysicalRuntime(core=core, signature=signature)

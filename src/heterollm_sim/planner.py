@@ -15302,7 +15302,16 @@ def _generic_kv_contract(builder, scenario, plan, rank, layer, *,
     if includes_current:
         if len(owners) != 1:
             # A scan is a unified physical view, not N copies of its length.
-            identity = "unified:" + ":".join(sorted(requests))
+            # Synthetic workloads may intentionally omit explicit request
+            # objects while still exposing multiple attention lanes.  Using
+            # only ``requests`` then collapses every cohort to ``unified:``
+            # and lets logical KV identities alias across cohorts.  Preserve
+            # the historical identity for real workloads, and derive a
+            # deterministic cohort identity from the lane owners otherwise.
+            identity_members = tuple(sorted(requests))
+            if not identity_members:
+                identity_members = tuple(sorted(request_id for request_id, *_ in owners))
+            identity = "unified:" + ":".join(identity_members)
             owners = [(identity, history_tokens, tuple(range(max(0, history_tokens - materialized_tokens), history_tokens)), [(0, history_tokens)])]
         else:
             request_id, _end, materialized, _ranges = owners[0]
@@ -19576,7 +19585,20 @@ def _compile_parallel_layer_body(
                 builder, scenario, router, plan, rank, layer, generic_kv,
                 {"k": [generic_k], "v": [generic_v]}, (qkv_ready,),
                 name="{}.rank{:03d}.kv_materialize".format(prefix, rank.rank),
-                target_component_id=qkv_target, committed_tokens=kv_append_tokens)
+                # QKV may legitimately execute on CIM, but KV materialization
+                # is a writable memory operation.  Reusing the QKV target
+                # would submit a MEMORY primitive to a CIM component, which
+                # has no memory cost model and aborts otherwise valid CIM +
+                # full-attention scenarios.  Keep compute placement intact;
+                # place the materialization on the rank's normal compute
+                # endpoint so its direct HBM/GDDR write path is resolved by
+                # the existing memory contract.
+                target_component_id=(
+                    rank.component_id
+                    if _is_cim(_component(scenario, qkv_target))
+                    else qkv_target
+                ),
+                committed_tokens=kv_append_tokens)
         kv_read = _add_kv_read(
             builder,
             scenario,

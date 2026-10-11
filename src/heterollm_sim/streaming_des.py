@@ -787,14 +787,26 @@ class _ResultAccumulator:
 
     def register_chunk(self, chunk: RequestTaskChunk) -> None:
         self.critical.register_chunk(chunk)
+        # Endpoint services created by the planner carry a scalar physical
+        # execution *preview*.  The event kernel resolves that descriptor
+        # again at dispatch and stores the authoritative ``runtime_dispatch``
+        # result on the observed task.  Counting both paths doubles NAND/HBF/
+        # SSD traffic, service time, and energy.  Keep the legacy fallback for
+        # authored chunks that have no explicit role, but defer tagged
+        # construction previews until ``observe``.
+        storage_preview_tasks = tuple(
+            task
+            for task in chunk.tasks
+            if task.metadata.get("physical_execution_role")
+            != "construction_preview"
+        )
         _merge_storage_traffic(
             self.storage_traffic,
             _summarize_nand_task_traffic(
-                chunk.tasks, resource_owners=self.resource_owners
+                storage_preview_tasks, resource_owners=self.resource_owners
             ),
         )
         # Resolved media/DRAM state is only available after kernel.step().
-        # Input contracts remain counted above for legacy endpoint paths.
         grouped: Dict[
             Tuple[str, str, str, object, object], Dict[str, object]
         ] = {}

@@ -1998,7 +1998,11 @@ def _online_result_semantics(
     *,
     windows_ns: Mapping[str, Sequence[float]],
 ) -> Dict[str, Any]:
-    makespan = float(result.serving.makespan_ns)
+    wall_window = tuple(windows_ns.get("wall_clock", (0.0, 0.0)))
+    wall_duration = max(
+        0.0,
+        float(wall_window[1]) - float(wall_window[0]),
+    ) if len(wall_window) >= 2 else 0.0
     primary_boundary = _online_primary_latency_boundary(result.serving)
     if primary_boundary == "engine":
         latency = {
@@ -2038,7 +2042,7 @@ def _online_result_semantics(
             "primary_window": "wall_clock",
             "primary_window_ns": list(windows_ns["wall_clock"]),
             "primary_denominator": "wall_clock_duration_ns",
-            "primary_denominator_ns": makespan,
+            "primary_denominator_ns": wall_duration,
             "windows_ns": {
                 name: list(bounds) for name, bounds in windows_ns.items()
             },
@@ -2070,6 +2074,7 @@ def _visualization_payload(
     start = options.event_offset
     representative_truncated = False
     logical_event_total: Optional[int] = None
+    origin_ns = 0.0
     if isinstance(result, OnlineScenarioResult):
         total_events = len(result.serving.batches)
         selected = result.serving.batches[start : start + options.event_limit]
@@ -2079,6 +2084,7 @@ def _visualization_payload(
         fidelity = TraceFidelity.AGGREGATE
         granularity = "batch"
         trace_source = "online_batch_envelope"
+        origin_ns = _online_runtime_origin_ns(result.serving)
         makespan_ns = float(result.serving.makespan_ns)
         limitations.extend(
             [
@@ -2149,7 +2155,7 @@ def _visualization_payload(
             or memory_layout["truncated"]
         ),
         "limitations": limitations,
-        "time_range_ns": [0.0, makespan_ns],
+        "time_range_ns": [origin_ns, max(origin_ns, makespan_ns)],
         "events": events,
         "memory_layout": memory_layout,
         "pagination": {
@@ -2393,6 +2399,19 @@ def _finite_non_negative(value: Any) -> float:
     except (TypeError, ValueError, OverflowError):
         return 0.0
     return result if math.isfinite(result) and result > 0.0 else 0.0
+
+
+def _online_runtime_origin_ns(serving: Any) -> float:
+    """Return the absolute start of the online measurement window."""
+
+    return _finite_non_negative(getattr(serving, "runtime_origin_ns", 0.0))
+
+
+def _online_elapsed_makespan_ns(serving: Any) -> float:
+    """Return serving duration while preserving absolute event timestamps."""
+
+    end_ns = _finite_non_negative(getattr(serving, "makespan_ns", 0.0))
+    return max(0.0, end_ns - _online_runtime_origin_ns(serving))
 
 
 def _capacity_payload(
@@ -3462,8 +3481,9 @@ def _component_timeseries(result: RunResult) -> Dict[str, Any]:
         isinstance(result, ScenarioResult)
         and result.execution.retention_policy is not RetentionPolicy.EXACT
     )
+    origin_ns = _online_runtime_origin_ns(result.serving) if online else 0.0
     makespan_ns = (
-        float(result.serving.makespan_ns)
+        _online_elapsed_makespan_ns(result.serving)
         if online
         else float(result.trace.makespan_ns)
     )
@@ -3513,6 +3533,11 @@ def _component_timeseries(result: RunResult) -> Dict[str, Any]:
         if kind in {"fabric", "switch", "bridge", "interconnect"}:
             metric_samples.setdefault("fabric_bandwidth_utilization", [])
         for metric, samples in sorted(metric_samples.items()):
+            if online and origin_ns > 0.0:
+                samples = [
+                    (max(0.0, start - origin_ns), max(0.0, end - origin_ns), value)
+                    for start, end, value in samples
+                ]
             intervals = _sweep_change_points(
                 samples, makespan_ns, clamp_ratio=True
             )
@@ -3873,6 +3898,12 @@ def _online_mtp_token_events(serving: ServingResult) -> Tuple[Any, ...]:
     def is_mtp_token_event(event: Any) -> bool:
         if event.event_type != "tokens_committed" or event.cohort_id is None:
             return False
+        request_metric = serving.request_metrics.get(event.request_id)
+        if request_metric is None or request_metric.status != RequestStatus.FINISHED:
+            # A rejected request may have produced a partial stream before
+            # the terminal admission decision.  It must not contribute to
+            # successful MTP acceptance or committed-token projections.
+            return False
         cohort_id = str(event.cohort_id)
         details = event.details if isinstance(event.details, Mapping) else {}
         if str(details.get("source", "")).strip().lower() in {
@@ -4182,6 +4213,9 @@ def _online_generation_subtargets(
     for event in serving.events:
         if getattr(event, "event_type", None) != "tokens_committed":
             continue
+        request_metric = serving.request_metrics.get(getattr(event, "request_id", None))
+        if request_metric is None or request_metric.status != RequestStatus.FINISHED:
+            continue
         token_events += 1
         details = event.details if isinstance(event.details, Mapping) else None
         if details is None or "visible_tokens" not in details:
@@ -4275,6 +4309,9 @@ def _online_mtp_draft_subtargets(serving: ServingResult) -> Dict[str, Any]:
     for event in serving.events:
         if getattr(event, "event_type", None) != "tokens_committed":
             continue
+        request_metric = serving.request_metrics.get(getattr(event, "request_id", None))
+        if request_metric is None or request_metric.status != RequestStatus.FINISHED:
+            continue
         details = event.details if isinstance(event.details, Mapping) else None
         if details is None:
             malformed_token_events += 1
@@ -4331,7 +4368,7 @@ def _union_interval_duration_ns(
 
 def _online_gpu_active_proxy(result: OnlineScenarioResult) -> Dict[str, Any]:
     serving = result.serving
-    makespan_ns = float(serving.makespan_ns)
+    makespan_ns = _online_elapsed_makespan_ns(serving)
     gpu_component_ids = {
         component.component_id
         for component in result.scenario.hardware.components
@@ -5035,7 +5072,7 @@ def _online_simulated_subtargets(
         if owner_residency.enabled
         else None
     )
-    makespan_ns = float(serving.makespan_ns)
+    makespan_ns = _online_elapsed_makespan_ns(serving)
     total_energy_pj = sum(batch.cost.energy_pj for batch in serving.batches)
     modeled_power_mean_w = (
         total_energy_pj / makespan_ns * 1.0e-3
@@ -5282,7 +5319,7 @@ def _online_simulated_subtargets(
         "gpu_active_proxy": gpu_active,
         "power": {
             "modeled_total_dynamic_power_mean_w": modeled_power_mean_w,
-            "source": "sum(batch.cost.energy_pj) / serving.makespan_ns",
+            "source": "sum(batch.cost.energy_pj) / serving elapsed makespan",
             "guardrail": (
                 "modeled dynamic workload power only; not GPU board power"
             ),
@@ -5433,8 +5470,12 @@ def _online_report_core(
         }
         if request_id in selected_request_ids:
             request_rows[request_id] = row
-        committed_total += metric.visible_output_tokens
         if metric.status == RequestStatus.FINISHED:
+            # A rejected request can have emitted a partial stream before the
+            # admission/capacity decision is finalized.  Those tokens remain
+            # useful in the request detail row, but they are not completed
+            # serving throughput and must not inflate the aggregate rate.
+            committed_total += metric.visible_output_tokens
             completed += 1
             canonical_ttft = (
                 engine_ttft if primary_boundary == "engine" else metric.ttft_ns
@@ -5481,7 +5522,9 @@ def _online_report_core(
         for event in mtp_events
     )
 
-    makespan = float(serving.makespan_ns)
+    origin_ns = _online_runtime_origin_ns(serving)
+    absolute_makespan = float(serving.makespan_ns)
+    makespan = _online_elapsed_makespan_ns(serving)
     wall_seconds = makespan / 1_000_000_000.0 if makespan > 0 else 0.0
     arrivals = [metric.arrival_ns for metric in serving.request_metrics.values()]
     finishes = [
@@ -5506,6 +5549,8 @@ def _online_report_core(
         for event in serving.events
         if event.event_type == "tokens_committed"
         and steady_start <= event.timestamp_ns <= steady_end
+        and event.request_id in serving.request_metrics
+        and serving.request_metrics[event.request_id].status == RequestStatus.FINISHED
     )
     steady_requests = sum(
         1
@@ -5515,8 +5560,17 @@ def _online_report_core(
     steady_seconds = max(0.0, steady_end - steady_start) / 1_000_000_000.0
 
     resource_busy = _sum_batch_metadata(result, "resource_busy_ns")
+    raw_capacities = serving.runtime_kernel_metrics.get("resource_capacities", {})
+    resource_capacities = (
+        raw_capacities if isinstance(raw_capacities, Mapping) else {}
+    )
     utilization = {
-        name: (busy / makespan if makespan > 0 else 0.0)
+        name: (
+            busy
+            / (makespan * max(1, int(resource_capacities.get(name, 1))))
+            if makespan > 0
+            else 0.0
+        )
         for name, busy in resource_busy.items()
     }
     bottleneck = (
@@ -5539,7 +5593,7 @@ def _online_report_core(
     model_coverage = _model_coverage(result.scenario)
     mtp_model = model_coverage["mtp"]
     measurement_windows_ns = {
-        "wall_clock": [0.0, makespan],
+        "wall_clock": [origin_ns, max(origin_ns, absolute_makespan)],
         "active": [active_start, active_end],
         "steady": [steady_start, steady_end],
     }

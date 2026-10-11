@@ -2558,6 +2558,49 @@ class UnifiedEventKernel:
         resource_task_count = self.resource_task_count
         resource_busy_ns_get = resource_busy_ns.get
         queue_wait_ns = start_ns - effective_ready_ns
+        physical_queue_wait_by_owner: Dict[str, float] = {}
+        physical_resource_owners: Dict[str, str] = {}
+        if is_physical:
+            raw_by_owner = task.metadata.get("physical_execution_by_owner")
+            if isinstance(raw_by_owner, Mapping):
+                for raw_owner, raw_execution in raw_by_owner.items():
+                    if isinstance(raw_execution, Mapping):
+                        raw_owners = raw_execution.get("resource_owners", {})
+                        if isinstance(raw_owners, Mapping):
+                            physical_resource_owners.update({
+                                str(resource_id): str(owner)
+                                for resource_id, owner in raw_owners.items()
+                            })
+                        try:
+                            value = float(raw_execution.get("queue_wait_ns", 0.0))
+                        except (TypeError, ValueError, OverflowError):
+                            value = 0.0
+                        physical_queue_wait_by_owner[str(raw_owner)] = value
+            else:
+                raw_execution = task.metadata.get("physical_execution", {})
+                if isinstance(raw_execution, Mapping):
+                    raw_owners = raw_execution.get("resource_owners", {})
+                    if isinstance(raw_owners, Mapping):
+                        physical_resource_owners.update({
+                            str(resource_id): str(owner)
+                            for resource_id, owner in raw_owners.items()
+                        })
+                aggregate_wait = (
+                    float(raw_execution.get("queue_wait_ns", 0.0))
+                    if isinstance(raw_execution, Mapping)
+                    else 0.0
+                )
+                # A legacy single-row physical execution has no owner split.
+                # Attribute the aggregate once, to the deterministic first
+                # physical owner, instead of copying it to every stage.
+                owners = sorted({
+                    physical_resource_owners.get(
+                        str(resource_id), self._physical_owner(str(resource_id))
+                    )
+                    for resource_id in physical_ids
+                })
+                if owners:
+                    physical_queue_wait_by_owner[owners[0]] = aggregate_wait
         for demand in demands:
             if is_physical and str(demand.resource_id) in physical_ids:
                 # The core already reserved the real stages. Charging these
@@ -2566,9 +2609,13 @@ class UnifiedEventKernel:
                 resource_busy_ns[demand.resource_id] = (
                     resource_busy_ns_get(demand.resource_id, 0.0) + demand.service_ns
                 )
+                owner_id = physical_resource_owners.get(
+                    demand.resource_id, self._physical_owner(demand.resource_id)
+                )
+                owner_wait = physical_queue_wait_by_owner.pop(owner_id, 0.0)
                 resource_queue_wait_ns[demand.resource_id] = (
                     resource_queue_wait_ns.get(demand.resource_id, 0.0)
-                    + float(task.metadata["physical_execution"].get("queue_wait_ns", 0.0))
+                    + owner_wait
                 )
                 resource_task_count[demand.resource_id] = resource_task_count.get(demand.resource_id, 0) + 1
                 self.resource_capacities.setdefault(demand.resource_id, 1)

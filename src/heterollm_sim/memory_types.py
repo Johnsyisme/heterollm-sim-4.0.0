@@ -204,6 +204,11 @@ class DramConfig:
             _positive_int("data_lanes", self.data_lanes)
         if self.row_bytes % self.burst_bytes:
             raise ValueError("row_bytes must be a multiple of burst_bytes")
+        if self.capacity_bytes is not None and self.capacity_bytes % self.burst_bytes:
+            # Physical requests are expanded to complete bursts.  A capacity
+            # ending in the middle of one burst would therefore allow the
+            # last expanded transaction to cross the declared boundary.
+            raise ValueError("capacity_bytes must be a multiple of burst_bytes")
         if self.interleave_bytes is not None:
             _positive_int("interleave_bytes", self.interleave_bytes)
             if self.interleave_bytes % self.burst_bytes:
@@ -372,6 +377,11 @@ class NandConfig:
             raise ValueError("planes_independent must be a boolean")
         if self.capacity_bytes is not None:
             _positive_int("capacity_bytes", self.capacity_bytes)
+            if self.capacity_bytes % self.page_bytes:
+                # NAND requests are expanded to complete pages.  Accepting a
+                # tail capacity that ends mid-page lets the last physical
+                # page cross the declared device boundary.
+                raise ValueError("capacity_bytes must be a multiple of page_bytes")
         _positive_int("max_outstanding_requests", self.max_outstanding_requests)
         _positive_int("max_expanded_segments", self.max_expanded_segments)
         for name in ("host_bandwidth_gb_s", "internal_bandwidth_gb_s", "page_read_ns", "page_program_ns", "block_erase_ns", "front_ns"):

@@ -1814,6 +1814,12 @@ class ServingResult:
         """Compatibility alias for callers that call the trace scheduler trace."""
         return self.schedule_trace
     runtime_kernel_metrics: Mapping[str, object] = field(default_factory=dict)
+    # Event timestamps remain on the shared absolute simulation clock, while
+    # reports need the elapsed serving window after any control-plane prefix.
+    # Keep the origin explicit so an online result cannot use an absolute end
+    # timestamp as a duration.  This field stays last to preserve legacy
+    # positional construction of ServingResult.
+    runtime_origin_ns: float = 0.0
 
     @property
     def trace(self) -> Tuple[ServingEvent, ...]:
@@ -15434,6 +15440,7 @@ class _OnlineRuntime:
             linear_state_metrics,
             scheduler_metrics,
             makespan,
+            runtime_origin_ns=self._runtime_origin_ns,
             prompt_cache_metrics=self.prompt_cache.metrics(),
             owner_residency_metrics=owner_residency_metrics,
             schedule_trace=tuple(self._schedule_trace),

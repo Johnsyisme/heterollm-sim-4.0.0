@@ -52,6 +52,19 @@ class NandCore:
     def _host_id(self) -> str:
         return str(self.config.metadata.get("host_resource_id", "nand:host"))
 
+    def _bandwidth_ceiling_gb_s(self) -> float:
+        """Return the end-to-end payload ceiling for the NAND data path.
+
+        A request crosses both the host link and the NAND internal channel.
+        The slower leg is therefore the ceiling exposed to reports.  The
+        reservation timeline still models each leg separately; this helper
+        only fixes the derived bottleneck/utilization metric.
+        """
+        return min(
+            float(self.config.host_bandwidth_gb_s),
+            float(self.config.internal_bandwidth_gb_s),
+        )
+
     def _array_stage(self, name: str, resource: str, earliest: float, duration: float, bytes: int = 0) -> StageTiming:
         reservation = self.timeline.reserve(resource, earliest, duration)
         return StageTiming(name, reservation.start_ns, reservation.end_ns, resource, bytes)
@@ -208,7 +221,7 @@ class NandCore:
                 "erase_operations": erases,
                 "page_count": segment_count,
                 "details_truncated": details_truncated,
-                "bandwidth_ceiling_gb_s": self.config.host_bandwidth_gb_s,
+                "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(),
                 "array_units": self.config.array_units,
                 "write_completion": "media_program_complete" if request.operation is Operation.WRITE else "n/a",
             },
@@ -262,7 +275,7 @@ class NandCore:
                 "erase_operations": 0, "page_count": page_count,
                 "details_truncated": page_count > self.config.max_expanded_segments,
                 "accelerated_pages": accelerated_pages,
-                "bandwidth_ceiling_gb_s": self.config.host_bandwidth_gb_s,
+                "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(),
                 "array_units": self.config.array_units,
                 "write_completion": "media_program_complete" if request.operation is Operation.WRITE else "n/a",
             },
@@ -274,7 +287,10 @@ class NandCore:
     def run(self, requests: Iterable[AccessRequest]):
         """Execute a batch and return one aggregate with achieved bandwidth."""
         from .memory_transfer import summarize_batch
-        return summarize_batch(self.execute_batch(requests), bandwidth_ceiling_gb_s=self.config.host_bandwidth_gb_s)
+        return summarize_batch(
+            self.execute_batch(requests),
+            bandwidth_ceiling_gb_s=self._bandwidth_ceiling_gb_s(),
+        )
 
 
 def nand_service(config: NandConfig, request: AccessRequest, *, timeline: Optional[ResourceTimeline] = None) -> TransactionResult:

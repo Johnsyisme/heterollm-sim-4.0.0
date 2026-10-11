@@ -416,7 +416,16 @@ class TopologyRouter:
         self.resource_capacities = {}
         for hops in self._adjacency.values():
             for hop in hops:
-                self.resource_capacities.update(hop.resource_capacities)
+                for resource_id, capacity in hop.resource_capacities.items():
+                    previous = self.resource_capacities.get(resource_id)
+                    if previous is not None and previous != capacity:
+                        raise ValueError(
+                            "conflicting capacity for shared communication resource "
+                            "{}: {} != {}".format(
+                                resource_id, previous, capacity
+                            )
+                        )
+                    self.resource_capacities[resource_id] = capacity
         for component_id in self._adjacency:
             self._adjacency[component_id].sort(
                 key=lambda hop: (hop.target_component, hop.link_id, hop.resource_id)
