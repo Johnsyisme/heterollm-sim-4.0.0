@@ -3,6 +3,7 @@
 from dataclasses import replace
 import unittest
 
+from heterollm_sim.config import kv_policy_from_dict
 from heterollm_sim.ir import ComponentSpec, KVCachePolicy, LinkSpec, PortSpec
 from heterollm_sim.memory_types import make_hbf_config
 from heterollm_sim.reference import build_reference_scenario
@@ -10,6 +11,15 @@ from heterollm_sim.serving import BatchCost, _OnlineRuntime, compile_serving_pla
 
 
 class PagedPoolServingTests(unittest.TestCase):
+    def test_relay_component_survives_json_policy_normalization(self):
+        policy = kv_policy_from_dict({
+            "layout_mode": "paged_pool",
+            "pool_components": ["hbm0", "hbf0"],
+            "relay_components": ["hostmem0"],
+        })
+        self.assertEqual(policy.pool_components, ("hbm0", "hbf0"))
+        self.assertEqual(policy.relay_components, ("hostmem0",))
+
     @staticmethod
     def _scenario_with_hbf():
         base = build_reference_scenario()
@@ -114,6 +124,109 @@ class PagedPoolServingTests(unittest.TestCase):
         self.assertEqual(page.owner_component, "hbm0")
         self.assertEqual(len(pool.transfer_executor.events), 2)
         self.assertGreater(runtime.swap_transfer_time_ns, 0.0)
+
+    def test_paged_pool_capacity_keeps_storage_tier_in_aggregate_budget(self):
+        """The logical pool must not be clipped to the active HBM tier."""
+
+        base = self._scenario_with_hbf()
+        page_bytes = 16 * 1024  # reference int8 KV: 1024 B/token, 16 tokens/page
+        hbm_bytes = 2 * page_bytes
+        hbf_bytes = 8 * page_bytes
+
+        hbm = base.hardware.get_component("hbm0")
+        hbm_metadata = dict(hbm.metadata)
+        hbm_physical = dict(hbm_metadata["physical_memory_config"])
+        hbm_physical["capacity_bytes"] = hbm_bytes
+        hbm_metadata["physical_memory_config"] = hbm_physical
+        hbm = replace(hbm, capacity_bytes=hbm_bytes, metadata=hbm_metadata)
+
+        hbf = base.hardware.get_component("hbf0")
+        hbf_metadata = dict(hbf.metadata)
+        hbf_physical = replace(
+            hbf_metadata["physical_memory_config"], capacity_bytes=hbf_bytes
+        )
+        hbf_metadata["physical_memory_config"] = hbf_physical
+        hbf = replace(hbf, capacity_bytes=hbf_bytes, metadata=hbf_metadata)
+
+        hardware = replace(
+            base.hardware,
+            components=tuple(
+                hbm
+                if component.component_id == "hbm0"
+                else hbf
+                if component.component_id == "hbf0"
+                else component
+                for component in base.hardware.components
+            ),
+        )
+        scenario = replace(
+            base,
+            hardware=hardware,
+            placement=replace(base.placement, hardware_name=hardware.name),
+        )
+
+        plan = compile_serving_plan(scenario)
+        self.assertEqual(plan.kv_policy.bytes_per_page, page_bytes)
+        self.assertEqual(plan.kv_policy.capacity_pages, 10)
+        self.assertEqual(plan.kv_policy.capacity_bytes, hbm_bytes + hbf_bytes)
+        self.assertEqual(
+            plan.kv_policy.capacity_bytes_by_component,
+            {"hbm0": hbm_bytes, "hbf0": hbf_bytes},
+        )
+
+        runtime = _OnlineRuntime(
+            plan,
+            lambda *_: BatchCost(0.0),
+            apply_measurement_start_residency=False,
+        )
+        resource = runtime._resource_snapshot([])
+        self.assertEqual(resource["kv_capacity_pages"], 10)
+        self.assertEqual(resource["kv_device_resident_capacity_pages"], 2)
+        self.assertEqual(resource["kv_device_resident_capacity_bytes"], hbm_bytes)
+        self.assertEqual(
+            runtime._result().kv_metrics.effective_physical_capacity_bytes,
+            hbm_bytes,
+        )
+
+    def test_relay_path_is_propagated_and_mixed_page_owners_are_charged(self):
+        scenario = self._scenario_with_hbf()
+        policy = replace(
+            scenario.placement.kv_policy,
+            relay_components=("hostmem0",),
+        )
+        scenario = replace(
+            scenario,
+            placement=replace(scenario.placement, kv_policy=policy),
+        )
+        plan = compile_serving_plan(scenario)
+        runtime = _OnlineRuntime(
+            plan,
+            lambda *_: BatchCost(0.0),
+            apply_measurement_start_residency=False,
+        )
+        executor = runtime._paged_pool_transfer_executor
+        self.assertIsNotNone(executor)
+        self.assertEqual(executor.relay_components, ("hostmem0",))
+        request = runtime.states[plan.requests[0].request_id]
+        pool = runtime.ledger.paged_pool
+        self.assertTrue(runtime.ledger.resize(request, 2))
+        pages = pool.request_pages(request.spec.request_id)
+        self.assertEqual(len(pages), 2)
+        self.assertTrue(pool.offload_page(pages[0].logical_page_id, "hbf0"))
+        owners = [owner for owner, _access in pool.cache_accesses(
+            request.spec.request_id,
+            first_token=0,
+            token_count=32,
+        )]
+        self.assertEqual(owners, ["hbf0", "hbm0"])
+        read_before = executor.counters["read_bytes"]
+        executor.read_page(pages[0])
+        executor.read_page(pages[1])
+        self.assertEqual(
+            executor.counters["read_bytes"] - read_before,
+            2 * pages[0].bytes,
+        )
+        self.assertGreater(executor.counters["relay_bytes"], 0)
 
 
 if __name__ == "__main__":

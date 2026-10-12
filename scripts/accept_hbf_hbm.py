@@ -20,7 +20,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from heterollm_sim.dram_core import DramCore
 from heterollm_sim.communication import TopologyRouter
 from heterollm_sim.data_motion import PhysicalRuntimeContext
-from heterollm_sim.ir import ComponentSpec, HardwareSpec, LinkSpec
+from heterollm_sim.ir import (
+    ComponentSpec,
+    HardwareSpec,
+    KVCachePolicy,
+    LinkSpec,
+    PortSpec,
+    RequestSpec,
+)
 from heterollm_sim.kv_pool import DynamicKVPool, KvPoolComponent
 from heterollm_sim.kv_transfer import PhysicalKVTransferExecutor
 from heterollm_sim.memory_transfer import ResourceTimeline, summarize_batch
@@ -29,9 +36,379 @@ from heterollm_sim.memory_types import (
     make_hbf_config, make_hbm_config, make_ssd_config,
 )
 from heterollm_sim.nand_core import NandCore
+from heterollm_sim.reference import build_reference_scenario
+from heterollm_sim.serving import BatchCost, _OnlineRuntime, compile_serving_plan
 
 PAGE = 16_384
 CAPACITY = 32 * 1024 * 1024
+
+
+def _serving_paged_scenario(
+    *, hbf_capacity: int, requests=(), hbm_capacity: int = 32 * PAGE
+):
+    """Build a tiny physical HBM+HBF serving scenario for acceptance."""
+
+    base = build_reference_scenario()
+    hbm = base.hardware.get_component("hbm0")
+    hbm = replace(
+        hbm,
+        capacity_bytes=hbm_capacity,
+        metadata={
+            **hbm.metadata,
+            "physical_memory_config": make_hbm_config(
+                capacity_bytes=hbm_capacity,
+                interface_bandwidth_gb_s=512.0,
+                burst_interval_ns=0.0,
+            ),
+        },
+    )
+    hbf_physical = make_hbf_config(
+        capacity_bytes=hbf_capacity,
+        channels=8,
+        parallel_units=8,
+        host_bandwidth_gb_s=488.0,
+        host_read_bandwidth_gb_s=488.0,
+        host_write_bandwidth_gb_s=27.2,
+    )
+    hbf = ComponentSpec(
+        component_id="hbf0",
+        kind="hbf",
+        ports=(
+            PortSpec(
+                port_id="pcie0",
+                protocol="PCIe",
+                role="endpoint",
+                version="5.0",
+                lanes=16,
+                bandwidth_gbps=512.0,
+                payload="coherent_dma",
+            ),
+        ),
+        capacity_bytes=hbf_capacity,
+        read_bandwidth_gbps=488.0 * 8.0,
+        write_bandwidth_gbps=27.2 * 8.0,
+        metadata={
+            "physical_memory_config": hbf_physical,
+            "access_mode": "remote_flash",
+        },
+    )
+    hardware = replace(
+        base.hardware,
+        components=tuple(
+            hbm if component.component_id == "hbm0" else component
+            for component in base.hardware.components
+        ) + (hbf,),
+        links=base.hardware.links
+        + (
+            LinkSpec(
+                link_id="cpu-hbf-pcie",
+                source_component="cpu0",
+                source_port="pcie0",
+                target_component="hbf0",
+                target_port="pcie0",
+                protocol="PCIe",
+                version="5.0",
+                lanes=16,
+                bandwidth_gbps=512.0,
+                latency_ns=100.0,
+                payload="coherent_dma",
+            ),
+        ),
+        require_connected=False,
+    )
+    policy = KVCachePolicy(
+        cache_component="hbm0",
+        offload_component="hbf0",
+        tokens_per_page=16,
+        dtype="int8",
+        layout_mode="paged_pool",
+        pool_components=("hbm0", "hbf0"),
+        preemption_mode="swap",
+    )
+    scheduler = replace(
+        base.workload.scheduler,
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        max_num_ubatch_tokens=32,
+        prefill_chunk_tokens=32,
+        preemption_enabled=True,
+        preemption_policy="swap",
+    )
+    workload = replace(
+        base.workload,
+        requests=tuple(requests),
+        request_count=len(requests),
+        scheduler=scheduler,
+        mtp=None,
+    )
+    return replace(
+        base,
+        hardware=hardware,
+        placement=replace(
+            base.placement,
+            hardware_name=hardware.name,
+            kv_policy=policy,
+        ),
+        workload=workload,
+    )
+
+
+def check_serving_paged_swap() -> dict[str, Any]:
+    """Verify automatic multi-page swap/resume and atomic capacity rollback."""
+
+    requests = (
+        RequestSpec(
+            request_id="swap-low",
+            arrival_ns=0.0,
+            prompt_tokens=32,
+            output_tokens=8,
+            priority=0,
+        ),
+        RequestSpec(
+            request_id="swap-high",
+            arrival_ns=1.0,
+            prompt_tokens=32,
+            output_tokens=8,
+            priority=10,
+        ),
+    )
+    plan = compile_serving_plan(
+        _serving_paged_scenario(
+            hbf_capacity=16 * 1024 * 1024,
+            requests=requests,
+        )
+    )
+    runtime = _OnlineRuntime(
+        plan,
+        lambda *_: BatchCost(100.0),
+        apply_measurement_start_residency=False,
+    )
+    result = runtime.run()
+    states = runtime.states
+    low = states["swap-low"]
+    high = states["swap-high"]
+    swap_out = [event for event in runtime.events if event.event_type == "kv_swap_out"]
+    swap_in = [event for event in runtime.events if event.event_type == "kv_swap_in"]
+    event_times = [float(event.timestamp_ns) for event in runtime.events]
+    require(event_times == sorted(event_times),
+            "serving events must be returned in non-decreasing timestamp order")
+    low_events = [
+        event for event in runtime.events if event.request_id == "swap-low"
+    ]
+    low_event_by_type = {}
+    for event in low_events:
+        low_event_by_type.setdefault(event.event_type, []).append(event)
+    low_out_start = low_event_by_type.get("kv_swap_out_start", [None])[0]
+    low_out_end = low_event_by_type.get("kv_swap_out", [None])[-1]
+    transfer_events = [
+        event for event in runtime.events
+        if event.event_type in {
+            "kv_pool_transfer_start", "kv_pool_transfer_complete"
+        }
+        and low_out_start is not None
+        and low_out_end is not None
+        and low_out_start.timestamp_ns <= event.timestamp_ns <= low_out_end.timestamp_ns
+    ]
+    for event in transfer_events:
+        low_event_by_type.setdefault(event.event_type, []).append(event)
+    required_low_types = (
+        "kv_swap_out_start",
+        "kv_pool_transfer_start",
+        "kv_pool_transfer_complete",
+        "kv_swap_out",
+    )
+    require(all(low_event_by_type.get(kind) for kind in required_low_types),
+            "paged swap must expose ordered physical transfer boundaries")
+    low_order = [
+        low_event_by_type[kind][0].timestamp_ns
+        for kind in required_low_types[:3]
+    ] + [low_event_by_type["kv_swap_out"][-1].timestamp_ns]
+    require(low_order == sorted(low_order),
+            "swap start, page transfer, completion, and swap end are out of order")
+    low_in_events = [
+        event for event in runtime.events if event.request_id == "swap-low"
+        and event.event_type in {"kv_swap_in_start", "kv_swap_in"}
+    ]
+    require(
+        any(event.event_type == "kv_swap_in_start" for event in low_in_events)
+        and any(event.event_type == "kv_swap_in" for event in low_in_events),
+        "paged restore must expose swap-in boundaries",
+    )
+    low_in_start = next(
+        event for event in low_in_events if event.event_type == "kv_swap_in_start"
+    )
+    low_in_end = next(
+        event for event in reversed(low_in_events) if event.event_type == "kv_swap_in"
+    )
+    restore_transfer_events = [
+        event for event in runtime.events
+        if event.event_type in {
+            "kv_pool_transfer_start", "kv_pool_transfer_complete"
+        }
+        and low_in_start.timestamp_ns <= event.timestamp_ns <= low_in_end.timestamp_ns
+    ]
+    require(
+        restore_transfer_events
+        and restore_transfer_events[0].event_type == "kv_pool_transfer_start"
+        and restore_transfer_events[-1].event_type == "kv_pool_transfer_complete",
+        "swap-in page transfers must be enclosed by restore boundaries",
+    )
+    require(all(state.status.value == "finished" for state in states.values()),
+            "automatic paged serving swap must finish every request")
+    require(runtime.preemptions >= 1 and runtime.swap_events >= 1,
+            "higher-priority arrival must trigger a serving preemption and swap")
+    require(swap_out and swap_in and swap_out[0].details["pages"] == 2,
+            "automatic swap must transfer the complete multi-page KV working set")
+    require(runtime.swap_transfer_time_ns > 0.0,
+            "serving swap time must come from physical page transfer events")
+    require(low.swaps == 1 and high.swaps == 0,
+            "only the lower-priority request should be swapped")
+    require(not runtime.ledger.paged_pool.pages() and
+            all(value == 0 for value in runtime.physical_ledger.used_bytes.values()),
+            "finished requests must release resident and offloaded pages")
+
+    rollback_plan = compile_serving_plan(
+        _serving_paged_scenario(
+            hbf_capacity=PAGE,
+            requests=(
+                RequestSpec(
+                    request_id="rollback",
+                    arrival_ns=0.0,
+                    prompt_tokens=32,
+                    output_tokens=8,
+                ),
+            ),
+        )
+    )
+    rollback_runtime = _OnlineRuntime(
+        rollback_plan,
+        lambda *_: BatchCost(0.0),
+        apply_measurement_start_residency=False,
+    )
+    rollback_request = rollback_runtime.states["rollback"]
+    pool = rollback_runtime.ledger.paged_pool
+    require(pool is not None and rollback_runtime.ledger.resize(rollback_request, 2),
+            "rollback setup must allocate two resident pages")
+    before_owners = tuple(page.owner_component for page in pool.request_pages("rollback"))
+    require(not rollback_runtime.ledger.offload(rollback_request),
+            "offload must fail when the HBF target cannot fit all pages")
+    after_owners = tuple(page.owner_component for page in pool.request_pages("rollback"))
+    require(after_owners == before_owners and rollback_request.kv_pages == 2 and
+            rollback_request.swapped_pages == 0,
+            "failed multi-page offload must roll back every page and ledger field")
+    require(rollback_runtime.physical_ledger.used_bytes.get("hbm0") == 2 * PAGE and
+            rollback_runtime.physical_ledger.used_bytes.get("hbf0") == 0,
+            "failed offload must not leak target capacity or source accounting")
+
+    restore_plan = compile_serving_plan(
+        _serving_paged_scenario(
+            hbf_capacity=2 * PAGE,
+            hbm_capacity=2 * PAGE,
+            requests=(
+                RequestSpec(
+                    request_id="restore-victim",
+                    arrival_ns=0.0,
+                    prompt_tokens=32,
+                    output_tokens=8,
+                ),
+                RequestSpec(
+                    request_id="restore-owner",
+                    arrival_ns=0.0,
+                    prompt_tokens=32,
+                    output_tokens=8,
+                ),
+            ),
+        )
+    )
+    restore_runtime = _OnlineRuntime(
+        restore_plan,
+        lambda *_: BatchCost(1.0),
+        apply_measurement_start_residency=False,
+    )
+    victim = restore_runtime.states["restore-victim"]
+    owner = restore_runtime.states["restore-owner"]
+    restore_pool = restore_runtime.ledger.paged_pool
+    require(
+        restore_pool is not None
+        and restore_runtime.ledger.resize(victim, 2)
+        and restore_runtime.ledger.offload(victim)
+        and restore_runtime.ledger.resize(owner, 2),
+        "restore rollback setup must occupy HBF and all HBM pages",
+    )
+    restore_before = tuple(
+        page.owner_component
+        for page in restore_pool.request_pages("restore-victim")
+    )
+    require(
+        not restore_runtime.ledger.restore(victim),
+        "restore must fail when another request fills the HBM target",
+    )
+    restore_after = tuple(
+        page.owner_component
+        for page in restore_pool.request_pages("restore-victim")
+    )
+    require(
+        restore_after == restore_before
+        and victim.kv_pages == 0
+        and victim.swapped_pages == 2
+        and restore_runtime.physical_ledger.used_bytes.get("hbm0") == 2 * PAGE
+        and restore_runtime.physical_ledger.used_bytes.get("hbf0") == 2 * PAGE,
+        "failed restore must preserve offloaded pages and both capacity ledgers",
+    )
+    return {
+        "preemptions": runtime.preemptions,
+        "swap_events": runtime.swap_events,
+        "swap_out_pages": swap_out[0].details["pages"],
+        "swap_transfer_time_ns": runtime.swap_transfer_time_ns,
+        "makespan_ns": result.makespan_ns,
+        "swap_low_ttft_ns": result.request_metrics["swap-low"].ttft_ns,
+        "swap_low_tpot_ns": result.request_metrics["swap-low"].tpot_ns,
+        "kv_peak_pages": result.kv_metrics.peak_used_pages,
+        "physical_swap_bytes": result.kv_metrics.physical_swap_bytes,
+        "requests_finished": len(result.request_states),
+        "rollback_preserved_pages": len(after_owners),
+        "rollback_target_used_bytes": rollback_runtime.physical_ledger.used_bytes.get("hbf0"),
+        "restore_rollback_preserved_pages": len(restore_after),
+        "restore_target_used_bytes": restore_runtime.physical_ledger.used_bytes.get("hbm0"),
+    }
+
+
+def check_slo_semantics() -> dict[str, Any]:
+    """SLO thresholds classify the same fixed trace without retiming it."""
+
+    def run(deadline_ns: float):
+        scenario = _serving_paged_scenario(
+            hbf_capacity=16 * 1024 * 1024,
+            requests=(RequestSpec(
+                request_id="slo",
+                arrival_ns=0.0,
+                prompt_tokens=16,
+                output_tokens=4,
+                deadline_ns=deadline_ns,
+            ),),
+        )
+        runtime = _OnlineRuntime(
+            compile_serving_plan(scenario),
+            lambda *_: BatchCost(100.0),
+            apply_measurement_start_residency=False,
+        )
+        return runtime.run()
+
+    loose = run(1_000_000.0)
+    tight = run(1.0)
+    loose_metric = loose.request_metrics["slo"]
+    tight_metric = tight.request_metrics["slo"]
+    require(equal(loose.makespan_ns, tight.makespan_ns),
+            "changing an SLO threshold must not retime a fixed single-request trace")
+    require(loose_metric.deadline_met is True and tight_metric.deadline_met is False,
+            "SLO threshold must change qualification without changing execution")
+    return {
+        "makespan_ns": loose.makespan_ns,
+        "loose_deadline_met": loose_metric.deadline_met,
+        "tight_deadline_met": tight_metric.deadline_met,
+        "loose_ttft_ns": loose_metric.ttft_ns,
+        "tight_ttft_ns": tight_metric.ttft_ns,
+    }
 
 
 def require(condition: bool, explanation: str) -> None:
@@ -95,6 +472,32 @@ def check_legacy_configs() -> dict[str, Any]:
             "old serialized NAND configs must retain write-through behavior")
     return {"ssd_shared_bandwidth_gb_s": 112.0, "explicit_hbf_shared_bandwidth_gb_s": 80.0,
             "hbm_kind": hbm.kind.value, "legacy_write_buffer_bytes": 0}
+
+
+def check_standard_kv_bytes() -> dict[str, Any]:
+    """Validate the hand-computable BF16 GQA KV byte baseline."""
+
+    bytes_per_element = 2  # BF16
+    layers = 80
+    kv_heads = 8
+    head_dim = 128
+    tokens = 131_072
+    bytes_per_token = 2 * layers * kv_heads * head_dim * bytes_per_element
+    total_bytes = bytes_per_token * tokens
+    require(bytes_per_token == 327_680,
+            "standard BF16 GQA KV bytes/token baseline changed")
+    require(total_bytes == 40 * 1024**3,
+            "131072-token standard KV baseline must equal 40 GiB")
+    return {
+        "dtype": "bf16",
+        "layers": layers,
+        "kv_heads": kv_heads,
+        "head_dim": head_dim,
+        "bytes_per_token": bytes_per_token,
+        "tokens": tokens,
+        "total_bytes": total_bytes,
+        "total_gib": total_bytes / 1024**3,
+    }
 
 
 def check_write_buffer() -> dict[str, Any]:
@@ -369,10 +772,13 @@ def run_acceptance() -> dict[str, Any]:
     tasks: list[tuple[str, Callable[[], dict[str, Any]]]] = [
         ("directional_bandwidth", check_directional_bandwidth),
         ("legacy_configs", check_legacy_configs),
+        ("standard_kv_bytes", check_standard_kv_bytes),
         ("finite_write_buffer", check_write_buffer),
         ("capacity_only_and_lifecycle", check_capacity_only),
         ("shared_physical_contention", check_shared_contention),
         ("physical_kv_migration", check_physical_kv_migration),
+        ("serving_paged_swap", check_serving_paged_swap),
+        ("slo_semantics", check_slo_semantics),
     ]
     for name, function in tasks:
         try:
@@ -398,24 +804,34 @@ def run_acceptance() -> dict[str, Any]:
          "supported": passed["directional_bandwidth"], "evidence": ["directional_bandwidth"]},
         {"question": "When does a finite HBF write buffer introduce backpressure?",
          "supported": passed["finite_write_buffer"], "evidence": ["finite_write_buffer"]},
+        {"question": "Does the standard BF16 GQA KV byte baseline match the hand calculation?",
+         "supported": passed["standard_kv_bytes"], "evidence": ["standard_kv_bytes"]},
         {"question": "Does HBF expand capacity without automatically speeding up a fixed fitting workload?",
          "supported": passed["capacity_only_and_lifecycle"], "evidence": ["capacity_only_and_lifecycle"]},
         {"question": "How does static KV/weight placement change fixed memory-traffic service time?",
          "supported": all(item["passed"] for item in experiments), "evidence": [item["id"] for item in experiments]},
         {"question": "Does a KV migration reserve source read, fabric transfer and target write on shared physical state?",
          "supported": passed["physical_kv_migration"], "evidence": ["physical_kv_migration"]},
+        {"question": "Can serving automatically preempt, swap a multi-page KV working set to HBF, resume it, and release it?",
+         "supported": passed["serving_paged_swap"], "evidence": ["serving_paged_swap"]},
+        {"question": "Do SLO thresholds classify a fixed serving trace without changing its execution timeline?",
+         "supported": passed["slo_semantics"], "evidence": ["slo_semantics"]},
+        {"question": "Can a fixed KV prefetch distance proactively hide restore latency?",
+         "supported": False,
+         "reason": "V4 keeps prefetch_distance=0; proactive KV lookahead events are not modeled."},
         {"question": "What is the real LLM token/s improvement, TTFT or TPOT on a commercial HBF device?",
-         "supported": False, "reason": "This suite has no model compute or serving scheduler and uses uncalibrated hardware assumptions."},
+         "supported": False, "reason": "The serving check uses a tiny synthetic scheduler but has no full model compute or commercial-HBF calibration."},
     ]
     return {"schema_version": 2, "passed": all(item["passed"] for item in checks + experiments),
-            "scope": "single-device synthetic physical-memory microbenchmarks",
+            "scope": "single-device synthetic HBM/HBF physical and serving acceptance",
             "assumptions": {"page_bytes": PAGE, "hbm_interface_gb_s": 488.0,
                             "hbf_host_read_gb_s": 488.0, "hbf_host_write_gb_s": 27.2,
                             "hbf_read_ns": 4000.0, "hbf_program_ns": 75000.0,
                             "hbf_channels_and_parallel_units": 8,
                             "calibrated_to_silicon": False},
             "checks": checks, "experiments": experiments, "capabilities": capabilities,
-            "limitations": ["No LLM compute, token throughput or continuous-batching claims.",
+            "limitations": ["Serving coverage uses a tiny synthetic scheduler workload; it does not claim calibrated LLM token throughput.",
+                            "V4 prefetch_distance remains zero-only; proactive KV lookahead is an explicit follow-up model.",
                             "No FTL/GC, wear, ECC, energy, packaging budget or multi-GPU model."]}
 
 

@@ -247,6 +247,7 @@ class KVCachePolicy:
     layout_mode: str = "legacy_single"
     kv_unified: bool = True
     pool_components: Tuple[str, ...] = ()
+    relay_components: Tuple[str, ...] = ()
     logical_context_tokens: int = 0
     n_seq_max: int = 0
     kv_layer_components: Mapping[str, str] = field(default_factory=dict)
@@ -2145,6 +2146,7 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
     capacity_bytes = _kv_capacity_bytes(scenario, cache_component)
     if layout_mode == "paged_pool":
         pool_components = tuple(getattr(kv_spec, "pool_components", ()))
+        relay_components = tuple(getattr(kv_spec, "relay_components", ()))
         if not pool_components:
             raise ValueError("paged_pool requires pool_components")
         active_pool_component = False
@@ -2192,15 +2194,50 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
                     "paged_pool automatic offload requires a writable storage "
                     "tier: {}".format(offload_component)
                 )
-        capacity_bytes = sum(
+        for relay_component_id in relay_components:
+            relay_component = scenario.hardware.get_component(str(relay_component_id))
+            if relay_component_id in pool_components:
+                raise ValueError(
+                    "paged_pool relay component must be separate from pool components: {}".format(
+                        relay_component_id
+                    )
+                )
+            if not relay_component.is_writable:
+                raise ValueError(
+                    "paged_pool relay component must be writable: {}".format(
+                        relay_component_id
+                    )
+                )
+            if not isinstance(relay_component.metadata, Mapping) or relay_component.metadata.get(
+                "physical_memory_config"
+            ) is None:
+                raise ValueError(
+                    "paged_pool relay component requires physical_memory_config: {}".format(
+                        relay_component_id
+                    )
+                )
+        # ``capacity_bytes`` is the logical paged-pool budget.  It includes
+        # both active pages and pages currently resident in the storage tier.
+        # Keep this value separate from the active component budget below:
+        # the generic role normalizer is intentionally conservative for
+        # colocated roles, but applying it to a pool would silently clamp the
+        # aggregate HBM+HBF capacity to the HBM tier alone.
+        paged_pool_capacity_bytes = sum(
             _dynamic_component_capacity(scenario, str(component_id), ("kv_cache",))
             for component_id in pool_components
         )
+        capacity_bytes = paged_pool_capacity_bytes
+    else:
+        paged_pool_capacity_bytes = None
     explicit_kv_capacity = (
         _declared_runtime_tensor_capacity(scenario, "kv_cache") > 0
     )
     explicit_state_capacity = declared_state_capacity > 0
-    if state_cache_component == cache_component and cache_component:
+    if (
+        state_cache_component == cache_component
+        and cache_component
+        and layout_mode != "paged_pool"
+    ):
         active_budget = _dynamic_component_capacity(
             scenario,
             cache_component,
@@ -2318,7 +2355,11 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
     state_capacity_requests = (
         state_capacity // linear_state_bytes if linear_state_bytes else 0
     )
-    capacity_bytes = normalized_capacities["kv_active"]
+    capacity_bytes = (
+        paged_pool_capacity_bytes
+        if paged_pool_capacity_bytes is not None
+        else normalized_capacities["kv_active"]
+    )
     capacity_pages = capacity_bytes // bytes_per_page if bytes_per_page else 0
     state_offload_capacity = normalized_capacities["linear_state_offload"]
     offload_capacity = normalized_capacities["kv_offload"]
@@ -2460,6 +2501,7 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
         layout_mode=layout_mode,
         kv_unified=kv_unified,
         pool_components=tuple(getattr(kv_spec, "pool_components", ())),
+        relay_components=tuple(getattr(kv_spec, "relay_components", ())),
         logical_context_tokens=logical_context_tokens,
         n_seq_max=n_seq_max,
         kv_layer_components=layer_map,
@@ -5553,10 +5595,14 @@ class _OnlineRuntime:
                 plan.scenario.hardware.get_component(component_id)
                 for component_id in paged_pool.components
             )
+            relay_components = tuple(
+                plan.scenario.hardware.get_component(component_id)
+                for component_id in self.plan.kv_policy.relay_components
+            )
             if all(
                 isinstance(component.metadata, Mapping)
                 and component.metadata.get("physical_memory_config") is not None
-                for component in pool_components
+                for component in (*pool_components, *relay_components)
             ):
                 from .communication import TopologyRouter
                 from .kv_transfer import PhysicalKVTransferExecutor
@@ -5565,6 +5611,7 @@ class _OnlineRuntime:
                     plan.scenario.hardware,
                     runtime=self._execution_resource_kernel.physical_runtime,
                     topology=TopologyRouter(plan.scenario.hardware),
+                    relay_components=self.plan.kv_policy.relay_components,
                     arrival_ns=lambda _request: self.now,
                     namespace="serving:" + str(id(self)),
                 )
@@ -6133,10 +6180,11 @@ class _OnlineRuntime:
             "kv_temporary_pages": self.ledger.temporary_used_pages,
             "kv_capacity_pages": self.plan.kv_policy.capacity_pages,
             "kv_device_resident_capacity_pages": (
-                self.plan.kv_policy.capacity_pages
+                _kv_device_resident_capacity_bytes(self.plan)
+                // max(1, self.plan.kv_policy.bytes_per_page)
             ),
             "kv_device_resident_capacity_bytes": (
-                self.plan.kv_policy.capacity_bytes
+                _kv_device_resident_capacity_bytes(self.plan)
             ),
             "kv_resident_bytes": resident_kv_bytes,
             "kv_reservation_tokens": slot_reservation_tokens,
@@ -11086,9 +11134,50 @@ class _OnlineRuntime:
             state_transfer_cost = self._lower_swap_transfer_cost(
                 state, "linear_state_swap_in", source, target, state_byte_count
             )
+        paged_resume_snapshot = (
+            self.ledger._snapshot_paged_pool_state()
+            if self.ledger.paged_pool is not None and kv_restore_pending
+            else None
+        )
+        paged_state_ledger_snapshot = (
+            copy.deepcopy(self.state_ledger.__dict__)
+            if paged_resume_snapshot is not None
+            else None
+        )
+        paged_request_snapshot = (
+            copy.deepcopy(state.__dict__)
+            if paged_resume_snapshot is not None
+            else None
+        )
+        paged_runtime_snapshot = {
+            key: getattr(self, key)
+            for key in (
+                "now", "_host_available_ns", "_gpu_available_ns",
+                "_last_gpu_start_ns", "_last_serial_device_end_ns",
+                "_paged_pool_event_cursor", "swap_transfer_time_ns",
+            )
+        }
+        event_count_before_resume = len(self.events)
+
+        def rollback_paged_resume() -> None:
+            if paged_resume_snapshot is None:
+                return
+            self.ledger._restore_paged_pool_state(paged_resume_snapshot)
+            self.state_ledger.__dict__.clear()
+            self.state_ledger.__dict__.update(
+                copy.deepcopy(paged_state_ledger_snapshot)
+            )
+            state.__dict__.clear()
+            state.__dict__.update(copy.deepcopy(paged_request_snapshot))
+            del self.events[event_count_before_resume:]
+            for key, value in paged_runtime_snapshot.items():
+                setattr(self, key, value)
+
         if not self.state_ledger.restore(state):
             if not kv_restore_pending:
                 self.ledger.resize(state, 0)
+            else:
+                rollback_paged_resume()
             return False
         if byte_count > 0:
             source = self.plan.kv_policy.offload_component
@@ -11113,10 +11202,15 @@ class _OnlineRuntime:
                     swapped_pages,
                     cost=kv_transfer_cost,
                 )
-            if not self.ledger.restore(state, target_pages):
-                raise RuntimeError("failed to restore KV state after transfer")
-            if self.ledger.paged_pool is not None:
-                self._sync_paged_pool_events()
+            try:
+                restored = self.ledger.restore(state, target_pages)
+                if not restored:
+                    raise RuntimeError("failed to restore KV state after transfer")
+                if self.ledger.paged_pool is not None:
+                    self._sync_paged_pool_events()
+            except BaseException:
+                rollback_paged_resume()
+                raise
             self.swap_in_bytes += byte_count
             self.logical_swap_in_bytes += self._logical_bytes_for_physical(
                 byte_count
@@ -15576,7 +15670,9 @@ class _OnlineRuntime:
                 for component in self.plan.kv_policy.capacity_bytes_by_component
             },
             bottleneck_component=self.plan.kv_policy.bottleneck_component,
-            effective_physical_capacity_bytes=self.plan.kv_policy.capacity_bytes,
+            effective_physical_capacity_bytes=_kv_device_resident_capacity_bytes(
+                self.plan
+            ),
             batch_retry_count=sum(
                 1
                 for event in self.events
@@ -16946,18 +17042,20 @@ _EVENT_TYPE_ORDER = {
     "tokens_committed": 1,
     "batch_end": 2,
     "request_finished": 3,
-    "kv_swap_out": 4,
-    "linear_state_swap_out": 4,
-    "kv_recompute_required": 4,
-    "request_preempted": 5,
-    "kv_swap_out_start": 6,
-    "kv_swap_in_start": 6,
-    "linear_state_swap_out_start": 6,
-    "linear_state_swap_in_start": 6,
-    "kv_swap_in": 6,
-    "linear_state_swap_in": 6,
-    "request_admitted": 6,
-    "request_resumed": 6,
+    "kv_swap_out_start": 4,
+    "kv_swap_in_start": 4,
+    "linear_state_swap_out_start": 4,
+    "linear_state_swap_in_start": 4,
+    "kv_pool_transfer_start": 5,
+    "kv_pool_transfer_complete": 6,
+    "kv_swap_out": 7,
+    "kv_swap_in": 7,
+    "linear_state_swap_out": 7,
+    "linear_state_swap_in": 7,
+    "kv_recompute_required": 7,
+    "request_preempted": 8,
+    "request_admitted": 8,
+    "request_resumed": 8,
     "engine_request_begin": 7,
     "batch_start": 8,
     "kv_capacity_failure": 9,
@@ -17219,6 +17317,29 @@ def _dynamic_component_capacity(
         and scenario.placement.tensor_to_component.get(tensor) == component_id
     )
     return max(0, capacity - claimed_bytes - occupied)
+
+
+def _kv_device_resident_capacity_bytes(plan: ServingPlan) -> int:
+    """Return the active-tier KV capacity for runtime device metrics.
+
+    A paged pool has two different useful capacities: the aggregate logical
+    pool budget (HBM plus storage) and the amount that can be resident in an
+    active memory tier at once.  ``KVCachePolicy.capacity_bytes`` reports the
+    former so admission and offload can reason about the complete pool.  The
+    device-resident metrics must report the latter instead of repeating the
+    aggregate and accidentally making HBF look like active memory.
+    """
+
+    policy = plan.kv_policy
+    if policy.layout_mode != "paged_pool":
+        return max(0, int(policy.capacity_bytes))
+    capacities = policy.capacity_bytes_by_component
+    total = 0
+    for component_id in policy.pool_components:
+        component = plan.scenario.hardware.get_component(str(component_id))
+        if component.is_active_memory:
+            total += max(0, int(capacities.get(str(component_id), 0)))
+    return total
 
 
 def _kv_capacity_bytes(

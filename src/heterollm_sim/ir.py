@@ -2433,6 +2433,10 @@ class KVCachePolicy:
     layout_mode: str = "legacy_single"
     kv_unified: bool = True
     pool_components: Tuple[str, ...] = ()
+    # Optional physical relay components used by the paged-pool transfer
+    # executor.  Relays model an explicit staging hop (for example a host
+    # DRAM buffer) and are charged for both the write and read leg.
+    relay_components: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_optional_name(self.cache_component, "cache_component")
@@ -2464,6 +2468,11 @@ class KVCachePolicy:
             raise ValueError("pool_components must not contain duplicates")
         if self.layout_mode == "paged_pool" and not self.pool_components:
             raise ValueError("paged_pool requires at least one pool_components entry")
+        _require_tuple(self.relay_components, "relay_components")
+        if any(not isinstance(item, str) or not item.strip() for item in self.relay_components):
+            raise ValueError("relay_components must contain non-empty component IDs")
+        if len(set(self.relay_components)) != len(self.relay_components):
+            raise ValueError("relay_components must not contain duplicates")
         if self.allocation_policy not in {"lazy", "eager"}:
             raise ValueError("allocation_policy must be lazy or eager")
         if self.preemption_mode not in {"auto", "swap", "recompute"}:

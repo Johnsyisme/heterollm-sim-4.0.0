@@ -20,6 +20,9 @@ class HbfHbmAcceptanceTests(unittest.TestCase):
         self.assertFalse(report["assumptions"]["calibrated_to_silicon"])
         migration = next(item for item in report["checks"] if item["id"] == "physical_kv_migration")
         self.assertEqual(migration["metrics"]["storage"]["target_tier"], "storage")
+        slo = next(item for item in report["checks"] if item["id"] == "slo_semantics")
+        self.assertEqual(slo["metrics"]["loose_deadline_met"], True)
+        self.assertEqual(slo["metrics"]["tight_deadline_met"], False)
         json.dumps(report, allow_nan=False)
 
 
