@@ -1197,7 +1197,13 @@ class DynamicKVPool:
     def offload(self, logical_page_id: int, target_component: Optional[str] = None) -> bool:
         return self.offload_page(logical_page_id, target_component)
 
-    def restore_page(self, logical_page_id: int, target_component: Optional[str] = None) -> bool:
+    def restore_page(
+        self,
+        logical_page_id: int,
+        target_component: Optional[str] = None,
+        *,
+        kind: str = "restore",
+    ) -> bool:
         page = self.page(logical_page_id)
         candidates = [str(target_component)] if target_component is not None else self._candidate_ids(
             page.layer_group,
@@ -1207,7 +1213,7 @@ class DynamicKVPool:
             active=True,
         )
         for target in candidates:
-            if target in self.components and self.components[target].active and self._move(page, target, kind="restore"):
+            if target in self.components and self.components[target].active and self._move(page, target, kind=str(kind)):
                 return True
         self._last_error = self._last_error or "no active component has capacity for restore"
         return False

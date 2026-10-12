@@ -1256,10 +1256,6 @@ def _planner_message_zh(
             ),
         ),
         (
-            r"V4 placement does not support non-zero prefetch_distance; proactive KV lookahead is not modeled",
-            lambda match: "V4 放置不支持非零 prefetch_distance；当前未建模主动 KV 前瞻",
-        ),
-        (
             r"V4 placement requires positive capacity_bytes for storage component (.+) before placing (\d+) bytes of tensor (.+)",
             lambda match: "V4 放置要求存储组件 {} 在放置 {} 字节张量 {} 前声明正 capacity_bytes".format(
                 match.group(1), _format_iec_bytes(match.group(2)), match.group(3)
@@ -1917,11 +1913,8 @@ def _validate_scenario_uncached(
                 "KV cache component {} is declared read-only".format(kv_component_id)
             )
     prefetch_distance = int(kv_policy.prefetch_distance)
-    if prefetch_distance > 0:
-        errors.append(
-            "V4 placement does not support non-zero prefetch_distance; "
-            "proactive KV lookahead is not modeled"
-        )
+    if prefetch_distance < 0:
+        errors.append("KV prefetch_distance must be non-negative")
     offload_component_id = kv_policy.offload_component
     if offload_component_id:
         offload_component = components.get(offload_component_id)
@@ -3333,10 +3326,6 @@ def _validate_scenario_uncached(
     if (
         requests
         and not placement_unmaterialized
-        and not any(
-            "does not support non-zero prefetch_distance" in error
-            for error in errors
-        )
     ):
         try:
             from .serving import serving_admission_diagnostics
@@ -15954,7 +15943,7 @@ def _add_kv_read(
     target_component_id: Optional[str] = None,
     access_contract: Optional[Mapping[str, object]] = None,
 ) -> str:
-    cache, _offload, _ratio = _kv_components(
+    cache, offload, offload_ratio = _kv_components(
         scenario,
         rank,
         target_component_id,
@@ -15998,6 +15987,54 @@ def _add_kv_read(
             "full-attention rank {} layer {} has no local KV access component"
             .format(rank.rank, layer.layer_id)
         )
+    prior_dependencies = tuple(dependencies)
+    prefetch_distance = max(0, int(scenario.placement.kv_policy.prefetch_distance))
+    # The analytical planner has no individual page identities.  It models a
+    # fixed token lookahead as a coarse remote transfer; the online paged pool
+    # path below performs the corresponding page-accurate move.
+    if (
+        prefetch_distance > 0
+        and offload
+        and offload_ratio > 0
+        and offload != access_component
+        and offload != cache
+    ):
+        lookahead_tokens = min(read_token_count, prefetch_distance)
+        prefetch_bytes = _kv_bytes_per_token(
+            scenario, layer, plan.tp_degree
+        ) * lookahead_tokens
+        prefetch_logical_bytes = (
+            _logical_kv_bytes_per_token_for_rank(
+                scenario, layer, plan.tp_degree, rank.tp_rank
+            )
+            * lookahead_tokens
+        )
+        prefetch_end = _add_transfer_tasks(
+            builder,
+            router,
+            offload,
+            access_component,
+            prefetch_bytes,
+            prior_dependencies,
+            name=name + ".prefetch",
+            routing_policy=plan.routing_policy,
+            metadata={
+                "event_kind": "kv_prefetch",
+                "rank": rank.rank,
+                "layer_id": layer.layer_id,
+                "coverage_component": "full_attention",
+                "kv_cache_component": cache,
+                "source_component": offload,
+                "target_component": access_component,
+                "kv_prefetch_distance": prefetch_distance,
+                "lookahead_tokens": lookahead_tokens,
+                "logical_bytes": prefetch_logical_bytes,
+                "bytes": prefetch_bytes,
+                "physical_bytes": prefetch_bytes,
+                "resource_accounting": "explicit_remote_transfer",
+            },
+        )
+        prior_dependencies = (prefetch_end,)
     if access_contract is not None:
         accesses = _generic_kv_accesses(access_contract, "k") + _generic_kv_accesses(access_contract, "v")
         common = {"event_kind": "kv_read", "rank": rank.rank, "layer_id": layer.layer_id,
@@ -16007,11 +16044,11 @@ def _add_kv_read(
             "generic_kv_storage": access_contract,
             **_generic_kv_persistence(access_contract)}
         if cache == access_component or _direct_device_memory(scenario, cache, rank.component_id):
-            local = _add_join(builder, name + ".read.local", dependencies,
+            local = _add_join(builder, name + ".read.local", prior_dependencies,
                 metadata={**common, "resource_accounting": "included_in_attention_kernel",
                           "resource_transfer_bytes": 0})
             return _discard_side_branch_rank_value(builder, local, rank)
-        prior = tuple(dependencies)
+        prior = prior_dependencies
         for index, access in enumerate(accesses):
             end = _add_transfer_tasks(builder, router, cache, access_component, access["size_bytes"], prior,
                 name=name + ".read.range{}".format(index), routing_policy=plan.routing_policy,
@@ -16029,7 +16066,7 @@ def _add_kv_read(
         cache,
         access_component,
         byte_count,
-        dependencies,
+        prior_dependencies,
         name=name + ".read",
         metadata={
             "event_kind": "kv_read",

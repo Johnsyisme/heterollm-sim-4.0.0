@@ -44,7 +44,8 @@ CAPACITY = 32 * 1024 * 1024
 
 
 def _serving_paged_scenario(
-    *, hbf_capacity: int, requests=(), hbm_capacity: int = 32 * PAGE
+    *, hbf_capacity: int, requests=(), hbm_capacity: int = 32 * PAGE,
+    prefetch_distance: int = 0
 ):
     """Build a tiny physical HBM+HBF serving scenario for acceptance."""
 
@@ -123,6 +124,7 @@ def _serving_paged_scenario(
         dtype="int8",
         layout_mode="paged_pool",
         pool_components=("hbm0", "hbf0"),
+        prefetch_distance=prefetch_distance,
         preemption_mode="swap",
     )
     scheduler = replace(
@@ -370,6 +372,83 @@ def check_serving_paged_swap() -> dict[str, Any]:
         "rollback_target_used_bytes": rollback_runtime.physical_ledger.used_bytes.get("hbf0"),
         "restore_rollback_preserved_pages": len(restore_after),
         "restore_target_used_bytes": restore_runtime.physical_ledger.used_bytes.get("hbm0"),
+    }
+
+
+def check_prefetch_distance() -> dict[str, Any]:
+    """Verify fixed token lookahead, page rounding, and zero-distance behavior."""
+
+    requests = (
+        RequestSpec(
+            request_id="prefetch-low",
+            arrival_ns=0.0,
+            prompt_tokens=32,
+            output_tokens=8,
+            priority=0,
+        ),
+        RequestSpec(
+            request_id="prefetch-high",
+            arrival_ns=1.0,
+            prompt_tokens=32,
+            output_tokens=8,
+            priority=10,
+        ),
+    )
+
+    def run(distance: int):
+        scenario = _serving_paged_scenario(
+            hbf_capacity=2 * PAGE,
+            requests=requests,
+            prefetch_distance=distance,
+        )
+        plan = compile_serving_plan(scenario)
+        runtime = _OnlineRuntime(
+            plan,
+            lambda *_: BatchCost(1.0),
+            apply_measurement_start_residency=False,
+        )
+        return plan, runtime, runtime.run()
+
+    plan, runtime, result = run(17)
+    metrics = result.kv_metrics
+    prefetch_events = [
+        event for event in result.events if event.event_type == "kv_prefetch"
+    ]
+    require(plan.kv_policy.prefetch_distance == 17,
+            "positive prefetch_distance must survive serving compilation")
+    require(metrics.prefetch_distance_modeled,
+            "positive prefetch_distance must be marked modeled")
+    require(metrics.prefetch_events >= 1 and metrics.prefetch_bytes == 2 * PAGE,
+            "lookahead must prefetch two rounded-up pages")
+    require(prefetch_events,
+            "positive prefetch_distance must emit kv_prefetch")
+    details = prefetch_events[0].details
+    require(details.get("distance_tokens") == 17 and
+            details.get("lookahead_pages") == 2 and
+            details.get("bytes") == 2 * PAGE,
+            "kv_prefetch must expose token distance, page rounding, and bytes")
+    require(metrics.prefetch_transfer_time_ns > 0.0,
+            "prefetch must consume physical transfer time")
+
+    zero_plan, zero_runtime, zero_result = run(0)
+    require(zero_plan.kv_policy.prefetch_distance == 0 and
+            not zero_result.kv_metrics.prefetch_distance_modeled and
+            zero_result.kv_metrics.prefetch_events == 0 and
+            not any(event.event_type == "kv_prefetch"
+                    for event in zero_result.events),
+            "zero prefetch_distance must disable active lookahead")
+    return {
+        "distance_tokens": 17,
+        "lookahead_pages": details.get("lookahead_pages"),
+        "prefetch_events": metrics.prefetch_events,
+        "prefetch_bytes": metrics.prefetch_bytes,
+        "prefetch_transfer_time_ns": metrics.prefetch_transfer_time_ns,
+        "zero_distance_events": zero_result.kv_metrics.prefetch_events,
+        "finished_requests": sum(
+            1 for state in runtime.states.values()
+            if state.status.value == "finished"
+        ),
+        "zero_runtime": zero_runtime.now,
     }
 
 
@@ -778,6 +857,7 @@ def run_acceptance() -> dict[str, Any]:
         ("shared_physical_contention", check_shared_contention),
         ("physical_kv_migration", check_physical_kv_migration),
         ("serving_paged_swap", check_serving_paged_swap),
+        ("prefetch_distance", check_prefetch_distance),
         ("slo_semantics", check_slo_semantics),
     ]
     for name, function in tasks:
@@ -817,8 +897,9 @@ def run_acceptance() -> dict[str, Any]:
         {"question": "Do SLO thresholds classify a fixed serving trace without changing its execution timeline?",
          "supported": passed["slo_semantics"], "evidence": ["slo_semantics"]},
         {"question": "Can a fixed KV prefetch distance proactively hide restore latency?",
-         "supported": False,
-         "reason": "V4 keeps prefetch_distance=0; proactive KV lookahead events are not modeled."},
+         "supported": passed["prefetch_distance"],
+         "evidence": ["prefetch_distance"],
+         "scope": "fixed token lookahead with page-level serving transfers"},
         {"question": "What is the real LLM token/s improvement, TTFT or TPOT on a commercial HBF device?",
          "supported": False, "reason": "The serving check uses a tiny synthetic scheduler but has no full model compute or commercial-HBF calibration."},
     ]
@@ -831,7 +912,7 @@ def run_acceptance() -> dict[str, Any]:
                             "calibrated_to_silicon": False},
             "checks": checks, "experiments": experiments, "capabilities": capabilities,
             "limitations": ["Serving coverage uses a tiny synthetic scheduler workload; it does not claim calibrated LLM token throughput.",
-                            "V4 prefetch_distance remains zero-only; proactive KV lookahead is an explicit follow-up model.",
+                            "Prefetch is modeled as fixed token lookahead rounded to pages in paged-pool serving; no predictive policy is included.",
                             "No FTL/GC, wear, ECC, energy, packaging budget or multi-GPU model."]}
 
 

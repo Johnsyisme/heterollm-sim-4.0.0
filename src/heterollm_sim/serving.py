@@ -1615,6 +1615,9 @@ class KVCacheMetrics:
     physical_decode_append_bytes: int = 0
     prefetch_events: int = 0
     prefetch_bytes: int = 0
+    prefetch_transfer_time_ns: float = 0.0
+    prefetch_distance_tokens: int = 0
+    prefetch_lookahead_pages: int = 0
     offload_events: int = 0
     offload_bytes: int = 0
     migration_events: int = 0
@@ -2517,11 +2520,6 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
         raise ValueError("unsupported KV preemption_mode")
     if kv_policy.prefetch_distance < 0:
         raise ValueError("KV prefetch_distance must be non-negative")
-    if kv_policy.prefetch_distance > 0:
-        raise ValueError(
-            "V4 placement does not support non-zero prefetch_distance; "
-            "proactive KV lookahead is not modeled"
-        )
 
     mtp_spec = scenario.workload.mtp
     if mtp_spec is None:
@@ -3270,6 +3268,79 @@ class _KVLedger:
         request.swap_bytes = byte_count
         return True
 
+    def prefetch(self, request: _MutableRequest, page_count: int) -> int:
+        """Restore up to ``page_count`` offloaded pages for a paged pool.
+
+        Prefetch is deliberately page-granular and only applies to the
+        physical paged-pool path.  The request may therefore retain a mixed
+        residency state while it is still waiting for a serving slot: active
+        pages are reflected by ``request.kv_pages`` and the remainder by
+        ``request.swapped_pages``/``swap_bytes``.  The operation is atomic;
+        a failed physical transfer or capacity check restores the full pool,
+        ledger, and executor state.
+        """
+
+        if self.paged_pool is None:
+            return 0
+        requested = max(0, int(page_count))
+        if requested <= 0 or request.swapped_pages <= 0:
+            return 0
+        source = self.policy.offload_component
+        target = self.policy.cache_component
+        if not source or not target:
+            return 0
+        page_bytes = max(1, int(self.policy.bytes_per_page))
+        pages = tuple(
+            page
+            for page in self.paged_pool.request_pages(request.spec.request_id)
+            if page.owner_component == source
+        )
+        if not pages:
+            return 0
+        # Do not reserve more pages than the request's accounting says remain
+        # offloaded.  ``request_pages`` also includes any pages already
+        # prefetched into the active tier.
+        pages = pages[: min(requested, int(request.swapped_pages))]
+        if not pages:
+            return 0
+        # A physical-capacity preflight avoids partially moving a cohort when
+        # the active target has no room.  ``restore_page`` performs the same
+        # check again and is the authority for multi-tier pools.
+        if not self.physical.can_adjust(target, len(pages) * page_bytes):
+            return 0
+        snapshot = self._snapshot_paged_pool_state()
+        try:
+            for page in pages:
+                if not self.paged_pool.restore_page(
+                    page.logical_page_id, target, kind="prefetch"
+                ):
+                    raise RuntimeError(
+                        self.paged_pool.last_error or "paged KV prefetch failed"
+                    )
+            self._sync_paged_pool_physical_pages()
+        except Exception:
+            self._restore_paged_pool_state(snapshot)
+            return 0
+        moved = len(pages)
+        moved_bytes = moved * page_bytes
+        self.used_pages += moved
+        self.persistent_used_pages += moved
+        self.peak_pages = max(self.peak_pages, self.used_pages)
+        self.persistent_peak_pages = max(
+            self.persistent_peak_pages, self.persistent_used_pages
+        )
+        self.offload_used_bytes -= moved_bytes
+        if self.offload_used_bytes < 0:
+            self._restore_paged_pool_state(snapshot)
+            raise RuntimeError("KV offload ledger underflow while prefetching")
+        request.kv_pages += moved
+        request.swapped_pages -= moved
+        request.swap_bytes -= moved_bytes
+        if request.swapped_pages < 0 or request.swap_bytes < 0:
+            self._restore_paged_pool_state(snapshot)
+            raise RuntimeError("KV request accounting underflow while prefetching")
+        return moved
+
     def can_restore(
         self, request: _MutableRequest, target_pages: Optional[int] = None
     ) -> bool:
@@ -3279,11 +3350,16 @@ class _KVLedger:
             return byte_count <= 0
         if byte_count != swapped_pages * self.policy.bytes_per_page:
             return False
-        target = swapped_pages if target_pages is None else int(target_pages)
-        if target < swapped_pages or target > self.policy.capacity_pages:
+        resident_pages = max(0, int(request.kv_pages))
+        total_pages = resident_pages + swapped_pages
+        target = total_pages if target_pages is None else int(target_pages)
+        if target < total_pages or target > self.policy.capacity_pages:
             return False
-        extra_bytes = (target - swapped_pages) * self.policy.bytes_per_page
-        if self.used_pages + target > self.policy.capacity_pages:
+        extra_bytes = (target - total_pages) * self.policy.bytes_per_page
+        restore_bytes = byte_count
+        if self.used_pages + restore_bytes // max(1, self.policy.bytes_per_page) + (
+            target - total_pages
+        ) > self.policy.capacity_pages:
             return False
         if self.offload_used_bytes < byte_count:
             return False
@@ -3292,14 +3368,14 @@ class _KVLedger:
             if not target_component:
                 return False
             pages = self.paged_pool.request_pages(request.spec.request_id)
-            if len(pages) != swapped_pages or any(
-                page.owner_component != self.policy.offload_component
+            if len(pages) != total_pages or sum(
+                page.owner_component == self.policy.offload_component
                 for page in pages
-            ):
+            ) != swapped_pages:
                 return False
             return self.physical.can_adjust(
                 target_component,
-                byte_count + extra_bytes,
+                restore_bytes + extra_bytes,
             )
         return self.physical.can_transfer(
             self.policy.offload_component,
@@ -3315,25 +3391,28 @@ class _KVLedger:
             return False
         swapped_pages = max(0, int(request.swapped_pages))
         byte_count = max(0, int(request.swap_bytes))
-        target = swapped_pages if target_pages is None else int(target_pages)
-        extra_pages = target - swapped_pages
+        resident_pages = max(0, int(request.kv_pages))
+        total_pages = resident_pages + swapped_pages
+        target = total_pages if target_pages is None else int(target_pages)
+        extra_pages = target - total_pages
         if self.paged_pool is not None:
             target_component = self.policy.cache_component
             source_component = self.policy.offload_component
             if not target_component or not source_component:
                 return False
             pages = self.paged_pool.request_pages(request.spec.request_id)
-            if len(pages) != swapped_pages or any(
-                page.owner_component != source_component for page in pages
-            ):
+            if len(pages) != total_pages or sum(
+                page.owner_component == source_component for page in pages
+            ) != swapped_pages:
                 return False
             snapshot = self._snapshot_paged_pool_state()
             try:
                 for page in pages:
-                    if not self.paged_pool.restore_page(
-                        page.logical_page_id, target_component
-                    ):
-                        raise RuntimeError(self.paged_pool.last_error or "paged KV restore failed")
+                    if page.owner_component == source_component:
+                        if not self.paged_pool.restore_page(
+                            page.logical_page_id, target_component
+                        ):
+                            raise RuntimeError(self.paged_pool.last_error or "paged KV restore failed")
                 if extra_pages > 0 and not self.paged_pool.resize(
                     request.spec.request_id,
                     target,
@@ -3344,8 +3423,8 @@ class _KVLedger:
             except Exception:
                 self._restore_paged_pool_state(snapshot)
                 return False
-            self.used_pages += target
-            self.persistent_used_pages += target
+            self.used_pages += swapped_pages + extra_pages
+            self.persistent_used_pages += swapped_pages + extra_pages
             self.peak_pages = max(self.peak_pages, self.used_pages)
             self.persistent_peak_pages = max(
                 self.persistent_peak_pages, self.persistent_used_pages
@@ -5644,6 +5723,11 @@ class _OnlineRuntime:
         self.swap_in_bytes = 0
         self.swap_transfer_time_ns = 0.0
         self.swap_transfer_energy_pj = 0.0
+        self.prefetch_events = 0
+        self.prefetch_bytes = 0
+        self.prefetch_transfer_time_ns = 0.0
+        self.prefetch_distance_tokens = 0
+        self.prefetch_lookahead_pages = 0
         self.logical_swap_out_bytes = 0
         self.logical_swap_in_bytes = 0
         self.linear_state_swap_in_bytes = 0
@@ -5795,6 +5879,11 @@ class _OnlineRuntime:
             details = {
                 "kind": transfer.kind,
                 "logical_page_id": transfer.logical_page_id,
+                "request_id": (
+                    self.ledger.paged_pool.page(transfer.logical_page_id).request_id
+                    if self.ledger.paged_pool.page(transfer.logical_page_id) is not None
+                    else None
+                ),
                 "source_component": transfer.source_component,
                 "target_component": transfer.target_component,
                 "bytes": int(transfer.bytes),
@@ -5807,6 +5896,10 @@ class _OnlineRuntime:
             self.events.append(ServingEvent(end, "kv_pool_transfer_complete", details=details))
             if transfer.kind in {"offload", "restore"}:
                 self.swap_transfer_time_ns += max(0.0, end - start)
+            elif transfer.kind == "prefetch":
+                self.prefetch_events += 1
+                self.prefetch_bytes += int(transfer.bytes)
+                self.prefetch_transfer_time_ns += max(0.0, end - start)
             self.now = end
             self._host_available_ns = max(self._host_available_ns, end)
             self._gpu_available_ns = max(self._gpu_available_ns, end)
@@ -9892,10 +9985,77 @@ class _OnlineRuntime:
             before = self.now
             self._arrive()
             self._priority_preempt()
+            self._prefetch_waiting()
             self._fill_slots()
             if self.now == before:
                 return
         raise RuntimeError("online scheduler could not stabilize a boundary")
+
+    def _prefetch_waiting(self) -> bool:
+        """Move a fixed page lookahead into the active tier at a free-slot boundary."""
+
+        distance = max(0, int(self.plan.kv_policy.prefetch_distance))
+        pool = self.ledger.paged_pool
+        if (
+            distance <= 0
+            or pool is None
+            or self._running_count >= self.plan.scheduler.max_num_seqs
+        ):
+            return False
+        tokens_per_page = max(1, int(self.plan.kv_policy.tokens_per_page))
+        lookahead_pages = (distance + tokens_per_page - 1) // tokens_per_page
+        candidates = [
+            state for state in self._state_values
+            if state.status == RequestStatus.SWAPPED
+            and state.preemption_strategy == "swap"
+            and state.swapped_pages > 0
+        ]
+        if not candidates:
+            return False
+        candidates.sort(key=self._service_rank)
+        for state in candidates:
+            pages = min(lookahead_pages, int(state.swapped_pages))
+            if pages <= 0:
+                continue
+            transfer_cursor = self._paged_pool_event_cursor
+            moved = self.ledger.prefetch(state, pages)
+            if moved <= 0:
+                continue
+            self._sync_paged_pool_events()
+            # Put the aggregate boundary before the per-page physical events
+            # while retaining their actual completion timestamps.
+            start = self.now
+            if transfer_cursor < len(pool.events):
+                start = min(
+                    float(
+                        pool.events[index].start_ns
+                        if pool.events[index].start_ns is not None
+                        else self.now
+                    )
+                    for index in range(transfer_cursor, len(pool.events))
+                )
+            details = {
+                "distance_tokens": distance,
+                "lookahead_pages": lookahead_pages,
+                "pages": moved,
+                "bytes": moved * self.plan.kv_policy.bytes_per_page,
+            }
+            self.events.append(
+                ServingEvent(start, "kv_prefetch_start", state.spec.request_id,
+                             details=details)
+            )
+            self.events.append(
+                ServingEvent(self.now, "kv_prefetch", state.spec.request_id,
+                             details=details)
+            )
+            self.prefetch_distance_tokens = max(
+                self.prefetch_distance_tokens, distance
+            )
+            self.prefetch_lookahead_pages = max(
+                self.prefetch_lookahead_pages, lookahead_pages
+            )
+            return True
+        return False
 
     def _terminal(self) -> bool:
         return self._terminal_count >= self._request_count
@@ -11048,7 +11208,10 @@ class _OnlineRuntime:
         byte_count = state.swap_bytes
         swapped_pages = state.swapped_pages
         state_byte_count = state.linear_state_swapped_bytes
-        target_pages = swapped_pages
+        # A request can be partially prefetched while it remains swapped.
+        # Restore targets therefore include pages already resident in the
+        # active tier, plus pages still backed by the offload tier.
+        target_pages = max(0, int(state.kv_pages)) + swapped_pages
         if self.plan.kv_policy.allocation_policy == "eager":
             target_pages = self.ledger.pages_for_tokens(
                 _max_live_kv_tokens(
@@ -15558,18 +15721,28 @@ class _OnlineRuntime:
             physical_decode_read_bytes=self.physical_decode_read_bytes,
             physical_decode_write_bytes=self.physical_decode_write_bytes,
             physical_decode_append_bytes=self.physical_decode_write_bytes,
+            prefetch_events=self.prefetch_events,
+            prefetch_bytes=self.prefetch_bytes,
+            prefetch_transfer_time_ns=self.prefetch_transfer_time_ns,
+            prefetch_distance_tokens=self.prefetch_distance_tokens,
+            prefetch_lookahead_pages=self.prefetch_lookahead_pages,
+            prefetch_distance_modeled=(
+                self.plan.kv_policy.prefetch_distance > 0
+            ),
             offload_events=self.swap_events,
             offload_bytes=self.swap_bytes,
             migration_events=self.swap_events
-            + batch_kind_counts.get("kv_swap_in", 0),
-            migration_bytes=self.swap_bytes + self.swap_in_bytes,
+            + batch_kind_counts.get("kv_swap_in", 0)
+            + self.prefetch_events,
+            migration_bytes=self.swap_bytes + self.swap_in_bytes + self.prefetch_bytes,
             swap_out_bytes=self.swap_bytes,
             physical_swap_bytes=self.swap_bytes + self.swap_in_bytes,
             logical_bytes_per_token=self.plan.kv_policy.logical_bytes_per_token,
             logical_swap_out_bytes=self.logical_swap_out_bytes,
             logical_swap_in_bytes=self.logical_swap_in_bytes,
             logical_migration_bytes=self.logical_swap_out_bytes
-            + self.logical_swap_in_bytes,
+            + self.logical_swap_in_bytes
+            + self._logical_bytes_for_physical(self.prefetch_bytes),
             physical_offload_bytes=self.swap_bytes,
             max_live_tokens_per_request=max(
                 (
@@ -17046,12 +17219,14 @@ _EVENT_TYPE_ORDER = {
     "kv_swap_in_start": 4,
     "linear_state_swap_out_start": 4,
     "linear_state_swap_in_start": 4,
+    "kv_prefetch_start": 4,
     "kv_pool_transfer_start": 5,
     "kv_pool_transfer_complete": 6,
     "kv_swap_out": 7,
     "kv_swap_in": 7,
     "linear_state_swap_out": 7,
     "linear_state_swap_in": 7,
+    "kv_prefetch": 7,
     "kv_recompute_required": 7,
     "request_preempted": 8,
     "request_admitted": 8,

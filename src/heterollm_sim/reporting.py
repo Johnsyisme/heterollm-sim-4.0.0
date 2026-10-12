@@ -1819,15 +1819,26 @@ def _arrival_process_semantics(scenario: ScenarioConfig) -> Dict[str, Any]:
 
 
 def _prefetch_semantics(scenario: ScenarioConfig) -> Dict[str, Any]:
-    distance = int(scenario.placement.kv_policy.prefetch_distance)
-    contract = "must_be_zero"
+    distance = max(0, int(scenario.placement.kv_policy.prefetch_distance))
+    tokens_per_page = max(1, int(scenario.placement.kv_policy.tokens_per_page))
+    lookahead_pages = (
+        (distance + tokens_per_page - 1) // tokens_per_page
+        if distance > 0
+        else 0
+    )
+    modeled = distance > 0
+    contract = "fixed_token_lookahead"
     description = (
-        "V4 placement requires prefetch_distance=0; proactive KV lookahead "
-        "is not modeled"
+        "fixed token lookahead; page count is rounded up and each move is "
+        "limited by active capacity and the physical transfer queue"
+        if modeled
+        else "prefetch disabled when prefetch_distance=0"
     )
     return {
         "value": distance,
-        "modeled": False,
+        "unit": "tokens",
+        "lookahead_pages": lookahead_pages,
+        "modeled": modeled,
         "contract": contract,
         "description": description,
     }
@@ -5805,7 +5816,7 @@ def _online_report_dict(
             "kv_bottleneck_component": serving.kv_metrics.bottleneck_component,
             "effective_physical_capacity": serving.kv_metrics.effective_physical_capacity_bytes,
             "kv_idle_slots_cleared": serving.kv_metrics.idle_slots_cleared,
-            "prefetch_distance_modeled": False,
+            "prefetch_distance_modeled": _prefetch_semantics(result.scenario)["modeled"],
             "prefetch_distance_semantics": _prefetch_semantics(result.scenario),
             "modeling_limits": [
                 "offload_ratio bounds pressure-triggered migratable capacity; it is not a per-token mirror ratio",
@@ -6004,7 +6015,7 @@ def _static_kv_report(result: StaticRunResult) -> Dict[str, Any]:
         + physical_event_bytes.get("kv_offload", 0),
         "logical_migration_bytes": logical_event_bytes.get("kv_prefetch", 0)
         + logical_event_bytes.get("kv_offload", 0),
-        "prefetch_distance_modeled": False,
+        "prefetch_distance_modeled": _prefetch_semantics(result.scenario)["modeled"],
         "prefetch_distance_semantics": _prefetch_semantics(result.scenario),
         "traffic_semantics": "logical_kv_traffic_separate_from_resource_accounting",
         "modeling_limits": [
