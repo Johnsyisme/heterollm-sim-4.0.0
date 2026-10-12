@@ -2147,11 +2147,6 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
         pool_components = tuple(getattr(kv_spec, "pool_components", ()))
         if not pool_components:
             raise ValueError("paged_pool requires pool_components")
-        if offload_component:
-            raise ValueError(
-                "paged_pool serving does not yet lower automatic request "
-                "swap/offload; use DynamicKVPool.offload_page explicitly"
-            )
         active_pool_component = False
         for component_id in pool_components:
             component = scenario.hardware.get_component(str(component_id))
@@ -2170,7 +2165,33 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
                 "paged_pool requires at least one writable active-memory "
                 "component for request allocation"
             )
-        cache_component = cache_component or str(pool_components[0])
+        active_pool_ids = tuple(
+            str(component_id)
+            for component_id in pool_components
+            if scenario.hardware.get_component(str(component_id)).is_active_memory
+        )
+        if cache_component is None:
+            cache_component = active_pool_ids[0]
+        if cache_component not in pool_components or not scenario.hardware.get_component(
+            str(cache_component)
+        ).is_active_memory:
+            raise ValueError(
+                "paged_pool cache_component must be a writable active-memory "
+                "pool component: {}".format(cache_component)
+            )
+        if offload_component is not None:
+            if offload_component not in pool_components:
+                raise ValueError(
+                    "paged_pool offload_component must be listed in pool_components: {}".format(
+                        offload_component
+                    )
+                )
+            offload = scenario.hardware.get_component(str(offload_component))
+            if not offload.is_storage or offload.is_active_memory:
+                raise ValueError(
+                    "paged_pool automatic offload requires a writable storage "
+                    "tier: {}".format(offload_component)
+                )
         capacity_bytes = sum(
             _dynamic_component_capacity(scenario, str(component_id), ("kv_cache",))
             for component_id in pool_components
@@ -2943,6 +2964,39 @@ class _KVLedger:
                 restore_fn(snapshot)
             raise
 
+    def _snapshot_paged_pool_state(self) -> Optional[Mapping[str, Any]]:
+        pool = self.paged_pool
+        if pool is None:
+            return None
+        pool_state = {
+            key: copy.deepcopy(getattr(pool, key))
+            for key in (
+                "_pages", "_requests", "_request_components", "_prefixes",
+                "_bindings", "_owned_bytes", "_page_counter", "_clock",
+                "_events", "_last_error",
+            )
+        }
+        return {
+            "ledger": copy.deepcopy({
+                key: value
+                for key, value in self.__dict__.items()
+                if key not in {"policy", "physical", "paged_pool"}
+            }),
+            "physical": copy.deepcopy(self.physical.__dict__),
+            "pool": pool_state,
+            "executor": pool.snapshot_transfer_executor(),
+        }
+
+    def _restore_paged_pool_state(self, snapshot: Optional[Mapping[str, Any]]) -> None:
+        if snapshot is None or self.paged_pool is None:
+            return
+        self.__dict__.update(copy.deepcopy(snapshot["ledger"]))
+        self.physical.__dict__.clear()
+        self.physical.__dict__.update(copy.deepcopy(snapshot["physical"]))
+        for key, value in snapshot["pool"].items():
+            setattr(self.paged_pool, key, copy.deepcopy(value))
+        self.paged_pool.restore_transfer_executor(snapshot["executor"])
+
     def configure_paged_pool(self, scenario: ScenarioConfig) -> None:
         """Attach the experimental page owner allocator to this ledger."""
 
@@ -2961,7 +3015,11 @@ class _KVLedger:
             tokens_per_page=self.policy.tokens_per_page,
             page_bytes=max(1, int(self.policy.bytes_per_page)),
             ledger=self.physical,
-            offload_components=(),
+            offload_components=(
+                (str(self.policy.offload_component),)
+                if self.policy.offload_component
+                else ()
+            ),
         )
 
     def _active_deltas(self, byte_count: int) -> Mapping[str, int]:
@@ -3119,6 +3177,39 @@ class _KVLedger:
             return True
         if self.offload_used_bytes + byte_count > self.policy.offload_capacity_bytes:
             return False
+        if self.paged_pool is not None:
+            target = self.policy.offload_component
+            if not target:
+                return False
+            pool_pages = self.paged_pool.request_pages(request.spec.request_id)
+            if len(pool_pages) != pages or any(
+                page.owner_component not in self.paged_pool.components
+                or not self.paged_pool.components[page.owner_component].active
+                or not self.paged_pool.components[page.owner_component].writable
+                for page in pool_pages
+            ):
+                return False
+            snapshot = self._snapshot_paged_pool_state()
+            try:
+                for page in pool_pages:
+                    if not self.paged_pool.offload_page(page.logical_page_id, target):
+                        raise RuntimeError(self.paged_pool.last_error or "paged KV offload failed")
+                self._sync_paged_pool_physical_pages()
+            except Exception:
+                self._restore_paged_pool_state(snapshot)
+                return False
+            self.used_pages -= pages
+            self.persistent_used_pages -= pages
+            if self.used_pages < 0 or self.persistent_used_pages < 0:
+                self._restore_paged_pool_state(snapshot)
+                raise RuntimeError("KV ledger underflow while offloading paged pool")
+            self.releases += 1
+            request.kv_pages = 0
+            self.offload_used_bytes += byte_count
+            self.offload_peak_bytes = max(self.offload_peak_bytes, self.offload_used_bytes)
+            request.swapped_pages = pages
+            request.swap_bytes = byte_count
+            return True
         if not self.physical.transfer(
             self.policy.cache_component,
             self.policy.offload_component,
@@ -3154,6 +3245,20 @@ class _KVLedger:
             return False
         if self.offload_used_bytes < byte_count:
             return False
+        if self.paged_pool is not None:
+            target_component = self.policy.cache_component
+            if not target_component:
+                return False
+            pages = self.paged_pool.request_pages(request.spec.request_id)
+            if len(pages) != swapped_pages or any(
+                page.owner_component != self.policy.offload_component
+                for page in pages
+            ):
+                return False
+            return self.physical.can_adjust(
+                target_component,
+                byte_count + extra_bytes,
+            )
         return self.physical.can_transfer(
             self.policy.offload_component,
             self.policy.cache_component,
@@ -3170,6 +3275,49 @@ class _KVLedger:
         byte_count = max(0, int(request.swap_bytes))
         target = swapped_pages if target_pages is None else int(target_pages)
         extra_pages = target - swapped_pages
+        if self.paged_pool is not None:
+            target_component = self.policy.cache_component
+            source_component = self.policy.offload_component
+            if not target_component or not source_component:
+                return False
+            pages = self.paged_pool.request_pages(request.spec.request_id)
+            if len(pages) != swapped_pages or any(
+                page.owner_component != source_component for page in pages
+            ):
+                return False
+            snapshot = self._snapshot_paged_pool_state()
+            try:
+                for page in pages:
+                    if not self.paged_pool.restore_page(
+                        page.logical_page_id, target_component
+                    ):
+                        raise RuntimeError(self.paged_pool.last_error or "paged KV restore failed")
+                if extra_pages > 0 and not self.paged_pool.resize(
+                    request.spec.request_id,
+                    target,
+                    compatible_components=(target_component,),
+                ):
+                    raise RuntimeError(self.paged_pool.last_error or "paged KV growth failed")
+                self._sync_paged_pool_physical_pages()
+            except Exception:
+                self._restore_paged_pool_state(snapshot)
+                return False
+            self.used_pages += target
+            self.persistent_used_pages += target
+            self.peak_pages = max(self.peak_pages, self.used_pages)
+            self.persistent_peak_pages = max(
+                self.persistent_peak_pages, self.persistent_used_pages
+            )
+            if extra_pages > 0:
+                self.allocations += 1
+            self.offload_used_bytes -= byte_count
+            if self.offload_used_bytes < 0:
+                self._restore_paged_pool_state(snapshot)
+                raise RuntimeError("KV offload ledger underflow while restoring paged pool")
+            request.kv_pages = target
+            request.swapped_pages = 0
+            request.swap_bytes = 0
+            return True
         if not self.physical.transfer(
             self.policy.offload_component,
             self.policy.cache_component,
@@ -3194,6 +3342,21 @@ class _KVLedger:
         return True
 
     def discard_offload(self, request: _MutableRequest) -> None:
+        if self.paged_pool is not None:
+            snapshot = self._snapshot_paged_pool_state()
+            try:
+                self.paged_pool.release(request.spec.request_id)
+                self._sync_paged_pool_physical_pages()
+            except Exception:
+                self._restore_paged_pool_state(snapshot)
+                raise
+            self.offload_used_bytes -= request.swap_bytes
+            if self.offload_used_bytes < 0:
+                self._restore_paged_pool_state(snapshot)
+                raise RuntimeError("KV offload ledger underflow while discarding paged pool")
+            request.swapped_pages = 0
+            request.swap_bytes = 0
+            return
         self.physical.adjust(self.policy.offload_component, -request.swap_bytes)
         self.offload_used_bytes -= request.swap_bytes
         request.swapped_pages = 0
@@ -5402,6 +5565,7 @@ class _OnlineRuntime:
                     plan.scenario.hardware,
                     runtime=self._execution_resource_kernel.physical_runtime,
                     topology=TopologyRouter(plan.scenario.hardware),
+                    arrival_ns=lambda _request: self.now,
                     namespace="serving:" + str(id(self)),
                 )
                 paged_pool.set_transfer_executor(
@@ -5594,6 +5758,8 @@ class _OnlineRuntime:
             }
             self.events.append(ServingEvent(start, "kv_pool_transfer_start", details=details))
             self.events.append(ServingEvent(end, "kv_pool_transfer_complete", details=details))
+            if transfer.kind in {"offload", "restore"}:
+                self.swap_transfer_time_ns += max(0.0, end - start)
             self.now = end
             self._host_available_ns = max(self._host_available_ns, end)
             self._gpu_available_ns = max(self._gpu_available_ns, end)
@@ -10890,16 +11056,17 @@ class _OnlineRuntime:
                     )
                 ):
                     return False
-            extra_bytes = (
-                target_pages - swapped_pages
-            ) * self.plan.kv_policy.bytes_per_page
-            if not restore_check.transfer(
-                self.plan.kv_policy.offload_component,
-                self.plan.kv_policy.cache_component,
-                byte_count,
-                extra_bytes,
-            ):
-                return False
+            if self.ledger.paged_pool is None:
+                extra_bytes = (
+                    target_pages - swapped_pages
+                ) * self.plan.kv_policy.bytes_per_page
+                if not restore_check.transfer(
+                    self.plan.kv_policy.offload_component,
+                    self.plan.kv_policy.cache_component,
+                    byte_count,
+                    extra_bytes,
+                ):
+                    return False
         elif not self._reserve_with_pressure(state, target_pages):
             return False
         if byte_count > 0:
@@ -10907,9 +11074,10 @@ class _OnlineRuntime:
             target = self.plan.kv_policy.cache_component
             if not source or not target:
                 raise ValueError("swapped KV state is missing a valid transfer")
-            kv_transfer_cost = self._lower_swap_transfer_cost(
-                state, "kv_swap_in", source, target, byte_count, swapped_pages
-            )
+            if self.ledger.paged_pool is None:
+                kv_transfer_cost = self._lower_swap_transfer_cost(
+                    state, "kv_swap_in", source, target, byte_count, swapped_pages
+                )
         if state_byte_count > 0:
             source = self.plan.linear_state_policy.offload_component
             target = self.plan.linear_state_policy.cache_component
@@ -10935,17 +11103,20 @@ class _OnlineRuntime:
                     details={"pages": swapped_pages, "bytes": byte_count},
                 )
             )
-            self._execute_swap_transfer(
-                state,
-                "kv_swap_in",
-                source,
-                target,
-                byte_count,
-                swapped_pages,
-                cost=kv_transfer_cost,
-            )
+            if self.ledger.paged_pool is None:
+                self._execute_swap_transfer(
+                    state,
+                    "kv_swap_in",
+                    source,
+                    target,
+                    byte_count,
+                    swapped_pages,
+                    cost=kv_transfer_cost,
+                )
             if not self.ledger.restore(state, target_pages):
                 raise RuntimeError("failed to restore KV state after transfer")
+            if self.ledger.paged_pool is not None:
+                self._sync_paged_pool_events()
             self.swap_in_bytes += byte_count
             self.logical_swap_in_bytes += self._logical_bytes_for_physical(
                 byte_count
@@ -11555,7 +11726,7 @@ class _OnlineRuntime:
         swap_check = _PhysicalCapacityLedger(self.physical_ledger.limits)
         swap_check.used_bytes.update(self.physical_ledger.used_bytes)
         can_physical_swap = True
-        for source, target, byte_count in (
+        for index, (source, target, byte_count) in enumerate((
             (
                 self.plan.kv_policy.cache_component,
                 self.plan.kv_policy.offload_component,
@@ -11566,8 +11737,13 @@ class _OnlineRuntime:
                 state_policy.offload_component,
                 state_swap_bytes,
             ),
-        ):
+        )):
             if byte_count <= 0:
+                continue
+            if index == 0 and self.ledger.paged_pool is not None:
+                # The paged pool performs a page-wise physical transfer and
+                # owns the source/target capacity transaction.  Do not apply
+                # the legacy byte-ledger transfer a second time.
                 continue
             if not swap_check.transfer(source, target, byte_count):
                 can_physical_swap = False
@@ -11583,6 +11759,21 @@ class _OnlineRuntime:
             # choose recomputation when the declared offload path is full or
             # unavailable.
             return False
+        paged_swap_snapshot = (
+            self.ledger._snapshot_paged_pool_state()
+            if use_swap and self.ledger.paged_pool is not None
+            else None
+        )
+        paged_state_ledger_snapshot = (
+            copy.deepcopy(self.state_ledger.__dict__)
+            if paged_swap_snapshot is not None
+            else None
+        )
+        paged_request_snapshot = (
+            copy.deepcopy(state.__dict__)
+            if paged_swap_snapshot is not None
+            else None
+        )
         swapped = False
         kv_transfer_cost: Optional[BatchCost] = None
         state_transfer_cost: Optional[BatchCost] = None
@@ -11592,14 +11783,15 @@ class _OnlineRuntime:
                 target = self.plan.kv_policy.offload_component
                 if not source or not target:
                     raise ValueError("KV swap requires cache and offload components")
-                kv_transfer_cost = self._lower_swap_transfer_cost(
-                    state,
-                    "kv_swap_out",
-                    source,
-                    target,
-                    kv_swap_bytes,
-                    state.kv_pages,
-                )
+                if self.ledger.paged_pool is None:
+                    kv_transfer_cost = self._lower_swap_transfer_cost(
+                        state,
+                        "kv_swap_out",
+                        source,
+                        target,
+                        kv_swap_bytes,
+                        state.kv_pages,
+                    )
             if state_swap_bytes > 0:
                 source = state_policy.cache_component
                 target = state_policy.offload_component
@@ -11617,7 +11809,15 @@ class _OnlineRuntime:
             kv_offloaded = self.ledger.offload(state)
             state_offloaded = kv_offloaded and self.state_ledger.offload(state)
             swapped = kv_offloaded and state_offloaded
-            if not swapped and kv_offloaded:
+            if not swapped and paged_swap_snapshot is not None:
+                self.ledger._restore_paged_pool_state(paged_swap_snapshot)
+                self.state_ledger.__dict__.clear()
+                self.state_ledger.__dict__.update(
+                    copy.deepcopy(paged_state_ledger_snapshot)
+                )
+                state.__dict__.clear()
+                state.__dict__.update(copy.deepcopy(paged_request_snapshot))
+            elif not swapped and kv_offloaded:
                 if not self.ledger.restore(state):
                     raise RuntimeError("failed to roll back incomplete KV swap")
             if strategy == "swap" and not swapped:
@@ -11651,15 +11851,18 @@ class _OnlineRuntime:
                         details=details,
                     )
                 )
-                self._execute_swap_transfer(
-                    state,
-                    "kv_swap_out",
-                    source,
-                    target,
-                    byte_count,
-                    swapped_pages,
-                    cost=kv_transfer_cost,
-                )
+                if self.ledger.paged_pool is None:
+                    self._execute_swap_transfer(
+                        state,
+                        "kv_swap_out",
+                        source,
+                        target,
+                        byte_count,
+                        swapped_pages,
+                        cost=kv_transfer_cost,
+                    )
+                else:
+                    self._sync_paged_pool_events()
                 event = "kv_swap_out"
             else:
                 event = "linear_state_swap_out"
