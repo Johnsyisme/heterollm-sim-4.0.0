@@ -6,7 +6,7 @@ an unmodified native llama.cpp binary exposes HBF as a CUDA buffer type.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, Mapping
 
 from .config import ScenarioConfig, _host_memory_profile_from_dict
 from .control_plane_planner import (
@@ -88,11 +88,21 @@ def _device_buffers(scenario: ScenarioConfig) -> tuple[ScenarioConfig, dict[str,
                 raise ValueError("HBF {} requires explicit write bandwidth".format(component.component_id))
             read = component.read_bandwidth_gbps or float(profile.effective_read_bandwidth_gb_s) * 8
             write = component.write_bandwidth_gbps or float(profile.effective_write_bandwidth_gb_s) * 8
+            physical_raw = component.metadata.get("physical_memory_config", {})
+            physical_buffer = (
+                physical_raw.get("write_buffer_bytes", 0)
+                if isinstance(physical_raw, Mapping)
+                else getattr(physical_raw, "write_buffer_bytes", 0)
+            )
+            write_buffer_bytes = component.metadata.get(
+                "write_buffer_bytes", physical_buffer
+            )
             component = replace(component, cost_profile_id=profile_id,
                 read_bandwidth_gbps=read, write_bandwidth_gbps=write,
                 bandwidth_gbps=component.bandwidth_gbps or max(read, write),
                 metadata={**component.metadata, "access_mode": "memory", "read_only": False,
-                    "writable": True, "write_buffer_bytes": 0, "bandwidth_mode": "directional",
+                    "writable": True, "write_buffer_bytes": write_buffer_bytes,
+                    "bandwidth_mode": "directional",
                     "memory_service_owner": profile.resource_id,
                     "read_latency_ns": profile.read_latency_ns, "write_latency_ns": profile.write_latency_ns,
                     "transfer_granularity_bytes": profile.transaction_bytes,

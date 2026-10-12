@@ -2073,14 +2073,15 @@ class ComponentSpec:
             if access_mode not in ("remote_flash", "memory"):
                 raise ValueError("HBF access_mode must be remote_flash or memory")
             if access_mode == "memory":
-                # Buffered acknowledgement requires a separately timed drain path.
-                # Until that exists, Flash writes complete at program completion.
+                # Writes still complete at media program completion.  A
+                # positive value enables finite admission backpressure in the
+                # physical NAND core; zero keeps the write-through default.
                 buffer_bytes = self.metadata.get("write_buffer_bytes")
                 if (isinstance(buffer_bytes, bool)
-                        or not isinstance(buffer_bytes, int) or buffer_bytes != 0):
+                        or not isinstance(buffer_bytes, int) or buffer_bytes < 0):
                     raise ValueError(
-                        "HBF memory requires explicit write_buffer_bytes=0 "
-                        "(write-through); buffered writes are not modeled"
+                        "HBF memory requires explicit non-negative integer "
+                        "write_buffer_bytes"
                     )
         access_offset = self.metadata.get("memory_access_offset_bytes")
         if access_offset is not None and (
@@ -2099,6 +2100,14 @@ class ComponentSpec:
             parsed_config = parse_physical_memory_config(raw)
             parsed_kind = str(getattr(parsed_config.kind, "value", parsed_config.kind)).upper()
             component_kind = self.normalized_kind
+            if component_kind == "hbf" and self.metadata.get("access_mode") == "memory":
+                physical_buffer = int(getattr(parsed_config, "write_buffer_bytes", 0))
+                declared_buffer = self.metadata.get("write_buffer_bytes")
+                if declared_buffer != physical_buffer:
+                    raise ValueError(
+                        "HBF write_buffer_bytes must match physical_memory_config "
+                        "({} != {})".format(declared_buffer, physical_buffer)
+                    )
             if component_kind == "gddr" and parsed_kind != "GDDR":
                 raise ValueError(
                     "component {} kind gddr requires physical_memory_config.kind=GDDR".format(

@@ -276,7 +276,6 @@ class DramConfig:
             raise ValueError("capacity_bytes cannot exceed the declared physical geometry")
         if self.capacity_bytes is None:
             object.__setattr__(self, "capacity_bytes", self.computed_capacity_bytes)
-
     @property
     def bank_count(self) -> int:
         return self.ranks_per_channel * self.bank_groups_per_rank * self.banks_per_group
@@ -345,10 +344,19 @@ class NandConfig:
     internal_transfer_bytes: Optional[int] = None
     host_bandwidth_gb_s: float = 4.0
     internal_bandwidth_gb_s: float = 8.0
+    # Optional directional host-link ceilings.  Older physical configs only
+    # provide ``host_bandwidth_gb_s``; in that case both directions continue
+    # to use the legacy shared value.
+    host_read_bandwidth_gb_s: Optional[float] = field(default=None, kw_only=True)
+    host_write_bandwidth_gb_s: Optional[float] = field(default=None, kw_only=True)
     page_read_ns: float = 50000.0
     page_program_ns: float = 800000.0
     block_erase_ns: float = 3000000.0
     front_ns: float = 0.0
+    # Host-side write staging capacity.  Zero preserves write-through
+    # behavior; positive values model finite admission buffering without
+    # adding an FTL or garbage-collection state machine.
+    write_buffer_bytes: int = field(default=0, kw_only=True)
     partial_page_policy: str = "read_modify_write"
     capacity_bytes: Optional[int] = None
     max_outstanding_requests: int = 32
@@ -384,10 +392,24 @@ class NandConfig:
                 raise ValueError("capacity_bytes must be a multiple of page_bytes")
         _positive_int("max_outstanding_requests", self.max_outstanding_requests)
         _positive_int("max_expanded_segments", self.max_expanded_segments)
+        if (isinstance(self.write_buffer_bytes, bool)
+                or not isinstance(self.write_buffer_bytes, int)
+                or self.write_buffer_bytes < 0):
+            raise ValueError("write_buffer_bytes must be a non-negative integer")
         for name in ("host_bandwidth_gb_s", "internal_bandwidth_gb_s", "page_read_ns", "page_program_ns", "block_erase_ns", "front_ns"):
             value = _nonnegative(name, getattr(self, name))
             if name.endswith("bandwidth_gb_s") and value <= 0:
                 raise ValueError(f"{name} must be positive")
+        for name in ("host_read_bandwidth_gb_s", "host_write_bandwidth_gb_s"):
+            value = getattr(self, name)
+            if value is not None:
+                value = _nonnegative(name, value)
+                if value <= 0:
+                    raise ValueError(f"{name} must be positive when provided")
+                if value > float(self.host_bandwidth_gb_s):
+                    raise ValueError(
+                        f"{name} cannot exceed host_bandwidth_gb_s"
+                    )
         if self.partial_page_policy not in {"read_modify_write", "reject"}:
             raise ValueError("partial_page_policy must be read_modify_write or reject")
         if not isinstance(self.metadata, Mapping):
@@ -396,6 +418,8 @@ class NandConfig:
             raise ValueError("capacity_bytes cannot exceed the declared physical geometry")
         if self.capacity_bytes is None:
             object.__setattr__(self, "capacity_bytes", self.computed_capacity_bytes)
+        if self.write_buffer_bytes > self.effective_capacity_bytes:
+            raise ValueError("write_buffer_bytes cannot exceed device capacity")
 
     @property
     def array_units(self) -> int:
@@ -421,6 +445,28 @@ class NandConfig:
         """Bytes carried for one complete page, rounded to the transfer quantum."""
         quantum = self.internal_transfer_bytes or self.page_bytes
         return ((self.page_bytes + quantum - 1) // quantum) * quantum
+
+    def host_bandwidth_for(self, operation: Operation | str) -> float:
+        """Return the host-link ceiling for one direction.
+
+        Directional fields are optional to keep serialized configurations
+        written before this extension valid.  Missing fields fall back to the
+        original shared ``host_bandwidth_gb_s`` value.
+        """
+        op = operation if isinstance(operation, Operation) else Operation(str(operation).lower())
+        if op is Operation.READ and self.host_read_bandwidth_gb_s is not None:
+            return float(self.host_read_bandwidth_gb_s)
+        if op is Operation.WRITE and self.host_write_bandwidth_gb_s is not None:
+            return float(self.host_write_bandwidth_gb_s)
+        return float(self.host_bandwidth_gb_s)
+
+    @property
+    def effective_host_read_bandwidth_gb_s(self) -> float:
+        return self.host_bandwidth_for(Operation.READ)
+
+    @property
+    def effective_host_write_bandwidth_gb_s(self) -> float:
+        return self.host_bandwidth_for(Operation.WRITE)
 
 
 @dataclass(frozen=True)
@@ -514,6 +560,22 @@ class TransactionResult:
         return float(self.counters.get("queue_wait_ns", 0.0))
 
     @property
+    def write_buffer_wait_ns(self) -> float:
+        return float(self.counters.get("write_buffer_wait_ns", 0.0))
+
+    @property
+    def write_buffer_bytes(self) -> int:
+        return int(self.counters.get("write_buffer_bytes", 0))
+
+    @property
+    def write_buffer_peak_bytes(self) -> int:
+        return int(self.counters.get("write_buffer_peak_bytes", 0))
+
+    @property
+    def write_buffer_occupancy_bytes(self) -> int:
+        return int(self.counters.get("write_buffer_occupancy_bytes", 0))
+
+    @property
     def pages_read(self) -> int:
         return int(self.counters.get("pages_read", 0))
 
@@ -589,6 +651,18 @@ class BatchResult:
     def queue_wait_ns(self) -> float:
         return float(self.counters.get("queue_wait_ns", 0.0))
 
+    @property
+    def write_buffer_wait_ns(self) -> float:
+        return float(self.counters.get("write_buffer_wait_ns", 0.0))
+
+    @property
+    def write_buffer_bytes(self) -> int:
+        return int(self.counters.get("write_buffer_bytes", 0))
+
+    @property
+    def write_buffer_peak_bytes(self) -> int:
+        return int(self.counters.get("write_buffer_peak_bytes", 0))
+
     def __iter__(self):
         return iter(self.requests)
 
@@ -634,11 +708,20 @@ def make_ssd_config(**kwargs: Any) -> NandConfig:
 
 def make_hbf_config(**kwargs: Any) -> NandConfig:
     kwargs["kind"] = MemoryKind.HBF
+    # Keep an explicitly supplied legacy shared bandwidth authoritative.  For
+    # the no-argument HBF helper, expose the analytical directional envelope
+    # used by the presets so a write request cannot silently inherit the read
+    # ceiling.
+    shared_host_supplied = "host_bandwidth_gb_s" in kwargs
     kwargs.setdefault("host_bandwidth_gb_s", 488.0)
+    if not shared_host_supplied:
+        kwargs.setdefault("host_read_bandwidth_gb_s", 488.0)
+        kwargs.setdefault("host_write_bandwidth_gb_s", 27.2)
     kwargs.setdefault("internal_bandwidth_gb_s", 488.0)
     kwargs.setdefault("page_read_ns", 4_000.0)
     kwargs.setdefault("page_program_ns", 75_000.0)
     kwargs.setdefault("front_ns", 800.0)
+    kwargs.setdefault("write_buffer_bytes", 0)
     return NandConfig(**kwargs)
 
 

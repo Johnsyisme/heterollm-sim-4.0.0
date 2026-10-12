@@ -11,7 +11,11 @@ between components that are writable active/offload memory and reachable in
 the supplied topology.  An external physical ledger can be supplied through
 the small ``can_adjust``/``adjust``/``transfer`` interface, so allocations
 participate in the serving ledger instead of maintaining a disconnected
-capacity counter.
+capacity counter.  Physical migration timing is supplied explicitly through
+``transfer_executor``; without that page-aware callback, migration remains
+fail-closed instead of using an aggregate bandwidth estimate.  A real shared
+queue returns ``KvPoolTransferPlan`` so admission can commit or cancel the
+physical reservation together with the capacity ledger.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import copy
 from uuid import uuid4
 from collections import defaultdict
 from dataclasses import dataclass, field
-from math import ceil
+from math import ceil, isfinite
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Set, Tuple
 
 
@@ -173,6 +177,72 @@ class KvPoolTransfer:
     target_component: str
     bytes: int
     duration_ns: float
+    start_ns: Optional[float] = None
+    completion_ns: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class KvPoolTransferRequest:
+    """Immutable page description passed to a physical transfer executor."""
+
+    logical_page_id: int
+    request_id: str
+    layer_group: str
+    source_component: str
+    target_component: str
+    bytes: int
+    allocation_generation: int
+    token_start: int
+    token_end: int
+
+
+@dataclass(frozen=True)
+class KvPoolTransferPlan:
+    """Prepared physical transfer with an optional commit/rollback pair.
+
+    A numeric executor result is still accepted as a pure timing estimate.  A
+    shared physical event queue should return this plan instead: ``prepare``
+    reserves the event, ``commit`` publishes it after the capacity ledger
+    succeeds, and ``rollback`` cancels it on any failed admission.
+    """
+
+    duration_ns: float
+    start_ns: Optional[float] = None
+    completion_ns: Optional[float] = None
+    commit: Optional[Callable[[], None]] = field(default=None, repr=False, compare=False)
+    rollback: Optional[Callable[[], None]] = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        try:
+            duration = float(self.duration_ns)
+        except (TypeError, ValueError) as error:
+            raise KvPoolError("transfer plan duration_ns must be numeric") from error
+        if not isfinite(duration) or duration < 0:
+            raise KvPoolError("transfer plan duration_ns must be finite and non-negative")
+        object.__setattr__(self, "duration_ns", duration)
+        if self.start_ns is not None:
+            try:
+                start = float(self.start_ns)
+            except (TypeError, ValueError) as error:
+                raise KvPoolError("transfer plan start_ns must be numeric") from error
+            if not isfinite(start) or start < 0:
+                raise KvPoolError("transfer plan start_ns must be finite and non-negative")
+            object.__setattr__(self, "start_ns", start)
+        if self.completion_ns is not None:
+            try:
+                completion = float(self.completion_ns)
+            except (TypeError, ValueError) as error:
+                raise KvPoolError("transfer plan completion_ns must be numeric") from error
+            if not isfinite(completion) or completion < 0:
+                raise KvPoolError("transfer plan completion_ns must be finite and non-negative")
+            object.__setattr__(self, "completion_ns", completion)
+        if self.start_ns is not None and self.completion_ns is not None:
+            if self.completion_ns < self.start_ns:
+                raise KvPoolError("transfer plan completion_ns precedes start_ns")
+        for name in ("commit", "rollback"):
+            hook = getattr(self, name)
+            if hook is not None and not callable(hook):
+                raise KvPoolError("transfer plan {} hook must be callable".format(name))
 
 
 @dataclass(frozen=True)
@@ -326,6 +396,9 @@ class DynamicKVPool:
         ledger_adjust: Optional[Callable[[str, int], bool]] = None,
         ledger_can_transfer: Optional[Callable[[str, str, int], bool]] = None,
         ledger_transfer: Optional[Callable[[str, str, int], bool]] = None,
+        transfer_executor: Optional[
+            Callable[[KvPoolTransferRequest], float | KvPoolTransferPlan]
+        ] = None,
     ) -> None:
         if isinstance(tokens_per_page, bool) or int(tokens_per_page) <= 0:
             raise KvPoolError("tokens_per_page must be positive")
@@ -359,6 +432,15 @@ class DynamicKVPool:
             can_transfer=ledger_can_transfer,
             transfer=ledger_transfer,
         )
+        if transfer_executor is not None and not callable(transfer_executor):
+            raise KvPoolError("transfer_executor must be callable")
+        # The pool owns page state and capacity accounting.  A caller that has
+        # the physical address map and shared event queue can inject the
+        # actual source-read/link/target-write lowering here.  The callback
+        # receives an immutable page description so it can resolve a real
+        # physical address.  A shared event queue should return a two-phase
+        # transfer plan; a number is retained only for pure timing estimates.
+        self._transfer_executor = transfer_executor
         self.topology = topology
         explicit_offload = {str(item) for item in (offload_components or ())}
         unknown = explicit_offload - set(self.components)
@@ -416,6 +498,38 @@ class DynamicKVPool:
     def clear_events(self) -> None:
         self._events.clear()
 
+    def snapshot_transfer_executor(self) -> Any:
+        """Capture optional external queue state for serving rollback.
+
+        A physical executor that owns mutable queue state can expose matching
+        ``snapshot()`` and ``restore(state)`` methods.  Pure numeric executors
+        have no state and return ``None``.
+        """
+
+        executor = self._transfer_executor
+        snapshot = getattr(executor, "snapshot", None)
+        restore = getattr(executor, "restore", None)
+        if snapshot is None and restore is None:
+            return None
+        if not callable(snapshot) or not callable(restore):
+            raise KvPoolUnsupported(
+                "transfer_executor must expose both snapshot() and restore(state)"
+            )
+        return copy.deepcopy(snapshot())
+
+    def restore_transfer_executor(self, state: Any) -> None:
+        """Restore optional external queue state captured above."""
+
+        if state is None:
+            return
+        executor = self._transfer_executor
+        restore = getattr(executor, "restore", None)
+        if not callable(restore):
+            raise KvPoolUnsupported(
+                "transfer_executor does not support restoring queue state"
+            )
+        restore(copy.deepcopy(state))
+
     def _bytes_for_layer(self, layer_group: str) -> int:
         value = self.page_bytes_by_layer.get(str(layer_group), self.default_page_bytes)
         if value <= 0:
@@ -454,20 +568,67 @@ class DynamicKVPool:
         except (ValueError, KeyError, KvPoolUnsupported):
             return False
 
-    def _transfer_time_ns(self, source: str, target: str, bytes_: int) -> float:
-        """Reject migrations until they are lowered through the shared event core.
+    def _transfer_plan(
+        self, page: KvPage, source: str, target: str, bytes_: int
+    ) -> KvPoolTransferPlan:
+        """Prepare a migration through an injected shared physical executor.
 
-        The pool knows ownership and capacity, but has no physical address or
-        shared DRAM/NAND queue state. Bandwidth-only pricing here used to bypass
-        the memory simulator while advancing serving time.
+        The pool knows ownership and capacity, but it does not know physical
+        addresses or queue ownership.  Without an executor the operation stays
+        fail-closed rather than silently pricing a second, aggregate transfer.
         """
         if source == target or bytes_ == 0:
-            return 0.0
-        raise KvPoolUnsupported(
-            "paged_pool migration requires physical address and shared memory-event "
-            "lowering; aggregate transfer costs are disabled. Use fixed/manual "
-            "KV placement until this migration path is implemented."
+            return KvPoolTransferPlan(0.0)
+        executor = self._transfer_executor
+        if executor is None:
+            raise KvPoolUnsupported(
+                "paged_pool migration requires physical address and shared memory-event "
+                "lowering; aggregate transfer costs are disabled. Provide transfer_executor "
+                "or use fixed/manual KV placement."
+            )
+        request = KvPoolTransferRequest(
+            logical_page_id=int(page.logical_page_id),
+            request_id=str(page.request_id),
+            layer_group=str(page.layer_group),
+            source_component=str(source),
+            target_component=str(target),
+            bytes=int(bytes_),
+            allocation_generation=int(page.allocation_generation),
+            token_start=int(page.token_start),
+            token_end=int(page.token_end),
         )
+        try:
+            raw_plan = executor(request)
+        except KvPoolError:
+            raise
+        except Exception as error:
+            raise KvPoolUnsupported(
+                "paged_pool physical transfer executor failed: {}".format(error)
+            ) from error
+        if isinstance(raw_plan, KvPoolTransferPlan):
+            return raw_plan
+        if isinstance(raw_plan, bool):
+            raise KvPoolUnsupported(
+                "paged_pool physical transfer executor must return a transfer plan or duration"
+            )
+        try:
+            return KvPoolTransferPlan(float(raw_plan))
+        except (TypeError, ValueError, KvPoolError) as error:
+            raise KvPoolUnsupported(
+                "paged_pool physical transfer executor must return a finite non-negative duration"
+            ) from error
+
+    @staticmethod
+    def _run_transfer_hook(plan: KvPoolTransferPlan, name: str) -> None:
+        hook = getattr(plan, name)
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception as error:
+            raise KvPoolUnsupported(
+                "paged_pool transfer {} hook failed: {}".format(name, error)
+            ) from error
 
     @staticmethod
     def _require_storage_bandwidth(
@@ -935,18 +1096,61 @@ class DynamicKVPool:
             self._last_error = "target component has insufficient physical capacity: " + target_component
             return False
         source = page.owner_component
-        # Validate the execution path before changing ownership or capacity.
-        duration = self._transfer_time_ns(source, target_component, page.bytes)
+        # Prepare the physical event before changing ownership.  A two-phase
+        # plan can cancel a queue reservation if the capacity ledger rejects
+        # the transfer; a numeric result is a side-effect-free timing estimate.
+        try:
+            plan = self._transfer_plan(page, source, target_component, page.bytes)
+        except KvPoolError as error:
+            self._last_error = str(error)
+            raise
         if not self._ledger.transfer(source, target_component, page.bytes):
+            try:
+                self._run_transfer_hook(plan, "rollback")
+            except KvPoolError:
+                self._last_error = "physical transfer reservation could not be rolled back"
+                raise
             self._last_error = "physical ledger rejected transfer {} -> {}".format(source, target_component)
             return False
+        try:
+            self._run_transfer_hook(plan, "commit")
+        except KvPoolError as error:
+            rollback_error: Optional[BaseException] = None
+            try:
+                self._run_transfer_hook(plan, "rollback")
+            except BaseException as hook_error:
+                rollback_error = hook_error
+            reverted = False
+            try:
+                reverted = self._ledger.transfer(target_component, source, page.bytes)
+            except BaseException as ledger_error:
+                rollback_error = rollback_error or ledger_error
+            if not reverted:
+                rollback_error = rollback_error or RuntimeError(
+                    "physical ledger could not reverse failed KV transfer"
+                )
+            self._last_error = str(error)
+            if rollback_error is not None:
+                raise KvPoolUnsupported(
+                    "paged_pool transfer commit failed and rollback was incomplete"
+                ) from rollback_error
+            raise
         self._owned_bytes[source] -= page.bytes
         self._owned_bytes[target_component] += page.bytes
         page.allocation_generation += 1
         page.owner_component = target_component
         page.resident_tier = target.tier
         self._touch(page)
-        self._events.append(KvPoolTransfer(kind, page.logical_page_id, source, target_component, page.bytes, duration))
+        self._events.append(KvPoolTransfer(
+            kind,
+            page.logical_page_id,
+            source,
+            target_component,
+            page.bytes,
+            plan.duration_ns,
+            plan.start_ns,
+            plan.completion_ns,
+        ))
         self._last_error = None
         return True
 
@@ -1042,6 +1246,8 @@ __all__ = [
     "KvPoolError",
     "KvPoolResizeResult",
     "KvPoolTransfer",
+    "KvPoolTransferPlan",
+    "KvPoolTransferRequest",
     "KvPoolUnsupported",
     "PagedKVPool",
     "PhysicalLedger",

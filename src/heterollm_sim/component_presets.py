@@ -300,9 +300,12 @@ def _analytical_nand_config(
         host_granularity_bytes=4096,
         host_bandwidth_gb_s=max(read_bandwidth_gbps, write_bandwidth_gbps) / 8.0,
         internal_bandwidth_gb_s=max(read_bandwidth_gbps, write_bandwidth_gbps) / 8.0,
+        host_read_bandwidth_gb_s=read_bandwidth_gbps / 8.0,
+        host_write_bandwidth_gb_s=write_bandwidth_gbps / 8.0,
         page_read_ns=read_latency_ns, page_program_ns=write_latency_ns,
         block_erase_ns=3_000_000.0,
         capacity_bytes=capacity_bytes, max_outstanding_requests=64,
+        write_buffer_bytes=0,
         metadata={
             "parameter_basis": "analytical_equivalent_assumptions",
             "configuration_scope": scope,

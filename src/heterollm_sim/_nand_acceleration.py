@@ -63,7 +63,8 @@ def execute_full_pages(core, request, first_page, page_count):
     read_ns, program_ns = config.page_read_ns, config.page_program_ns
     internal_ns = config.transfer_page_bytes / config.internal_bandwidth_gb_s
     base = request.arrival_ns + config.front_ns
-    constants = [base, read_ns, program_ns, internal_ns, *(count / config.host_bandwidth_gb_s for *_, count in pages)]
+    host_bandwidth = config.host_bandwidth_for(request.operation)
+    constants = [base, read_ns, program_ns, internal_ns, *(count / host_bandwidth for *_, count in pages)]
     if not all(isfinite(value) for value in (*values.values(), *constants)):
         return None
     ratios = [float(value).as_integer_ratio() for value in (*values.values(), *constants)]
@@ -80,7 +81,7 @@ def execute_full_pages(core, request, first_page, page_count):
     directions = {}
     # Compile stable page geometry once.  Durations use the same per-page
     # float division as ResourceTimeline.transfer, before exact accumulation.
-    page_program = [(a, r, c, count, ticks(count / config.host_bandwidth_gb_s)) for a, r, c, count in pages]
+    page_program = [(a, r, c, count, ticks(count / host_bandwidth)) for a, r, c, count in pages]
     for _, resource, channel, count, host_ns in page_program:
         busy[resource] += ticks(read_ns if request.operation is Operation.READ else program_ns)
         busy[channel] += ticks(internal_ns)

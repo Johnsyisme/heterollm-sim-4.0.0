@@ -249,7 +249,7 @@ class PhysicalRuntimeContext:
                     # NAND readiness values are scalars, so a shallow dict
                     # copy is sufficient and avoids copying timeline history.
                     core_state[key] = dict(value)
-                elif key == "_inflight" and isinstance(value, list):
+                elif key in {"_inflight", "_write_buffer_pending"} and isinstance(value, list):
                     core_state[key] = list(value)
                 else:
                     core_state[key] = value
@@ -1408,6 +1408,9 @@ class PhysicalService:
                 "pages_programmed": batch.pages_programmed,
                 "erase_operations": batch.erase_operations,
                 "queue_wait_ns": batch.queue_wait_ns,
+                "write_buffer_wait_ns": batch.write_buffer_wait_ns,
+                "write_buffer_bytes": batch.write_buffer_bytes,
+                "write_buffer_peak_bytes": batch.write_buffer_peak_bytes,
                 "service_ns": batch.duration_ns,
                 "end_ns": batch.last_completion_ns,
                 "actual_bandwidth_gb_s": batch.actual_bandwidth_gb_s,

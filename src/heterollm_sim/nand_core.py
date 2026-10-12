@@ -32,6 +32,11 @@ class NandCore:
         self._buffer_ready: Dict[str, float] = {}
         self._inflight: list[float] = []
         self._acceptance_ns = 0.0
+        # A positive write_buffer_bytes models a shared host-side staging
+        # budget.  Entries are released when their media program completes;
+        # zero preserves the existing write-through path.
+        self._write_buffer_pending: list[tuple[float, int]] = []
+        self._write_buffer_occupancy = 0
 
     def _array_id(self, mapping) -> str:
         prefix = str(self.config.metadata.get("array_resource_prefix", "nand:array"))
@@ -52,7 +57,7 @@ class NandCore:
     def _host_id(self) -> str:
         return str(self.config.metadata.get("host_resource_id", "nand:host"))
 
-    def _bandwidth_ceiling_gb_s(self) -> float:
+    def _bandwidth_ceiling_gb_s(self, operation: Optional[Operation | str] = None) -> float:
         """Return the end-to-end payload ceiling for the NAND data path.
 
         A request crosses both the host link and the NAND internal channel.
@@ -60,14 +65,77 @@ class NandCore:
         reservation timeline still models each leg separately; this helper
         only fixes the derived bottleneck/utilization metric.
         """
-        return min(
-            float(self.config.host_bandwidth_gb_s),
-            float(self.config.internal_bandwidth_gb_s),
+        # Keep the no-operation form as the legacy aggregate ceiling used by
+        # batch summaries. A transaction uses its own directional host link.
+        host_bandwidth = (
+            float(self.config.host_bandwidth_gb_s)
+            if operation is None
+            else self.config.host_bandwidth_for(operation)
         )
+        return min(host_bandwidth, float(self.config.internal_bandwidth_gb_s))
 
     def _array_stage(self, name: str, resource: str, earliest: float, duration: float, bytes: int = 0) -> StageTiming:
         reservation = self.timeline.reserve(resource, earliest, duration)
         return StageTiming(name, reservation.start_ns, reservation.end_ns, resource, bytes)
+
+    def _write_buffer_payload_bytes(self, request: AccessRequest) -> int:
+        if request.operation is not Operation.WRITE or self.config.write_buffer_bytes <= 0:
+            return 0
+        return sum(
+            int(segment.host_transfer_bytes)
+            for segment in split_nand_request(request, self.config)
+        )
+
+    def _release_write_buffer(self, now_ns: float) -> None:
+        if not self._write_buffer_pending:
+            return
+        retained = []
+        released = 0
+        for release_ns, byte_count in self._write_buffer_pending:
+            if release_ns <= now_ns:
+                released += byte_count
+            else:
+                retained.append((release_ns, byte_count))
+        if released:
+            self._write_buffer_occupancy = max(0, self._write_buffer_occupancy - released)
+            self._write_buffer_pending = retained
+
+    def _admit_write_buffer(
+        self, request: AccessRequest, effective_arrival: float,
+    ) -> tuple[float, int, float]:
+        """Delay admission until a finite write buffer has room.
+
+        Capacity is measured in host payload bytes, matching the host transfer
+        stages and avoiding a second page-level accounting convention.
+        """
+        payload_bytes = self._write_buffer_payload_bytes(request)
+        if not payload_bytes:
+            self._release_write_buffer(effective_arrival)
+            return effective_arrival, 0, 0.0
+        capacity = self.config.write_buffer_bytes
+        if payload_bytes > capacity:
+            raise ValueError(
+                "write request requires {} write-buffer bytes, exceeds configured capacity {}"
+                .format(payload_bytes, capacity)
+            )
+        initial_arrival = effective_arrival
+        while True:
+            self._release_write_buffer(effective_arrival)
+            if self._write_buffer_occupancy + payload_bytes <= capacity:
+                return effective_arrival, payload_bytes, max(0.0, effective_arrival - initial_arrival)
+            future = [
+                release_ns for release_ns, _ in self._write_buffer_pending
+                if release_ns > effective_arrival
+            ]
+            if not future:
+                raise RuntimeError("write buffer occupancy cannot be drained")
+            effective_arrival = min(future)
+
+    def _reserve_write_buffer(self, completion_ns: float, payload_bytes: int) -> None:
+        if payload_bytes <= 0:
+            return
+        self._write_buffer_pending.append((completion_ns, payload_bytes))
+        self._write_buffer_occupancy += payload_bytes
 
     def execute(self, request: AccessRequest) -> TransactionResult:
         """Submit one request through the same admission gate as batches."""
@@ -80,6 +148,9 @@ class NandCore:
         if len(inflight) >= self.config.max_outstanding_requests:
             effective_arrival = max(effective_arrival, min(inflight))
             inflight = [end for end in inflight if end > effective_arrival]
+        effective_arrival, write_buffer_bytes, write_buffer_wait_ns = self._admit_write_buffer(
+            request, effective_arrival
+        )
         before_metrics = self.timeline.metrics_snapshot(
             max_intervals=(
                 self.config.max_expanded_segments
@@ -92,9 +163,14 @@ class NandCore:
             else replace(request, arrival_ns=effective_arrival)
         )
         result = replace(result, arrival_ns=request.arrival_ns, counters={
-            **result.counters, "queue_wait_ns": effective_arrival - request.arrival_ns,
+            **result.counters,
+            "queue_wait_ns": effective_arrival - request.arrival_ns,
+            "write_buffer_wait_ns": write_buffer_wait_ns,
+            "write_buffer_bytes": write_buffer_bytes,
+            "write_buffer_occupancy_bytes": self._write_buffer_occupancy + write_buffer_bytes,
             **self.timeline.metrics_delta(before_metrics),
         })
+        self._reserve_write_buffer(result.completion_ns, write_buffer_bytes)
         self._acceptance_ns = effective_arrival
         self._inflight = [*inflight, result.completion_ns]
         return result
@@ -103,7 +179,17 @@ class NandCore:
         first_page = request.address // self.config.page_bytes
         last_page = (request.address + request.byte_count - 1) // self.config.page_bytes
         page_count = last_page - first_page + 1
-        if not self.capture_details and request.operation is not Operation.ERASE and page_count >= 128:
+        if (
+            not self.capture_details
+            and request.operation is not Operation.ERASE
+            and page_count >= 128
+            # Positive write buffers are admitted at request granularity so
+            # every buffered write observes the same capacity gate.
+            and not (
+                request.operation is Operation.WRITE
+                and self.config.write_buffer_bytes > 0
+            )
+        ):
             return self._execute_accelerated_accepted(request, page_count)
         return self._execute_detailed_accepted(request)
 
@@ -175,7 +261,7 @@ class NandCore:
                 record(StageTiming("INTERNAL_TRANSFER", internal.start_ns, internal.end_ns, internal.resource_id, internal.bytes))
                 host = self.timeline.transfer(
                     self._host_id(), segment.host_transfer_bytes,
-                    internal.end_ns, self.config.host_bandwidth_gb_s,
+                    internal.end_ns, self.config.host_bandwidth_for(Operation.READ),
                     direction="read",
                 )
                 record(StageTiming("HOST_TRANSFER", host.start_ns, host.end_ns, host.resource_id, host.bytes))
@@ -187,7 +273,7 @@ class NandCore:
                 host = self.timeline.transfer(
                     self._host_id(), segment.host_transfer_bytes,
                     request.arrival_ns + self.config.front_ns,
-                    self.config.host_bandwidth_gb_s,
+                    self.config.host_bandwidth_for(Operation.WRITE),
                     direction="write",
                 )
                 record(StageTiming("HOST_TRANSFER", host.start_ns, host.end_ns, host.resource_id, host.bytes))
@@ -221,7 +307,7 @@ class NandCore:
                 "erase_operations": erases,
                 "page_count": segment_count,
                 "details_truncated": details_truncated,
-                "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(),
+                "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(request.operation),
                 "array_units": self.config.array_units,
                 "write_completion": "media_program_complete" if request.operation is Operation.WRITE else "n/a",
             },
@@ -275,7 +361,7 @@ class NandCore:
                 "erase_operations": 0, "page_count": page_count,
                 "details_truncated": page_count > self.config.max_expanded_segments,
                 "accelerated_pages": accelerated_pages,
-                "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(),
+                "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(request.operation),
                 "array_units": self.config.array_units,
                 "write_completion": "media_program_complete" if request.operation is Operation.WRITE else "n/a",
             },

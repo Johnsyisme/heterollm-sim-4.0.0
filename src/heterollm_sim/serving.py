@@ -5492,9 +5492,15 @@ class _OnlineRuntime:
             return
         transfers = pool.events
         for transfer in transfers[self._paged_pool_event_cursor:]:
-            start = self.now
+            declared_start = getattr(transfer, "start_ns", None)
+            declared_completion = getattr(transfer, "completion_ns", None)
+            start = self.now if declared_start is None else max(
+                self.now, float(declared_start)
+            )
             duration = max(0.0, float(transfer.duration_ns))
             end = start + duration
+            if declared_completion is not None:
+                end = max(end, float(declared_completion))
             details = {
                 "kind": transfer.kind,
                 "logical_page_id": transfer.logical_page_id,
@@ -5502,6 +5508,8 @@ class _OnlineRuntime:
                 "target_component": transfer.target_component,
                 "bytes": int(transfer.bytes),
                 "duration_ns": duration,
+                "physical_start_ns": declared_start,
+                "physical_completion_ns": declared_completion,
                 "feedback_boundary": "pool_transfer_complete",
             }
             self.events.append(ServingEvent(start, "kv_pool_transfer_start", details=details))
@@ -14257,6 +14265,11 @@ class _OnlineRuntime:
                     "_events", "_last_error",
                 )
             }
+            paged_pool_transfer_executor_snapshot = (
+                paged_pool.snapshot_transfer_executor()
+            )
+        else:
+            paged_pool_transfer_executor_snapshot = None
         physical_snapshot = copy.deepcopy(self.physical_ledger.__dict__)
         lifecycle_snapshot = {
             key: getattr(self, key)
@@ -14264,7 +14277,7 @@ class _OnlineRuntime:
                 "_running_count", "_terminal_count", "_finished_count",
                 "_rejected_count", "_service_sequence", "_host_available_ns",
                 "_gpu_available_ns", "_last_gpu_start_ns",
-                "_last_serial_device_end_ns", "now",
+                "_last_serial_device_end_ns", "now", "_paged_pool_event_cursor",
             )
         }
         slot_snapshot = (list(self._free_slot_ids), dict(self._slot_bindings))
@@ -14314,6 +14327,9 @@ class _OnlineRuntime:
             if paged_pool is not None and paged_pool_snapshot is not None:
                 for key, value in paged_pool_snapshot.items():
                     setattr(paged_pool, key, copy.deepcopy(value))
+                paged_pool.restore_transfer_executor(
+                    paged_pool_transfer_executor_snapshot
+                )
             for request_id, state in self.states.items():
                 state.__dict__.clear()
                 state.__dict__.update(copy.deepcopy(state_snapshot[request_id]))
