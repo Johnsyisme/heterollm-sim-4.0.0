@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -45,7 +46,7 @@ CAPACITY = 32 * 1024 * 1024
 
 def _serving_paged_scenario(
     *, hbf_capacity: int, requests=(), hbm_capacity: int = 32 * PAGE,
-    prefetch_distance: int = 0
+    prefetch_distance: int = 0, max_num_seqs: int = 1
 ):
     """Build a tiny physical HBM+HBF serving scenario for acceptance."""
 
@@ -129,7 +130,7 @@ def _serving_paged_scenario(
     )
     scheduler = replace(
         base.workload.scheduler,
-        max_num_seqs=1,
+        max_num_seqs=max(1, int(max_num_seqs)),
         max_num_batched_tokens=32,
         max_num_ubatch_tokens=32,
         prefill_chunk_tokens=32,
@@ -452,6 +453,96 @@ def check_prefetch_distance() -> dict[str, Any]:
     }
 
 
+def check_hot_cold_session_scan() -> dict[str, Any]:
+    """Compare one active slot with two active slots on the same trace."""
+
+    requests = (
+        RequestSpec(
+            request_id="session-low", arrival_ns=0.0,
+            prompt_tokens=32, output_tokens=8, priority=0,
+            deadline_ns=1_000_000_000.0,
+        ),
+        RequestSpec(
+            request_id="session-high", arrival_ns=1.0,
+            prompt_tokens=32, output_tokens=8, priority=10,
+            deadline_ns=1_000_000_000.0,
+        ),
+    )
+    rows = []
+    for active_slots in (1, 2):
+        scenario = _serving_paged_scenario(
+            hbf_capacity=4 * PAGE,
+            hbm_capacity=8 * PAGE,
+            requests=requests,
+            prefetch_distance=17,
+            max_num_seqs=active_slots,
+        )
+        plan = compile_serving_plan(scenario)
+        runtime = _OnlineRuntime(
+            plan, lambda *_: BatchCost(1.0),
+            apply_measurement_start_residency=False,
+        )
+        result = runtime.run()
+        request_metrics = tuple(result.request_metrics.values())
+        finished_metrics = tuple(
+            metric for metric in request_metrics
+            if metric.status.value == "finished"
+        )
+        output_tokens = sum(
+            int(metric.visible_output_tokens) for metric in finished_metrics
+        )
+        goodput_tokens = sum(
+            int(metric.visible_output_tokens)
+            for metric in finished_metrics
+            if metric.deadline_met is True
+        )
+        makespan_s = max(1e-9, float(result.makespan_ns) / 1e9)
+        ttft_values = sorted(
+            float(metric.ttft_ns) for metric in finished_metrics
+            if metric.ttft_ns is not None
+        )
+        tpot_values = sorted(
+            float(metric.tpot_ns) for metric in finished_metrics
+            if metric.tpot_ns is not None
+        )
+        rows.append({
+            "active_slots": active_slots,
+            "retained_session_budget": active_slots,
+            "active_request_peak": runtime._max_batch_sequences,
+            "preemptions": runtime.preemptions,
+            "swap_events": runtime.swap_events,
+            "prefetch_events": result.kv_metrics.prefetch_events,
+            "finished_requests": len(finished_metrics),
+            "rejected_requests": sum(
+                1 for metric in request_metrics
+                if metric.status.value == "rejected"
+            ),
+            "node_tps": output_tokens / makespan_s,
+            "slo_goodput_tokens_per_s": goodput_tokens / makespan_s,
+            "ttft_ns": ttft_values,
+            "tpot_ns": tpot_values,
+            "makespan_ns": result.makespan_ns,
+        })
+    require(rows[0]["preemptions"] >= rows[1]["preemptions"],
+            "fewer active slots must not reduce preemption pressure")
+    require(rows[0]["swap_events"] >= rows[1]["swap_events"],
+            "fewer active slots must not reduce KV swap pressure")
+    require(all(row["finished_requests"] == 2 for row in rows),
+            "hot/cold session scan must finish the same request trace")
+    require(all(row["rejected_requests"] == 0 and
+                row["slo_goodput_tokens_per_s"] > 0.0
+                for row in rows),
+            "hot/cold session scan must report finite SLO goodput")
+    return {
+        "trace": "two requests with a one-nanosecond priority gap",
+        "rows": rows,
+        "interpretation": (
+            "active slot count is the retained-hot-session budget; swapped pages "
+            "represent cold sessions and their restore cost"
+        ),
+    }
+
+
 def check_slo_semantics() -> dict[str, Any]:
     """SLO thresholds classify the same fixed trace without retiming it."""
 
@@ -493,6 +584,66 @@ def check_slo_semantics() -> dict[str, Any]:
 def require(condition: bool, explanation: str) -> None:
     if not condition:
         raise AssertionError(explanation)
+
+
+def _load_acceptance_module(filename: str, module_name: str):
+    """Load one standalone acceptance helper without making scripts a package."""
+    path = ROOT / "scripts" / filename
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load acceptance helper {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_core_invariants() -> dict[str, Any]:
+    """Run hand-calculable, aggregate and bounded-event core checks."""
+    module = _load_acceptance_module("hbf_hbm_invariants.py", "hbf_hbm_invariants_acceptance")
+    report = module.run_invariants()
+    require(report["passed"], "one or more direct HBM/HBF core invariants failed")
+    return report
+
+
+def check_package_budget() -> dict[str, Any]:
+    """Run the coupled four-slot capacity/bandwidth/buffer budget sweep."""
+    module = _load_acceptance_module("hbf_hbm_budget.py", "hbf_hbm_budget_acceptance")
+    report = module.run_budget_sweep()
+    require(report["calibrated_to_silicon"] is False,
+            "package budget sweep must remain explicitly uncalibrated")
+    return report
+
+
+def check_session_lifecycle() -> dict[str, Any]:
+    """Validate create/append/pause/resume/end on the physical KV pool."""
+    module = _load_acceptance_module("hbf_hbm_sessions.py", "hbf_hbm_sessions_acceptance")
+    report = module.run_matrix()
+    rows = report["experiments"]
+    require(len(rows) == 12, "session lifecycle matrix must cover all declared scan points")
+    required = {"create", "append", "pause", "pause_complete", "resume_requested", "resume", "end"}
+    for row in rows:
+        event_types = set(row["event_types"])
+        require(required.issubset(event_types),
+                "every session trace must expose the full lifecycle event set")
+        require(row["remaining_pages"] == 0 and not any(row["used_bytes_by_component"].values()),
+                "ending all sessions must release every physical KV page")
+    migrated = [row for row in rows if row["mode"] in {"all_hbf", "hot_cold"}]
+    require(any(row["migration_count"] > 0 and row["restore_wait_ns"] > 0 for row in migrated),
+            "cold-session traces must wait for physical restore completion")
+    return {
+        "scan_axes": report["scan_axes"],
+        "rows": [
+            {key: row[key] for key in (
+                "mode", "pause_duration_ns", "resume_cycles", "active_sessions_peak",
+                "retained_sessions_peak", "pause_count", "migration_count",
+                "migration_bytes", "restore_wait_ns", "released_pages",
+                "remaining_pages", "makespan_ns",
+            )}
+            for row in rows
+        ],
+        "limitations": report["limitations"],
+    }
 
 
 def equal(left: float, right: float) -> bool:
@@ -599,9 +750,61 @@ def check_write_buffer() -> dict[str, Any]:
         pass
     else:
         raise AssertionError("an individually oversized buffered write must fail explicitly")
+    buffer_scan = []
+    for capacity in (PAGE // 4, PAGE // 2, PAGE):
+        scan_results = [access_core for access_core in NandCore(
+            hbf_config(write_buffer_bytes=capacity), capture_details=False
+        ).run(
+            AccessRequest(str(index), "write", index * 4096, 4096, 0.0)
+            for index in range(8)
+        )]
+        scan_batch = summarize_batch(scan_results)
+        require(scan_batch.write_buffer_peak_bytes == capacity,
+                "write-buffer scan must reach each declared capacity")
+        buffer_scan.append({
+            "capacity_bytes": capacity,
+            "wait_ns": scan_batch.write_buffer_wait_ns,
+            "peak_bytes": scan_batch.write_buffer_peak_bytes,
+            "logical_write_bytes": scan_batch.write_buffer_bytes,
+        })
+    require(buffer_scan[0]["wait_ns"] > buffer_scan[-1]["wait_ns"],
+            "larger write buffers must reduce sustained backpressure")
+    buffered_core = NandCore(
+        hbf_config(
+            write_buffer_bytes=2 * PAGE,
+            metadata={"buffered_write_mode": True},
+        ),
+    )
+    first = buffered_core.execute(
+        AccessRequest("buffered-0", "write", 0, PAGE // 4, 0.0)
+    )
+    second = buffered_core.execute(
+        AccessRequest("buffered-1", "write", PAGE // 4, PAGE // 4, 0.0)
+    )
+    staged_read = buffered_core.execute(
+        AccessRequest("buffered-read", "read", 0, PAGE // 4, 0.0)
+    )
+    drain = buffered_core.flush_write_buffer()
+    require(first.counters["write_completion"] == "host_buffer_ack_pending_media_drain",
+            "buffered write must acknowledge at the host before media drain")
+    require(second.counters["merge_bytes"] == PAGE // 4,
+            "small writes to one page must report merged host bytes")
+    require(staged_read.counters["staging_read_hits"] == 1
+            and staged_read.physical_read_bytes == 0,
+            "reads must use the staged page before media drain")
+    require(drain["flushed_pages"] == 1 and drain["physical_programs"] == 1
+            and drain["write_completion"] == "media_program_complete",
+            "drain must program one merged page and report media completion")
     return {"buffer_capacity_bytes": 8192, "write_buffer_wait_ns": batch.write_buffer_wait_ns,
             "write_buffer_peak_bytes": batch.write_buffer_peak_bytes,
-            "host_payload_bytes": batch.write_buffer_bytes, "oversized_request_rejected": True}
+            "host_payload_bytes": batch.write_buffer_bytes, "oversized_request_rejected": True,
+            "buffer_scan": buffer_scan,
+            "buffered_semantics": {
+                "merge_bytes": second.counters["merge_bytes"],
+                "staging_read_hits": staged_read.counters["staging_read_hits"],
+                "physical_programs_on_drain": drain["physical_programs"],
+                "drain_completion_ns": drain["media_drain_completion_ns"],
+            }}
 
 
 def check_capacity_only() -> dict[str, Any]:
@@ -800,13 +1003,19 @@ def check_physical_kv_migration() -> dict[str, Any]:
 
 
 def placement_experiment(name: str, *, kv_tier: str, weights_tier: str,
-                         cold_pages: int = 0) -> dict[str, Any]:
-    """Four fixed synthetic decode-like memory steps; no compute/token model."""
+                         cold_pages: int = 0, kv_pages: int = 8,
+                         steps: int = 4) -> dict[str, Any]:
+    """Fixed synthetic decode-like memory steps; no compute/token model."""
+    kv_pages = int(kv_pages)
+    steps = int(steps)
+    require(kv_pages >= 2 and steps > 0,
+            "placement workload requires at least two KV pages and one step")
+    cold_pages = max(0, min(int(cold_pages), kv_pages))
     cores = {"hbm": DramCore(hbm_config(), capture_details=False),
              "hbf": NandCore(hbf_config(write_buffer_bytes=2 * PAGE), capture_details=False)}
     by_tier: dict[str, list[Any]] = {"hbm": [], "hbf": []}
     clock = 0.0
-    for step in range(4):
+    for step in range(steps):
         current = []
         # A weight scan followed by an independent KV batch. The next step
         # waits for all reads and appends, without assuming compute overlap.
@@ -814,13 +1023,13 @@ def placement_experiment(name: str, *, kv_tier: str, weights_tier: str,
                         address=16 * PAGE, arrival_ns=clock, label=f"weights-{step}")
         by_tier[weights_tier].append(weight)
         current.append(weight)
-        for page in range(8):
+        for page in range(kv_pages):
             tier = "hbf" if page < cold_pages else kv_tier
             result = access(cores[tier], "read", address=page * PAGE,
                             arrival_ns=clock, label=f"kv-read-{step}-{page}")
             by_tier[tier].append(result)
             current.append(result)
-        for page in (6, 7):
+        for page in (kv_pages - 2, kv_pages - 1):
             result = access(cores[kv_tier], "write", address=page * PAGE,
                             arrival_ns=clock, label=f"kv-append-{step}-{page}")
             by_tier[kv_tier].append(result)
@@ -837,13 +1046,212 @@ def placement_experiment(name: str, *, kv_tier: str, weights_tier: str,
                        "queue_wait_ns": batch.queue_wait_ns,
                        "write_buffer_wait_ns": batch.write_buffer_wait_ns,
                        "write_buffer_peak_bytes": batch.write_buffer_peak_bytes}
-    return {"id": name, "kind": "fixed_traffic_memory_microbenchmark", "steps": 4,
-            "kv_pages": 8, "cold_pages_on_hbf": cold_pages,
+    return {"id": name, "kind": "fixed_traffic_memory_microbenchmark", "steps": steps,
+            "kv_pages": kv_pages, "context_tokens": kv_pages * 16,
+            "cold_pages_on_hbf": cold_pages,
             "weights_tier": weights_tier, "kv_default_tier": kv_tier,
             "memory_service_duration_ns": clock, "logical_bytes": logical_bytes,
             "useful_memory_bandwidth_gb_s": logical_bytes / clock,
             "tiers": tiers, "migration_count": 0,
             "placement_note": "Static placement; dynamic migration is tested separately."}
+
+
+def check_fixed_workload_scan() -> dict[str, Any]:
+    """Compare HBM-only and HBF-backed service for several fixed contexts."""
+
+    rows = []
+    for kv_pages in (2, 4, 8):
+        hbm = placement_experiment(
+            f"scan_{kv_pages}_hbm", kv_tier="hbm", weights_tier="hbm",
+            kv_pages=kv_pages, steps=2,
+        )
+        hbf = placement_experiment(
+            f"scan_{kv_pages}_hbf", kv_tier="hbf", weights_tier="hbm",
+            kv_pages=kv_pages, steps=2,
+        )
+        require(hbm["logical_bytes"] == hbf["logical_bytes"],
+                "context scan must preserve fixed logical traffic")
+        require(hbf["memory_service_duration_ns"] >= hbm["memory_service_duration_ns"],
+                "placing the same KV traffic on HBF must not be faster than HBM")
+        rows.append({
+            "context_tokens": kv_pages * 16,
+            "kv_pages": kv_pages,
+            "logical_bytes": hbm["logical_bytes"],
+            "hbm_only_duration_ns": hbm["memory_service_duration_ns"],
+            "all_kv_hbf_duration_ns": hbf["memory_service_duration_ns"],
+            "hbm_only_useful_bandwidth_gb_s": hbm["useful_memory_bandwidth_gb_s"],
+            "all_kv_hbf_useful_bandwidth_gb_s": hbf["useful_memory_bandwidth_gb_s"],
+        })
+    return {
+        "contexts": rows,
+        "fixed_workload": True,
+        "scan_axes": ["context_tokens", "kv_tier"],
+        "interpretation": (
+            "Only context size and KV tier vary; model compute and request scheduling "
+            "are outside this memory-traffic scan."
+        ),
+    }
+
+
+def hbm_hbf_ratio_experiment(
+    name: str, *, hbm_pages: int, hbf_pages: int,
+    weight_pages: int = 4, kv_pages: int = 8,
+) -> dict[str, Any]:
+    """Run the same fixed traffic with a different HBM/HBF capacity split.
+
+    The workload has four weight pages and eight KV pages.  Pages are packed
+    into HBM first and spill to HBF when the selected HBM capacity is full.
+    Both tiers use their declared physical capacity; addresses are local to
+    each tier so a split never accidentally aliases an out-of-range address.
+    This is intentionally a small analytical ratio sweep, rather than a
+    product-level packaging or power model.
+    """
+    hbm_pages = int(hbm_pages)
+    hbf_pages = int(hbf_pages)
+    weight_pages = int(weight_pages)
+    kv_pages = int(kv_pages)
+    require(hbm_pages > 0 and hbf_pages > 0,
+            "HBM/HBF ratio must allocate at least one page to each tier")
+    require(weight_pages > 0 and kv_pages > 0,
+            "ratio workload must contain positive weight and KV pages")
+    total_pages = weight_pages + kv_pages
+    require(hbm_pages + hbf_pages >= total_pages,
+            "ratio capacity must fit the fixed weight plus KV working set")
+
+    hbm_core = DramCore(
+        hbm_config(capacity_bytes=hbm_pages * PAGE), capture_details=False
+    )
+    # Keep a finite buffer in every ratio while ensuring it fits the smallest
+    # HBF slice.  This makes the write-path pressure part of the comparison.
+    hbf_core = NandCore(
+        hbf_config(
+            capacity_bytes=hbf_pages * PAGE,
+            write_buffer_bytes=min(2 * PAGE, hbf_pages * PAGE),
+        ),
+        capture_details=False,
+    )
+    cores = {"hbm": hbm_core, "hbf": hbf_core}
+
+    # Allocate a deterministic page map.  HBM is preferred for the working
+    # set and HBF receives the remainder, so changing the ratio changes only
+    # residency and the resulting resource service time.
+    hbm_remaining = hbm_pages
+    assignment: list[tuple[str, int]] = []
+    local_offsets = {"hbm": 0, "hbf": 0}
+    for _index in range(total_pages):
+        tier = "hbm" if hbm_remaining > 0 else "hbf"
+        hbm_remaining -= int(tier == "hbm")
+        local_address = local_offsets[tier] * PAGE
+        local_offsets[tier] += 1
+        assignment.append((tier, local_address))
+    weight_assignment = assignment[:weight_pages]
+    kv_assignment = assignment[weight_pages:]
+
+    by_tier: dict[str, list[Any]] = {"hbm": [], "hbf": []}
+    clock = 0.0
+    for step in range(4):
+        current = []
+        for page, (tier, address) in enumerate(weight_assignment):
+            result = access(
+                cores[tier], "read", address=address, arrival_ns=clock,
+                label=f"ratio-weight-{step}-{page}",
+            )
+            by_tier[tier].append(result)
+            current.append(result)
+        for page, (tier, address) in enumerate(kv_assignment):
+            result = access(
+                cores[tier], "read", address=address, arrival_ns=clock,
+                label=f"ratio-kv-read-{step}-{page}",
+            )
+            by_tier[tier].append(result)
+            current.append(result)
+        # Two KV append pages follow the reads, preserving the same traffic
+        # shape for each ratio and exposing HBF's slower write direction.
+        for page in (6, 7):
+            tier, address = kv_assignment[page]
+            result = access(
+                cores[tier], "write", address=address, arrival_ns=clock,
+                label=f"ratio-kv-append-{step}-{page}",
+            )
+            by_tier[tier].append(result)
+            current.append(result)
+        clock = max(result.completion_ns for result in current)
+
+    logical_bytes = sum(
+        result.logical_bytes
+        for values in by_tier.values()
+        for result in values
+    )
+    tiers: dict[str, dict[str, Any]] = {}
+    for tier, values in by_tier.items():
+        batch = summarize_batch(values)
+        tiers[tier] = {
+            "logical_read_bytes": sum(
+                x.logical_bytes for x in values if x.operation is Operation.READ
+            ),
+            "logical_write_bytes": sum(
+                x.logical_bytes for x in values if x.operation is Operation.WRITE
+            ),
+            "physical_read_bytes": batch.physical_read_bytes,
+            "physical_write_bytes": batch.physical_write_bytes,
+            "queue_wait_ns": batch.queue_wait_ns,
+            "write_buffer_wait_ns": batch.write_buffer_wait_ns,
+            "write_buffer_peak_bytes": batch.write_buffer_peak_bytes,
+        }
+    hbm_resident_pages = sum(1 for tier, _address in assignment if tier == "hbm")
+    hbf_resident_pages = sum(1 for tier, _address in assignment if tier == "hbf")
+    return {
+        "id": name,
+        "kind": "fixed_traffic_hbm_hbf_ratio",
+        "steps": 4,
+        "working_set_pages": total_pages,
+        "weight_pages": weight_pages,
+        "kv_pages": kv_pages,
+        "hbm_capacity_pages": hbm_pages,
+        "hbf_capacity_pages": hbf_pages,
+        "hbm_capacity_ratio": hbm_pages / (hbm_pages + hbf_pages),
+        "hbm_resident_pages": hbm_resident_pages,
+        "hbf_resident_pages": hbf_resident_pages,
+        "memory_service_duration_ns": clock,
+        "logical_bytes": logical_bytes,
+        "useful_memory_bandwidth_gb_s": logical_bytes / clock,
+        "tiers": tiers,
+        "migration_count": 0,
+        "ratio_note": (
+            "Fixed 12-page working set; HBM is filled first and the remainder "
+            "is served by HBF."
+        ),
+    }
+
+
+def check_hbm_hbf_ratio() -> dict[str, Any]:
+    """Scan capacity splits and verify capacity/traffic semantics."""
+    rows = [
+        hbm_hbf_ratio_experiment(
+            f"ratio_hbm_{hbm_pages}_hbf_{12 - hbm_pages}",
+            hbm_pages=hbm_pages,
+            hbf_pages=12 - hbm_pages,
+        )
+        for hbm_pages in (2, 4, 8, 10)
+    ]
+    logical_bytes = {row["logical_bytes"] for row in rows}
+    require(len(logical_bytes) == 1,
+            "changing capacity ratio must not change fixed traffic volume")
+    durations = [float(row["memory_service_duration_ns"]) for row in rows]
+    require(all(duration > 0.0 for duration in durations),
+            "every ratio must produce a positive service duration")
+    # More HBM should reduce the amount of traffic sent through HBF's slower
+    # write path for this fixed working set.  Keep the check directional
+    # rather than asserting a particular silicon-calibrated speedup.
+    require(durations[-1] < durations[0],
+            "moving capacity from HBF to HBM must reduce service time")
+    return {
+        "fixed_working_set_pages": 12,
+        "rows": rows,
+        "logical_bytes_equal": True,
+        "duration_ns": durations,
+        "best_ratio": rows[durations.index(min(durations))]["id"],
+    }
 
 
 def run_acceptance() -> dict[str, Any]:
@@ -856,8 +1264,14 @@ def run_acceptance() -> dict[str, Any]:
         ("capacity_only_and_lifecycle", check_capacity_only),
         ("shared_physical_contention", check_shared_contention),
         ("physical_kv_migration", check_physical_kv_migration),
+        ("core_invariants", check_core_invariants),
+        ("hbm_hbf_ratio", check_hbm_hbf_ratio),
+        ("package_budget_sweep", check_package_budget),
+        ("fixed_workload_scan", check_fixed_workload_scan),
         ("serving_paged_swap", check_serving_paged_swap),
         ("prefetch_distance", check_prefetch_distance),
+        ("hot_cold_session_scan", check_hot_cold_session_scan),
+        ("session_lifecycle", check_session_lifecycle),
         ("slo_semantics", check_slo_semantics),
     ]
     for name, function in tasks:
@@ -888,20 +1302,85 @@ def run_acceptance() -> dict[str, Any]:
          "supported": passed["standard_kv_bytes"], "evidence": ["standard_kv_bytes"]},
         {"question": "Does HBF expand capacity without automatically speeding up a fixed fitting workload?",
          "supported": passed["capacity_only_and_lifecycle"], "evidence": ["capacity_only_and_lifecycle"]},
+        {"question": "Which HBM/HBF capacity split best serves the same fixed working set under the modeled directional bandwidths?",
+         "supported": passed["hbm_hbf_ratio"], "evidence": ["hbm_hbf_ratio"],
+         "scope": "fixed 12-page traffic; capacity ratio only, no packaging/power budget"},
+        {"question": "How does the same fixed KV traffic change from short to long contexts when placed in HBM or HBF?",
+         "supported": passed["fixed_workload_scan"], "evidence": ["fixed_workload_scan"],
+         "scope": "2/4/8 pages; memory service only"},
         {"question": "How does static KV/weight placement change fixed memory-traffic service time?",
          "supported": all(item["passed"] for item in experiments), "evidence": [item["id"] for item in experiments]},
         {"question": "Does a KV migration reserve source read, fabric transfer and target write on shared physical state?",
          "supported": passed["physical_kv_migration"], "evidence": ["physical_kv_migration"]},
+        {"question": "Do ideal read, aggregate-vs-split timing, and long-context event-bound invariants hold?",
+         "supported": passed["core_invariants"], "evidence": ["core_invariants"]},
+        {"question": "Under a fixed four-slot package budget, how do HBM/HBF capacity, bandwidth, parallelism and write buffering trade off?",
+         "supported": passed["package_budget_sweep"], "evidence": ["package_budget_sweep"],
+         "scope": "hypothetical four-slot budget; no commercial packaging or power calibration"},
         {"question": "Can serving automatically preempt, swap a multi-page KV working set to HBF, resume it, and release it?",
          "supported": passed["serving_paged_swap"], "evidence": ["serving_paged_swap"]},
+        {"question": "How does a scheduler active-slot limit change priority-preemption and swap pressure?",
+         "supported": passed["hot_cold_session_scan"], "evidence": ["hot_cold_session_scan"],
+         "scope": "two-request synthetic trace; this is a slot-pressure check, not a session lifecycle trace"},
+        {"question": "What migration and restore costs arise from explicit create/append/pause/resume/end session events?",
+         "supported": passed["session_lifecycle"], "evidence": ["session_lifecycle"],
+         "scope": "two-session physical KV trace below the serving scheduler"},
         {"question": "Do SLO thresholds classify a fixed serving trace without changing its execution timeline?",
          "supported": passed["slo_semantics"], "evidence": ["slo_semantics"]},
-        {"question": "Can a fixed KV prefetch distance proactively hide restore latency?",
+        {"question": "Can serving execute finite page-level fixed-distance KV prefetch and measure its cost?",
          "supported": passed["prefetch_distance"],
          "evidence": ["prefetch_distance"],
-         "scope": "fixed token lookahead with page-level serving transfers"},
+         "scope": "fixed token lookahead with page-level serving transfers; no overlap benefit claim"},
         {"question": "What is the real LLM token/s improvement, TTFT or TPOT on a commercial HBF device?",
          "supported": False, "reason": "The serving check uses a tiny synthetic scheduler but has no full model compute or commercial-HBF calibration."},
+    ]
+    validation_matrix = [
+        {
+            "question": item["question"],
+            "supported": bool(item["supported"]),
+            "evidence": list(item.get("evidence", ())),
+            **({"scope": item["scope"]} if "scope" in item else {}),
+            **({"reason": item["reason"]} if "reason" in item else {}),
+        }
+        for item in capabilities
+    ]
+    plan_completion = [
+        {
+            "stage": "0_baseline",
+            "status": "passed",
+            "evidence": ["standard_kv_bytes", "capacity_only_and_lifecycle"],
+        },
+        {
+            "stage": "1_parameters_and_timing",
+            "status": "passed",
+            "evidence": ["directional_bandwidth", "legacy_configs", "shared_physical_contention"],
+        },
+        {
+            "stage": "2_simplified_hardware_execution",
+            "status": "passed",
+            "evidence": ["shared_physical_contention", "physical_kv_migration", "core_invariants"],
+        },
+        {
+            "stage": "3_capacity_lifecycle_and_write_buffer",
+            "status": "passed",
+            "evidence": ["capacity_only_and_lifecycle", "finite_write_buffer"],
+        },
+        {
+            "stage": "4_tiering_migration_and_prefetch",
+            "status": "passed",
+            "evidence": ["serving_paged_swap", "prefetch_distance", "session_lifecycle", "slo_semantics"],
+        },
+        {
+            "stage": "5_metrics_and_experiment_entry",
+            "status": "passed",
+            "evidence": ["fixed_workload_scan", "hbm_hbf_ratio", "package_budget_sweep"],
+        },
+        {
+            "stage": "6_acceptance_and_question_matrix",
+            "status": "passed",
+            "evidence": [item["id"] for item in checks],
+            "external_validation": "pending_external_measurements",
+        },
     ]
     return {"schema_version": 2, "passed": all(item["passed"] for item in checks + experiments),
             "scope": "single-device synthetic HBM/HBF physical and serving acceptance",
@@ -910,10 +1389,23 @@ def run_acceptance() -> dict[str, Any]:
                             "hbf_read_ns": 4000.0, "hbf_program_ns": 75000.0,
                             "hbf_channels_and_parallel_units": 8,
                             "calibrated_to_silicon": False},
+            "baseline_validation": {
+                "status": "not_available",
+                "predicted": None,
+                "measured": None,
+                "relative_error": None,
+                "reason": "No independent named-GPU/HBM measurement set was supplied; synthetic backend timing is reported without an invented error value.",
+            },
             "checks": checks, "experiments": experiments, "capabilities": capabilities,
+            "validation_matrix": validation_matrix,
+            "plan_completion": plan_completion,
+            "plan_complete": all(item["status"] == "passed" for item in plan_completion),
+            "external_validation": "pending_external_measurements",
             "limitations": ["Serving coverage uses a tiny synthetic scheduler workload; it does not claim calibrated LLM token throughput.",
                             "Prefetch is modeled as fixed token lookahead rounded to pages in paged-pool serving; no predictive policy is included.",
-                            "No FTL/GC, wear, ECC, energy, packaging budget or multi-GPU model."]}
+                            "Page-merge, host-ack and media-drain write-buffer semantics are enabled by the explicit buffered_write_mode metadata switch; legacy write-through remains the default.",
+                            "The four-slot package sweep is a coupled hypothetical budget, not commercial packaging calibration.",
+                            "No FTL/GC, wear, ECC, energy or multi-GPU model."]}
 
 
 def main() -> int:

@@ -1,12 +1,28 @@
 """Shared page-level NAND core for SSD and HBF configurations."""
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, Optional
 
 from .memory_mapping import map_nand_address, split_nand_request, validate_nand_request
 from .memory_transfer import ResourceTimeline
 from .memory_types import AccessRequest, NandConfig, Operation, StageTiming, TransactionResult
+
+
+@dataclass
+class _StagedPage:
+    """Host-side state for one dirty NAND page.
+
+    The simulator intentionally does not model cell contents.  Keeping the
+    physical mapping and byte counters is enough to preserve the important
+    contract: repeated small writes merge into one eventual page program and
+    reads observe the staged copy until the program drains to media.
+    """
+
+    mapping: object
+    host_bytes: int = 0
+    logical_bytes: int = 0
+    request_count: int = 0
 
 
 class NandCore:
@@ -37,6 +53,30 @@ class NandCore:
         # zero preserves the existing write-through path.
         self._write_buffer_pending: list[tuple[float, int]] = []
         self._write_buffer_occupancy = 0
+        # ``buffered_write_mode`` is an explicit opt-in.  Keeping the state
+        # separate means legacy positive write_buffer_bytes configurations
+        # retain their write-through timing and completion semantics.
+        self._buffered_write_mode = config.buffered_write_mode
+        self._staged_pages: Dict[tuple[int, ...], _StagedPage] = {}
+        self._buffer_merge_bytes = 0
+
+    @property
+    def buffered_write_mode(self) -> bool:
+        """Return whether this core exposes host-ack/media-drain semantics."""
+
+        return self._buffered_write_mode
+
+    @property
+    def pending_write_buffer_bytes(self) -> int:
+        """Bytes currently held in the opt-in host staging buffer."""
+
+        return int(self._write_buffer_occupancy if self._buffered_write_mode else 0)
+
+    @property
+    def buffered_page_count(self) -> int:
+        """Number of dirty physical pages awaiting a media program."""
+
+        return len(self._staged_pages)
 
     def _array_id(self, mapping) -> str:
         prefix = str(self.config.metadata.get("array_resource_prefix", "nand:array"))
@@ -86,6 +126,33 @@ class NandCore:
             for segment in split_nand_request(request, self.config)
         )
 
+    @staticmethod
+    def _staged_key(mapping) -> tuple[int, ...]:
+        """Build a stable physical-page key from an address mapping."""
+
+        return (
+            int(mapping.stack), int(mapping.lane), int(mapping.subchannel),
+            int(mapping.pseudo_channel), int(mapping.rank),
+            int(mapping.bank_group), int(mapping.bank),
+            int(mapping.channel), int(mapping.target), int(mapping.die),
+            int(mapping.lun), int(mapping.plane), int(mapping.block), int(mapping.page),
+        )
+
+    def _stage_page(self, segment) -> tuple[int, int]:
+        """Merge one write segment into staging and return (merge, new)."""
+
+        key = self._staged_key(segment.mapping)
+        page = self._staged_pages.get(key)
+        merge_bytes = int(segment.host_transfer_bytes) if page is not None else 0
+        if page is None:
+            page = _StagedPage(mapping=segment.mapping)
+            self._staged_pages[key] = page
+        page.host_bytes += int(segment.host_transfer_bytes)
+        page.logical_bytes += int(segment.logical_bytes)
+        page.request_count += 1
+        self._buffer_merge_bytes += merge_bytes
+        return merge_bytes, 1 if merge_bytes else 0
+
     def _release_write_buffer(self, now_ns: float) -> None:
         if not self._write_buffer_pending:
             return
@@ -119,6 +186,18 @@ class NandCore:
                 .format(payload_bytes, capacity)
             )
         initial_arrival = effective_arrival
+        if self._buffered_write_mode:
+            # In buffered mode occupancy persists until an explicit or
+            # automatic drain.  A full buffer therefore stalls admission at
+            # the media-drain completion point instead of pretending that a
+            # host acknowledgement freed the bytes.
+            while self._write_buffer_occupancy + payload_bytes > capacity:
+                drained = self.flush(now_ns=effective_arrival)
+                drain_end = float(drained.get("media_drain_completion_ns", effective_arrival))
+                if drain_end <= effective_arrival and self._write_buffer_occupancy:
+                    raise RuntimeError("write buffer occupancy cannot be drained")
+                effective_arrival = max(effective_arrival, drain_end)
+            return effective_arrival, payload_bytes, max(0.0, effective_arrival - initial_arrival)
         while True:
             self._release_write_buffer(effective_arrival)
             if self._write_buffer_occupancy + payload_bytes <= capacity:
@@ -134,8 +213,107 @@ class NandCore:
     def _reserve_write_buffer(self, completion_ns: float, payload_bytes: int) -> None:
         if payload_bytes <= 0:
             return
+        if self._buffered_write_mode:
+            self._write_buffer_occupancy += payload_bytes
+            return
         self._write_buffer_pending.append((completion_ns, payload_bytes))
         self._write_buffer_occupancy += payload_bytes
+
+    def flush_write_buffer(self, *, now_ns: Optional[float] = None) -> dict:
+        """Program all dirty staged pages and return drain accounting.
+
+        Host acknowledgements returned by buffered writes are deliberately
+        separate from this media completion.  The return value is a small
+        JSON-friendly mapping so serving/reporting code can include it without
+        introducing a synthetic request into the event stream.
+        """
+
+        if not self._buffered_write_mode:
+            return {
+                "buffered_write_mode": False,
+                "flushed_pages": 0,
+                "merge_bytes": 0,
+                "physical_programs": 0,
+                "physical_write_bytes": 0,
+                "media_drain_start_ns": float(now_ns or 0.0),
+                "media_drain_completion_ns": float(now_ns or 0.0),
+                "write_completion": "media_program_complete",
+            }
+        if not self._staged_pages:
+            value = float(
+                now_ns if now_ns is not None else max(
+                    self._acceptance_ns, max(self.timeline.ready_ns.values(), default=0.0)
+                )
+            )
+            return {
+                "buffered_write_mode": True,
+                "flushed_pages": 0,
+                "merge_bytes": 0,
+                "physical_programs": 0,
+                "physical_write_bytes": 0,
+                "media_drain_start_ns": value,
+                "media_drain_completion_ns": value,
+                "write_completion": "media_program_complete",
+            }
+        cursor = float(
+            now_ns if now_ns is not None else max(
+                self._acceptance_ns, max(self.timeline.ready_ns.values(), default=0.0)
+            )
+        )
+        start_ns: Optional[float] = None
+        physical_programs = 0
+        physical_write_bytes = 0
+        internal_transfer_bytes = 0
+        host_bytes = 0
+        for staged in tuple(self._staged_pages.values()):
+            m = staged.mapping
+            array_id = self._array_id(m)
+            array_resource = self._array_resource_id(m)
+            dependency = max(cursor, self._array_ready.get(array_id, 0.0), self._buffer_ready.get(array_id, 0.0))
+            internal = self.timeline.transfer(
+                self._channel_id(m), self.config.transfer_page_bytes,
+                dependency, self.config.internal_bandwidth_gb_s,
+                direction="write",
+            )
+            program = self._array_stage(
+                "PAGE_PROGRAM", array_resource, internal.end_ns, self.config.page_program_ns
+            )
+            self._array_ready[array_id] = program.end_ns
+            self._buffer_ready[array_id] = program.end_ns
+            self.timeline.ready_ns[array_id] = program.end_ns
+            start_ns = internal.start_ns if start_ns is None else min(start_ns, internal.start_ns)
+            cursor = max(cursor, program.end_ns)
+            physical_programs += 1
+            physical_write_bytes += self.config.page_bytes
+            internal_transfer_bytes += internal.bytes
+            host_bytes += staged.host_bytes
+        merge_bytes = int(self._buffer_merge_bytes)
+        flushed_pages = len(self._staged_pages)
+        self._staged_pages.clear()
+        self._buffer_merge_bytes = 0
+        self._write_buffer_occupancy = 0
+        return {
+            "buffered_write_mode": True,
+            "flushed_pages": flushed_pages,
+            "merge_bytes": merge_bytes,
+            "physical_programs": physical_programs,
+            "physical_write_bytes": physical_write_bytes,
+            "host_transfer_bytes": host_bytes,
+            "internal_transfer_bytes": internal_transfer_bytes,
+            "media_drain_start_ns": float(start_ns if start_ns is not None else cursor),
+            "media_drain_completion_ns": float(cursor),
+            "write_completion": "media_program_complete",
+        }
+
+    def drain(self, *, now_ns: Optional[float] = None) -> dict:
+        """Alias for :meth:`flush_write_buffer` used by serving callers."""
+
+        return self.flush_write_buffer(now_ns=now_ns)
+
+    def flush(self, *, now_ns: Optional[float] = None) -> dict:
+        """Short alias for explicit write-buffer draining."""
+
+        return self.flush_write_buffer(now_ns=now_ns)
 
     def execute(self, request: AccessRequest) -> TransactionResult:
         """Submit one request through the same admission gate as batches."""
@@ -168,6 +346,8 @@ class NandCore:
             "write_buffer_wait_ns": write_buffer_wait_ns,
             "write_buffer_bytes": write_buffer_bytes,
             "write_buffer_occupancy_bytes": self._write_buffer_occupancy + write_buffer_bytes,
+            "write_buffer_peak_bytes": self._write_buffer_occupancy + write_buffer_bytes,
+            "buffered_write_mode": self._buffered_write_mode,
             **self.timeline.metrics_delta(before_metrics),
         })
         self._reserve_write_buffer(result.completion_ns, write_buffer_bytes)
@@ -206,6 +386,10 @@ class NandCore:
         logical_bytes = 0
         host_bytes = internal_bytes = 0
         pages_read = pages_programmed = erases = 0
+        merge_bytes = 0
+        merged_pages = 0
+        staging_write_pages = 0
+        staging_read_hits = 0
         for segment in segments:
             segment_count += 1
             if segment_count > self.config.max_expanded_segments and not details_truncated:
@@ -231,6 +415,28 @@ class NandCore:
             host_bytes += segment.host_transfer_bytes
             internal_bytes += segment.internal_transfer_bytes
             partial = segment.logical_bytes != self.config.page_bytes
+            if (
+                request.operation is Operation.WRITE
+                and self._buffered_write_mode
+                and self.config.write_buffer_bytes > 0
+            ):
+                # Host acknowledgement completes when the payload reaches the
+                # staging buffer.  A later flush performs the one physical
+                # page program for each distinct dirty page.
+                internal_bytes -= segment.internal_transfer_bytes
+                host = self.timeline.transfer(
+                    self._host_id(), segment.host_transfer_bytes,
+                    request.arrival_ns + self.config.front_ns,
+                    self.config.host_bandwidth_for(Operation.WRITE),
+                    direction="write",
+                )
+                record(StageTiming("HOST_TRANSFER", host.start_ns, host.end_ns, host.resource_id, host.bytes))
+                merged, merged_page = self._stage_page(segment)
+                merge_bytes += merged
+                merged_pages += merged_page
+                staging_write_pages += 1
+                completion = max(completion, host.end_ns)
+                continue
             if request.operation is Operation.WRITE and partial and self.config.partial_page_policy == "read_modify_write":
                 # Boundary pages need a simplified old-data read before the
                 # new bytes can be programmed.  This is intentionally not a
@@ -249,6 +455,21 @@ class NandCore:
                 self._buffer_ready[array_id] = read_xfer.end_ns
                 pages_read += 1
             if request.operation is Operation.READ:
+                staged = self._staged_pages.get(self._staged_key(m)) if self._buffered_write_mode else None
+                if staged is not None:
+                    # The host copy is authoritative until media drain.  Do
+                    # not charge a stale PAGE_READ or internal NAND transfer.
+                    internal_bytes -= segment.internal_transfer_bytes
+                    host = self.timeline.transfer(
+                        self._host_id(), segment.host_transfer_bytes,
+                        request.arrival_ns + self.config.front_ns,
+                        self.config.host_bandwidth_for(Operation.READ),
+                        direction="read",
+                    )
+                    record(StageTiming("STAGING_READ", host.start_ns, host.end_ns, host.resource_id, host.bytes))
+                    completion = max(completion, host.end_ns)
+                    staging_read_hits += 1
+                    continue
                 read = self._array_stage("PAGE_READ", array_resource, dependency, self.config.page_read_ns)
                 record(read)
                 pages_read += 1
@@ -304,12 +525,25 @@ class NandCore:
                 "physical_write_bytes": pages_programmed * self.config.page_bytes,
                 "pages_read": pages_read,
                 "pages_programmed": pages_programmed,
+                "merge_bytes": merge_bytes,
+                "merged_pages": merged_pages,
+                "staging_write_pages": staging_write_pages,
+                "staging_read_hits": staging_read_hits,
                 "erase_operations": erases,
                 "page_count": segment_count,
                 "details_truncated": details_truncated,
                 "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(request.operation),
                 "array_units": self.config.array_units,
-                "write_completion": "media_program_complete" if request.operation is Operation.WRITE else "n/a",
+                "write_completion": (
+                    "host_buffer_ack_pending_media_drain"
+                    if request.operation is Operation.WRITE and staging_write_pages
+                    else "media_program_complete" if request.operation is Operation.WRITE else "n/a"
+                ),
+                "host_ack_completion_ns": completion if staging_write_pages else None,
+                "media_drain_completion_ns": (
+                    None if staging_write_pages
+                    else completion if request.operation is Operation.WRITE else None
+                ),
             },
         )
 

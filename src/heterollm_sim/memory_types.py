@@ -468,6 +468,18 @@ class NandConfig:
     def effective_host_write_bandwidth_gb_s(self) -> float:
         return self.host_bandwidth_for(Operation.WRITE)
 
+    @property
+    def buffered_write_mode(self) -> bool:
+        """Whether host writes use a page-merging staging buffer.
+
+        The default remains the historical write-through behavior.  This
+        explicit metadata switch is deliberately kept outside the geometry
+        fields so serialized configurations can opt into the richer model
+        without changing their existing timing contract.
+        """
+
+        return self.metadata.get("buffered_write_mode", False) is True
+
 
 @dataclass(frozen=True)
 class AddressMapping:
@@ -574,6 +586,28 @@ class TransactionResult:
     @property
     def write_buffer_occupancy_bytes(self) -> int:
         return int(self.counters.get("write_buffer_occupancy_bytes", 0))
+
+    @property
+    def merge_bytes(self) -> int:
+        return int(self.counters.get("merge_bytes", 0))
+
+    @property
+    def physical_programs(self) -> int:
+        return int(self.counters.get("physical_programs", self.counters.get("pages_programmed", 0)))
+
+    @property
+    def host_ack_completion_ns(self) -> Optional[float]:
+        value = self.counters.get("host_ack_completion_ns")
+        return None if value is None else float(value)
+
+    @property
+    def media_drain_completion_ns(self) -> Optional[float]:
+        value = self.counters.get("media_drain_completion_ns")
+        return None if value is None else float(value)
+
+    @property
+    def staging_read_hits(self) -> int:
+        return int(self.counters.get("staging_read_hits", 0))
 
     @property
     def pages_read(self) -> int:

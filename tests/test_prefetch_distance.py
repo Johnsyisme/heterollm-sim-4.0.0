@@ -8,6 +8,7 @@ import unittest
 from heterollm_sim.ir import RequestSpec
 from heterollm_sim.planner import compile_scenario
 from heterollm_sim.reference import build_reference_scenario
+from heterollm_sim.reporting import _prefetch_semantics
 from heterollm_sim.serving import BatchCost, _OnlineRuntime, compile_serving_plan
 
 
@@ -170,6 +171,24 @@ class PrefetchDistanceAcceptanceTests(unittest.TestCase):
         self.assertEqual(victim.swapped_pages, 2)
         self.assertEqual(victim.swap_bytes, 2 * _PAGE)
         self.assertEqual(runtime.physical_ledger.used_bytes, before_physical)
+
+    def test_reporting_distinguishes_online_and_static_prefetch_contracts(self):
+        paged = _scenario(17)
+        online = _prefetch_semantics(paged, execution_mode="online")
+        static = _prefetch_semantics(paged, execution_mode="static")
+        self.assertTrue(online["modeled"])
+        self.assertEqual(online["mode"], "page_accurate")
+        self.assertTrue(static["modeled"])
+        self.assertEqual(static["mode"], "analytical_only")
+
+        legacy = build_reference_scenario()
+        policy = replace(legacy.placement.kv_policy, prefetch_distance=17)
+        legacy = replace(
+            legacy, placement=replace(legacy.placement, kv_policy=policy)
+        )
+        legacy_online = _prefetch_semantics(legacy, execution_mode="online")
+        self.assertFalse(legacy_online["modeled"])
+        self.assertEqual(legacy_online["mode"], "unsupported_layout")
 
 
 if __name__ == "__main__":

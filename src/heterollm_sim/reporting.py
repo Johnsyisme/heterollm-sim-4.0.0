@@ -1818,7 +1818,20 @@ def _arrival_process_semantics(scenario: ScenarioConfig) -> Dict[str, Any]:
     }
 
 
-def _prefetch_semantics(scenario: ScenarioConfig) -> Dict[str, Any]:
+def _prefetch_semantics(
+    scenario: ScenarioConfig,
+    *,
+    execution_mode: str = "static",
+) -> Dict[str, Any]:
+    """Describe the prefetch contract for the report's execution path.
+
+    The online scheduler performs page-accurate moves only for the paged KV
+    pool.  The static planner has no page identities, so its ``kv_prefetch``
+    tasks are an analytical remote-transfer estimate.  A positive distance on
+    a legacy single-tier runtime is retained in the policy for compatibility,
+    but does not mean that the runtime performed a prefetch.
+    """
+
     distance = max(0, int(scenario.placement.kv_policy.prefetch_distance))
     tokens_per_page = max(1, int(scenario.placement.kv_policy.tokens_per_page))
     lookahead_pages = (
@@ -1826,20 +1839,53 @@ def _prefetch_semantics(scenario: ScenarioConfig) -> Dict[str, Any]:
         if distance > 0
         else 0
     )
-    modeled = distance > 0
-    contract = "fixed_token_lookahead"
-    description = (
-        "fixed token lookahead; page count is rounded up and each move is "
-        "limited by active capacity and the physical transfer queue"
-        if modeled
-        else "prefetch disabled when prefetch_distance=0"
+    mode = str(execution_mode or "static").strip().lower()
+    if mode not in {"static", "online"}:
+        mode = "static"
+    policy = scenario.placement.kv_policy
+    layout_mode = str(getattr(policy, "layout_mode", "") or "").strip().lower()
+    paged_pool = layout_mode == "paged_pool" and bool(
+        getattr(policy, "pool_components", ())
     )
+    has_remote_source = (
+        bool(getattr(policy, "offload_component", None))
+        and getattr(policy, "offload_component", None)
+        != getattr(policy, "cache_component", None)
+    )
+    if distance <= 0:
+        implementation = "disabled"
+        modeled = False
+        description = "prefetch disabled when prefetch_distance=0"
+    elif mode == "online" and paged_pool and has_remote_source:
+        implementation = "page_accurate"
+        modeled = True
+        description = (
+            "online paged-pool serving performs fixed token lookahead rounded "
+            "up to pages; each move is limited by active capacity and the "
+            "physical transfer queue"
+        )
+    elif mode == "static" and has_remote_source:
+        implementation = "analytical_only"
+        modeled = True
+        description = (
+            "static planner emits a coarse fixed-token remote-transfer "
+            "estimate; page identity, page rounding, and online admission "
+            "are not represented"
+        )
+    else:
+        implementation = "unsupported_layout"
+        modeled = False
+        description = (
+            "positive prefetch_distance is ignored by online serving unless "
+            "the KV layout is a paged pool with a distinct offload tier"
+        )
     return {
         "value": distance,
         "unit": "tokens",
         "lookahead_pages": lookahead_pages,
         "modeled": modeled,
-        "contract": contract,
+        "mode": implementation,
+        "contract": "fixed_token_lookahead",
         "description": description,
     }
 
@@ -1970,7 +2016,9 @@ def _static_result_semantics(result: ScenarioResult) -> Dict[str, Any]:
     return {
         "execution_mode": "static",
         "arrival_process": _arrival_process_semantics(result.scenario),
-        "kv_prefetch": _prefetch_semantics(result.scenario),
+        "kv_prefetch": _prefetch_semantics(
+            result.scenario, execution_mode="static"
+        ),
         "sequence_length": _sequence_length_semantics(result.scenario),
         "slo": _slo_semantics(result.scenario, online=False),
         "deadline": _deadline_semantics(result.scenario, online=False),
@@ -2041,7 +2089,9 @@ def _online_result_semantics(
     return {
         "execution_mode": "continuous_batching",
         "arrival_process": _arrival_process_semantics(result.scenario),
-        "kv_prefetch": _prefetch_semantics(result.scenario),
+        "kv_prefetch": _prefetch_semantics(
+            result.scenario, execution_mode="online"
+        ),
         "sequence_length": _sequence_length_semantics(result.scenario),
         "slo": _slo_semantics(
             result.scenario, online=True, scheduler=result.serving.plan.scheduler
@@ -5816,11 +5866,17 @@ def _online_report_dict(
             "kv_bottleneck_component": serving.kv_metrics.bottleneck_component,
             "effective_physical_capacity": serving.kv_metrics.effective_physical_capacity_bytes,
             "kv_idle_slots_cleared": serving.kv_metrics.idle_slots_cleared,
-            "prefetch_distance_modeled": _prefetch_semantics(result.scenario)["modeled"],
-            "prefetch_distance_semantics": _prefetch_semantics(result.scenario),
+            "prefetch_distance_modeled": _prefetch_semantics(
+                result.scenario, execution_mode="online"
+            )["modeled"],
+            "prefetch_distance_semantics": _prefetch_semantics(
+                result.scenario, execution_mode="online"
+            ),
             "modeling_limits": [
                 "offload_ratio bounds pressure-triggered migratable capacity; it is not a per-token mirror ratio",
-                _prefetch_semantics(result.scenario)["description"],
+                _prefetch_semantics(
+                    result.scenario, execution_mode="online"
+                )["description"],
                 "logical KV traffic counters are not added to resource-accounted bytes when attention kernels already include local memory traffic",
                 "KV read means external persisted-cache access only; prefill/recompute historical-prompt attention remains modeled as causal compute and ordinary attention/activation traffic",
             ],
@@ -6015,12 +6071,18 @@ def _static_kv_report(result: StaticRunResult) -> Dict[str, Any]:
         + physical_event_bytes.get("kv_offload", 0),
         "logical_migration_bytes": logical_event_bytes.get("kv_prefetch", 0)
         + logical_event_bytes.get("kv_offload", 0),
-        "prefetch_distance_modeled": _prefetch_semantics(result.scenario)["modeled"],
-        "prefetch_distance_semantics": _prefetch_semantics(result.scenario),
+        "prefetch_distance_modeled": _prefetch_semantics(
+            result.scenario, execution_mode="static"
+        )["modeled"],
+        "prefetch_distance_semantics": _prefetch_semantics(
+            result.scenario, execution_mode="static"
+        ),
         "traffic_semantics": "logical_kv_traffic_separate_from_resource_accounting",
         "modeling_limits": [
             "offload_ratio bounds pressure-triggered migratable capacity; it is not a per-token mirror ratio",
-            _prefetch_semantics(result.scenario)["description"],
+            _prefetch_semantics(
+                result.scenario, execution_mode="static"
+            )["description"],
             "static peak is conservative across all materialized requests rather than a reconstructed allocation timeline",
         ],
     }
