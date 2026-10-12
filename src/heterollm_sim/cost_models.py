@@ -24,7 +24,7 @@ from .contracts import (
 )
 from .mmq_work import MMVQ_MAX_BATCH_SIZE, MMQWork
 from .mmvq_work import (
-    MMVQWork, MMVQSourceContract, SOURCE_SHA256 as MMVQ_SOURCE_SHA256,
+    MMVQGeometry, MMVQWork, MMVQSourceContract, SOURCE_SHA256 as MMVQ_SOURCE_SHA256,
     UnsupportedMMVQ, derive_mmvq_work,
 )
 from .mmvq_issue_bound import MMVQIssueContract, derive_issue_bound
@@ -207,7 +207,7 @@ class GemmWorkload:
     # Exact source geometry for the narrow MMVQ vector-DP4A path.  It carries
     # no throughput or bandwidth rate: the generic roofline remains explicitly
     # unqualified until an independent MMVQ resource model exists.
-    mmvq_work: Optional[MMVQWork] = None
+    mmvq_work: Optional[MMVQWork | MMVQGeometry] = None
     # Source-qualified partial primitive work which shares the scalar GPU
     # resource with fused unpack/epilogue work.  The field is intentionally
     # optional: unknown mixed-port MMVQ service remains unpriced.
@@ -346,8 +346,8 @@ class GemmWorkload:
                     or self.epilogue_name != ("swiglu" if vector.fused_gate else "")):
                 raise ValueError("mmvf_work requires matching contiguous F16 weights and F32 input/output storage")
         if self.mmvq_work is not None:
-            if not isinstance(self.mmvq_work, MMVQWork):
-                raise ValueError("mmvq_work must be an MMVQWork or None")
+            if not isinstance(self.mmvq_work, (MMVQWork, MMVQGeometry)):
+                raise ValueError("mmvq_work must be an MMVQWork/MMVQGeometry or None")
             if (self.m, self.k, self.n) != (
                 self.mmvq_work.m,
                 self.mmvq_work.k,
@@ -2929,6 +2929,8 @@ def _mmvq_nominal_hbm_eligibility(workload: GemmWorkload) -> Tuple[bool, str]:
     work = workload.mmvq_work
     if work is None:
         return False, "missing_typed_mmvq_source_work"
+    if isinstance(work, MMVQGeometry):
+        return False, "analytical_source_rule_geometry_has_no_hbm_rate_contract"
     if (workload.epilogue_operations or workload.epilogue_transcendental_operations
             or workload.epilogue_output_elements or workload.epilogue_name):
         return False, "fused_epilogue_outside_unfused_source_contract"
@@ -2994,9 +2996,10 @@ def estimate_gpu_gemm(
     unsupported_formats = tuple(
         value for value in workload.packed_weight_formats
         if value.strip().casefold() not in {
-            "q2_k", "q3_k", "q4_0", "q4_1", "q4_k", "q5_0", "q5_1",
-            "q5_k", "q6_k", "q8_0", "iq1_m", "iq1_s", "iq2_s", "iq2_xs",
-            "iq2_xxs", "iq3_s", "iq3_xxs", "iq4_nl", "iq4_xs",
+            "q1_0", "q2_0", "q2_k", "q3_k", "q4_0", "q4_1", "q4_k",
+            "q5_0", "q5_1", "q5_k", "q6_k", "q8_0", "mxfp4", "nvfp4",
+            "iq1_m", "iq1_s", "iq2_s", "iq2_xs", "iq2_xxs", "iq3_s",
+            "iq3_xxs", "iq4_nl", "iq4_xs",
         }
     )
     if unsupported_formats:

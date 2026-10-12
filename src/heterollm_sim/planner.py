@@ -111,8 +111,9 @@ from .mmq_work import (
 from .mmq_level2_surfaces import mmq_stage_source_binding
 from .mmvq_issue_bound import MMVQIssueContract, derive_issue_bound
 from .mmvq_work import (
-    MMVQSourceContract, MMVQWork, SOURCE_SHA256 as MMVQ_SOURCE_SHA256,
-    UnsupportedMMVQ, derive_mmvq_work,
+    ANALYTICAL_MMVQ_FORMATS, MMVQGeometry, MMVQSourceContract, MMVQWork,
+    SOURCE_SHA256 as MMVQ_SOURCE_SHA256, UnsupportedMMVQ, derive_mmvq_geometry,
+    derive_mmvq_work,
 )
 from .parallel import LogicalRank, ParallelPlan, build_parallel_plan, shard_extent
 from .precision import canonical_dtype, dtype_bits, layer_precision_bits
@@ -5075,6 +5076,10 @@ class _TaskBuilder:
         # invocation emitter.  They are keyed by the already validated task id
         # and never become part of ScheduleIR or its public metadata contract.
         self._task_segment_dynamic_payloads: Dict[str, object] = {}
+        # Analytical MMVQ source-rule conversions may share one Q8_1 producer
+        # when split physical projections consume the same F32 input buffer.
+        # Receipt-bound paths keep their historical one-per-call behavior.
+        self._mmvq_conversion_producers: Dict[Tuple[object, ...], str] = {}
 
     def coherent_dma_dependencies(
         self, dependencies: Sequence[str]
@@ -7170,6 +7175,11 @@ def _compile_scenario_in_context(scenario: ScenarioConfig) -> ScheduleIR:
     if "llama_cpp_mmvq_hbm_mode" in scenario.workload.metadata:
         manifest = replace(manifest, metadata={
             **manifest.metadata, "mmvq_hbm_mode": summarize_mmvq_hbm_mode(tasks, _mmvq_hbm_mode(scenario)),
+        })
+    mmvq_geometry = summarize_mmvq_source_geometry(tasks)
+    if mmvq_geometry["gpu_gemm_tasks"]:
+        manifest = replace(manifest, metadata={
+            **manifest.metadata, "mmvq_source_geometry": mmvq_geometry,
         })
     kernel_predictions = summarize_kernel_predictions(tasks)
     if kernel_predictions["kernel_count"] or kernel_predictions["fallback_count"]:
@@ -11474,19 +11484,22 @@ def _declared_physical_projections(
 
 
 def _mmvq_activation_conversion_workload(
-    scenario: ScenarioConfig, workload: GemmWorkload, *, max_m: int = 4
+    scenario: ScenarioConfig, workload: GemmWorkload, *, max_m: int = 4,
+    source_rule_enabled: Optional[bool] = None,
 ) -> Optional[TensorKernelWorkload]:
     """Lower the declared F32-to-Q8_1 MMVQ input conversion minimum."""
 
-    if not _serving_bool_capability(scenario, ("llama_cpp_f32_q8_1_mmvq",)):
+    enabled = (
+        _serving_bool_capability(scenario, ("llama_cpp_f32_q8_1_mmvq",))
+        if source_rule_enabled is None else source_rule_enabled
+    )
+    if not enabled:
         return None
     formats = {value.upper() for value in workload.packed_weight_formats}
     if (
         not 1 <= workload.m <= max_m or workload.k % 32
         or not formats
-        or not formats.issubset({
-            "Q4_0", "Q5_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K", "IQ3_S", "IQ4_XS",
-        })
+        or not formats.issubset(ANALYTICAL_MMVQ_FORMATS)
     ):
         return None
     padded_k = ((workload.k + 511) // 512) * 512
@@ -11528,6 +11541,175 @@ def _source_conversion_parallelism(scenario, target, workload, conversion, path)
     return replace(conversion, source_grid_ctas=work.cta_count), {
         **work.to_metadata(), "applied": True, "cost_model_applied": True,
         "scope": "scalar/SFU compute parallelism upper bound only; no HBM fraction or measured timing"}
+
+
+_ANALYTICAL_MMVQ_PRESETS = frozenset({"blackwell_analytical_v1"})
+
+
+def _analytical_mmvq_target_architecture(
+    target: ComponentSpec,
+) -> Optional[Tuple[int, int, int]]:
+    """Resolve explicit CUDA architecture facts for source-only geometry.
+
+    The source rule is independent of a product name.  Existing RTX 5080
+    presets predate the explicit fields, so their catalog identity is kept as
+    a compatibility fallback; every other target must carry the three
+    architecture facts in metadata.  No performance parameter is inferred.
+    """
+    metadata = target.metadata
+    nested = metadata.get("llama_cpp_cuda_architecture")
+    if not isinstance(nested, Mapping):
+        nested = {}
+    def integer(*keys: str) -> Optional[int]:
+        for key in keys:
+            value = metadata.get(key, nested.get(key))
+            if type(value) is int and value > 0:
+                return value
+        return None
+    compute_capability = integer("compute_capability", "cuda_compute_capability")
+    highest_compiled_arch = integer("highest_compiled_arch", "cuda_highest_compiled_arch")
+    warp_size = integer("warp_size", "cuda_warp_size")
+    if compute_capability is not None and highest_compiled_arch is not None and warp_size is not None:
+        return compute_capability, highest_compiled_arch, warp_size
+    if metadata.get("component_preset_id") == "nvidia-rtx-5080":
+        return 1200, 1200, 32
+    return None
+
+
+def _analytical_mmvq_preset_allowed(preset: object) -> bool:
+    """Accept source-only analytical profiles without accepting rate profiles."""
+    return isinstance(preset, str) and (
+        preset in _ANALYTICAL_MMVQ_PRESETS or preset.endswith("_analytical_v1")
+    )
+
+
+def _local_f32_storage_proven(
+    workload: GemmWorkload,
+    operation_metadata: Mapping[str, object],
+) -> bool:
+    """Allow an operation-local storage proof when no global model flag exists."""
+    input_bits = operation_metadata.get("runtime_input_storage_bits")
+    output_bits = operation_metadata.get("runtime_output_storage_bits")
+    input_dtype = str(operation_metadata.get("source_input_dtype", "")).upper()
+    output_dtype = str(operation_metadata.get("source_output_dtype", "")).upper()
+    explicit_bits = input_bits == 32 and output_bits == 32
+    explicit_dtype = input_dtype == "F32" and output_dtype == "F32"
+    return (explicit_bits or explicit_dtype) and (
+        workload.activation_bytes == 4 * workload.m * workload.k
+        and workload.output_bytes == 4 * workload.m * workload.n
+    )
+
+
+def _analytical_mmvq_source_rule(
+    scenario: ScenarioConfig,
+    workload: GemmWorkload,
+    target: ComponentSpec,
+    operation_metadata: Mapping[str, object],
+    *,
+    model_weight_read: bool,
+    rhs_is_activation: bool,
+) -> Tuple[Optional[MMVQGeometry], str]:
+    """Qualify the shared source geometry layer without binary/timing claims.
+
+    This is intentionally separate from the receipt-bound path below.  The
+    pinned source tables prove dispatch geometry; they do not prove that the
+    current process used a particular cubin or that a measured rate applies.
+    """
+    config = getattr(scenario, "llama_cpp_config", None)
+    if config is None or getattr(config, "policy", None) != "llama_cpp":
+        return None, "runtime_policy_not_llama_cpp"
+    preset = scenario.workload.metadata.get("llama_cpp_kernel_model_preset")
+    if not _analytical_mmvq_preset_allowed(preset):
+        return None, "analytical_source_rule_requires_source_geometry_preset"
+    if _kind(target) != "gpu":
+        return None, "target_is_not_gpu"
+    architecture = _analytical_mmvq_target_architecture(target)
+    if architecture is None:
+        return None, "source_rule_requires_explicit_cuda_architecture"
+    # A partially supplied receipt is not silently downgraded to an
+    # analytical claim.  The caller must complete the source-bound path or
+    # remove the stale contract explicitly.
+    if (
+        isinstance(target.metadata.get("llama_cpp_mmvq_source_contract"), Mapping)
+        or isinstance(target.metadata.get("llama_cpp_conversion_source_contract"), Mapping)
+    ):
+        return None, "explicit_runtime_contract_requires_source_capture"
+    storage = scenario.workload.metadata.get("llama_cpp_tensor_storage_contract")
+    if storage is None:
+        storage = scenario.model.metadata.get("llama_cpp_tensor_storage_contract")
+    if not isinstance(storage, Mapping) or storage.get("source_revision") != MMQ_SOURCE_REVISION:
+        return None, "missing_pinned_tensor_storage_source_revision"
+    if not model_weight_read or rhs_is_activation:
+        return None, "runtime_rhs_is_not_a_physical_model_weight"
+    if operation_metadata.get("dynamic_rhs") is True or operation_metadata.get("rhs_operand_kind") == "activation":
+        return None, "runtime_rhs_is_dynamic"
+    if (
+        "expert_index" in operation_metadata
+        or operation_metadata.get("coverage_component") in {"routed_expert", "shared_expert"}
+        or operation_metadata.get("ffn_path") in {"routed", "shared"}
+    ):
+        return None, "expert_or_scatter_layout"
+    if (
+        workload.epilogue_operations
+        or workload.epilogue_transcendental_operations
+        or workload.epilogue_output_elements
+        or workload.epilogue_name
+        or operation_metadata.get("fused") is True
+        or (operation_metadata.get("fusion_group") not in (None, "")
+            and operation_metadata.get("fusion_enabled") is not False)
+    ):
+        return None, "fused_epilogue_outside_source_rule"
+    if not (_f32_hidden_storage_enabled(scenario)
+            or _local_f32_storage_proven(workload, operation_metadata)):
+        return None, "ordinary_f32_input_storage_not_proven"
+    formats = tuple(str(value).upper() for value in workload.packed_weight_formats)
+    if len(formats) != 1 or formats[0] not in ANALYTICAL_MMVQ_FORMATS:
+        return None, "unsupported_or_mixed_physical_weight_format"
+    segments = operation_metadata.get("projection_segments", ())
+    if (not isinstance(segments, (tuple, list)) or not segments
+            or operation_metadata.get("projection_segment_count") != len(segments)
+            or any(not isinstance(item, Mapping) for item in segments)):
+        return None, "physical_projection_segments_not_proven"
+    # Lowering may carry the complete q/k/v descriptor while the current
+    # GEMM already represents one physical child.  Select exactly that child;
+    # never derive one MMVQ launch for a merged multi-weight N dimension.
+    matching = [item for item in segments if (
+        item.get("local_k") == workload.k
+        and item.get("local_n") == workload.n
+        and str(item.get("format", "")).upper() == formats[0]
+    )]
+    if len(matching) != 1:
+        return None, "physical_projection_child_not_unique"
+    segment = matching[0]
+    if (
+        segment.get("local_k") != workload.k
+        or segment.get("local_n") != workload.n
+        or str(segment.get("format", "")).upper() != formats[0]
+        or not segment.get("physical_tensor_name")
+        or workload.activation_bytes != 4 * workload.m * workload.k
+        or workload.output_bytes != 4 * workload.m * workload.n
+        or workload.accumulator_bits != 32
+    ):
+        return None, "ordinary_f32_input_output_or_shape_not_proven"
+    try:
+        geometry = derive_mmvq_geometry(
+            m=workload.m, k=workload.k, n=workload.n,
+            weight_format=formats[0], compute_capability=architecture[0],
+            highest_compiled_arch=architecture[1], warp_size=architecture[2],
+        )
+    except (TypeError, ValueError, UnsupportedMMVQ) as error:
+        return None, str(error)
+    # When the descriptor exposes physical bytes, require the source block
+    # accounting to agree.  Missing byte fields remain an uncovered proof,
+    # rather than an excuse to install a guessed correction.
+    expected = geometry.logical_weight_bytes
+    for key in ("local_physical_bytes",):
+        value = segment.get(key)
+        if value is not None and value != expected:
+            return None, "physical_weight_bytes_differ_from_source_blocks"
+    if workload.weight_bytes != expected:
+        return None, "workload_weight_bytes_differ_from_source_blocks"
+    return geometry, "source_rule_geometry"
 
 
 def _cpu_gemm_cost_key(
@@ -11990,6 +12172,53 @@ def summarize_mmq_source_work(tasks: Sequence[TaskSpec]) -> Mapping[str, object]
     }
 
 
+def summarize_mmvq_source_geometry(tasks: Sequence[TaskSpec]) -> Mapping[str, object]:
+    """Report analytical and receipt-bound MMVQ geometry separately."""
+    total = 0
+    status_counts: Dict[str, int] = {}
+    format_counts: Dict[str, int] = {}
+    batch_counts: Dict[str, int] = {}
+    seen = set()
+    conversion_tasks = 0
+    conversion_seen = set()
+    for task in tasks:
+        meta = task.metadata
+        audit = meta.get("mmvq_source_work")
+        if meta.get("phase") == "gpu_gemm":
+            ident = _coverage_task_id(task)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            total += 1
+            if not isinstance(audit, Mapping):
+                status = "uncovered"
+            else:
+                status = str(audit.get("coverage_kind") or audit.get("status") or "unknown")
+                fmt = str(audit.get("weight_format") or "unknown")
+                format_counts[fmt] = format_counts.get(fmt, 0) + 1
+                batch = str(audit.get("m") or "unknown")
+                batch_counts[batch] = batch_counts.get(batch, 0) + 1
+            status_counts[status] = status_counts.get(status, 0) + 1
+        if meta.get("event_kind") == "activation_quantization" and meta.get("activation_conversion_applied") is True:
+            ident = _coverage_task_id(task)
+            if ident not in conversion_seen:
+                conversion_seen.add(ident)
+                conversion_tasks += 1
+    return {
+        "schema": "heterollm.mmvq-source-geometry-coverage/v1",
+        "counting_unit": "deduplicated lowered GPU GEMM task",
+        "gpu_gemm_tasks": total,
+        "status_counts": dict(sorted(status_counts.items())),
+        "format_counts": dict(sorted(format_counts.items())),
+        "batch_counts": dict(sorted(batch_counts.items(), key=lambda item: int(item[0]) if item[0].isdigit() else 10**9)),
+        "activation_conversion_tasks": conversion_tasks,
+        "native_dispatch_proven_tasks": 0,
+        "timing_rates_used": False,
+        "fitted_parameters_used": False,
+        "scope": "source dispatch geometry only; analytical and source-captured evidence are not timing calibration",
+    }
+
+
 def _declared_mmq_work(
     scenario: ScenarioConfig,
     workload: GemmWorkload,
@@ -12123,7 +12352,7 @@ def _declared_mmvq_work(
     *,
     model_weight_read: bool,
     rhs_is_activation: bool,
-) -> Tuple[Optional[MMVQWork], Optional[Mapping[str, object]]]:
+) -> Tuple[Optional[MMVQWork | MMVQGeometry], Optional[Mapping[str, object]]]:
     """Bind source-exact MMVQ geometry without inventing a performance rate.
 
     The conversion contract supplies the locked CUDA binary identity and the
@@ -12156,11 +12385,34 @@ def _declared_mmvq_work(
         or workload.epilogue_transcendental_operations
         or workload.epilogue_output_elements
         or workload.epilogue_name
+        or operation_metadata.get("fused") is True
+        or (operation_metadata.get("fusion_group") not in (None, "")
+            and operation_metadata.get("fusion_enabled") is not False)
     ):
         return uncovered("fused_epilogue_has_no_native_mmvq_contract")
     formats = tuple(value.upper() for value in workload.packed_weight_formats)
     if len(formats) != 1:
         return uncovered("unsupported_or_mixed_physical_weight_format")
+    # Shared source-rule geometry is intentionally binary-free.  It is only
+    # reachable after the corresponding analytical gate has returned a batch
+    # limit, and it never enters an issue-rate or calibrated-sample surface.
+    if not isinstance(target.metadata.get("llama_cpp_mmvq_source_contract"), Mapping) and not isinstance(
+        target.metadata.get("llama_cpp_conversion_source_contract"), Mapping
+    ):
+        geometry, reason = _analytical_mmvq_source_rule(
+            scenario, workload, target, operation_metadata,
+            model_weight_read=model_weight_read, rhs_is_activation=rhs_is_activation,
+        )
+        if geometry is None:
+            return uncovered("analytical_source_rule_uncovered:" + reason)
+        return geometry, {
+            **audit,
+            **geometry.to_metadata(),
+            "status": "source_rule_geometry",
+            "coverage_kind": "source_rule_geometry",
+            "formal_timing_eligible": False,
+            "reason": "pinned CUDA source dispatch geometry; no binary receipt or measured rate",
+        }
     # MMVQ geometry has its own immutable source/runtime contract.  The
     # conversion CTA surface is optional and must not be required merely to
     # bind the vector kernel's launch geometry.  Keep the old conversion
@@ -12265,7 +12517,11 @@ def _declared_mmvq_source_limit(
     ):
         return 0
     if scenario.workload.metadata.get("llama_cpp_f32_q8_1_mmvq") is not True:
-        return 0
+        geometry, _reason = _analytical_mmvq_source_rule(
+            scenario, workload, target, operation_metadata,
+            model_weight_read=model_weight_read, rhs_is_activation=rhs_is_activation,
+        )
+        return geometry.max_batch_size if geometry is not None else 0
     formats = tuple(str(value).upper() for value in workload.packed_weight_formats)
     # The standalone contract and this planner binding cover only the exact
     # ordinary Q5_0/Q8_0 vector templates.  K/IQ formats require their own
@@ -12330,6 +12586,8 @@ def _declared_mmvq_issue_contract(scenario, workload, target, gpu_profile):
     audit = {"requested": True, "status": "uncovered"}
     if workload.mmvq_work is None:
         return None, {**audit, "reason": "no_supported_source_MMVQ_work"}
+    if isinstance(workload.mmvq_work, MMVQGeometry):
+        raise ValueError("MMVQ issue bound requires source-captured MMVQWork, not analytical geometry")
     if workload.mmvq_work.weight_format == "IQ4_XS":
         raise ValueError("requested MMVQ issue bound has no IQ4_XS issue-rate contract")
     competing = scenario.hardware.metadata.get("llama_cpp_mmvq_prmt_partial_contract", {})
@@ -13251,7 +13509,10 @@ def _add_rank_gemm(
         if mmvq_audit is not None:
             operation_metadata["mmvq_source_work"] = {**mmvq_audit, "stage": "matrix"}
         conversion = (
-            _mmvq_activation_conversion_workload(scenario, workload, max_m=mmvq_limit or 4)
+            _mmvq_activation_conversion_workload(
+                scenario, workload, max_m=mmvq_limit or 4,
+                source_rule_enabled=(mmvq_limit > 0 or None),
+            )
             if model_weight_read and not rhs_is_activation
             and target_component_id == rank.component_id
             and mmq_work is None
@@ -13264,10 +13525,24 @@ def _add_rank_gemm(
             conversion, conversion_source_audit = _source_conversion_parallelism(
                 scenario, target, workload, conversion, "MMVQ_Q8_1")
             consumer_bytes = 36 * workload.m * workload.k // 32
+            source_rule_geometry = isinstance(mmvq_work, MMVQGeometry)
+            input_buffer_id = operation_metadata.get("input_buffer_id")
+            conversion_key = (
+                target_component_id, input_buffer_id, workload.m, workload.k, "MMVQ_Q8_1"
+            ) if source_rule_geometry and isinstance(input_buffer_id, str) and input_buffer_id else None
+            producer_id = (
+                builder._mmvq_conversion_producers.get(conversion_key)
+                if conversion_key is not None else None
+            )
+            conversion_owner = producer_id is None
             conversion_audit = {
                 "activation_conversion_applied": True,
                 "activation_conversion_implementation": "llama_cpp_f32_q8_1_mmvq",
-                "activation_conversion_bound": "one_per_lowered_projection",
+                "activation_conversion_bound": (
+                    "one_shared_producer_per_input_buffer" if source_rule_geometry
+                    else "one_per_lowered_projection"
+                ),
+                "activation_conversion_owner": conversion_owner,
                 "activation_conversion_timing_completeness": "partial",
                 "activation_conversion_input_rows": workload.m,
                 "activation_conversion_input_columns": workload.k,
@@ -13277,18 +13552,25 @@ def _add_rank_gemm(
                 "activation_conversion_scalar_operations": conversion.operations,
                 "activation_conversion_consumer_bytes": consumer_bytes,
             }
-            prior = (_add_rank_tensor_kernel(
-                builder, scenario, router, plan, rank, conversion,
-                name + ".activation_q8_1", prior,
-                metadata={
-                    "event_kind": "activation_quantization",
-                    "operator_class": OperatorClass.ELEMENTWISE.value,
-                    "layer_id": operation_metadata.get("layer_id"),
-                    "projection_id": operation_metadata.get("projection_id"),
-                    **conversion_audit,
-                    **({"conversion_source_work": conversion_source_audit} if conversion_source_audit is not None else {}),
-                },
-            ),)
+            if conversion_owner:
+                producer_id = _add_rank_tensor_kernel(
+                    builder, scenario, router, plan, rank, conversion,
+                    name + ".activation_q8_1", prior,
+                    metadata={
+                        "event_kind": "activation_quantization",
+                        "operator_class": OperatorClass.ELEMENTWISE.value,
+                        "layer_id": operation_metadata.get("layer_id"),
+                        "projection_id": operation_metadata.get("projection_id"),
+                        **conversion_audit,
+                        **({"conversion_source_work": conversion_source_audit} if conversion_source_audit is not None else {}),
+                    },
+                )
+                prior = (producer_id,)
+                if conversion_key is not None:
+                    builder._mmvq_conversion_producers[conversion_key] = producer_id
+            else:
+                conversion_audit["activation_conversion_task_id"] = producer_id
+                prior = tuple(dict.fromkeys((*prior, producer_id)))
             # Replace the consumer's input bytes; retaining the old activation
             # read here would count both source and temporary input in GEMM.
             workload = replace(workload, activation_storage_bytes=consumer_bytes)

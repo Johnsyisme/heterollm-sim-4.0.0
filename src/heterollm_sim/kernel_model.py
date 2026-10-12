@@ -1182,9 +1182,16 @@ def llama_blackwell_analytical_profile(hardware_id, runtime_id, *, calibrated=Fa
     independent microbenchmarks. No target LLM latency is used.
     """
     kernels = []
-    limits = {'q4_0': 8, 'q4_1': 8, 'q5_0': 8, 'q5_1': 8, 'q8_0': 8,
-              'q2_k': 5, 'q3_k': 5, 'q4_k': 5, 'q5_k': 6, 'q6_k': 7,
-              'iq3_s': 8, 'iq4_xs': 8, 'iq4_nl': 8}
+    # The source MMVQ dispatch table covers the full quantized registry.  The
+    # entries below remain analytical descriptors: they carry no measured
+    # rate and are never promoted to a calibrated sample surface.
+    limits = {
+        'q1_0': 8, 'q2_0': 8, 'q4_0': 8, 'q4_1': 8,
+        'q5_0': 8, 'q5_1': 8, 'q8_0': 8, 'mxfp4': 8, 'nvfp4': 8,
+        'q2_k': 5, 'q3_k': 5, 'q4_k': 5, 'q5_k': 6, 'q6_k': 7,
+        'iq1_s': 8, 'iq1_m': 8, 'iq2_xxs': 8, 'iq2_xs': 8, 'iq2_s': 8,
+        'iq3_xxs': 8, 'iq3_s': 8, 'iq4_nl': 8, 'iq4_xs': 8,
+    }
     evidence = ('source/llama.cpp-semantic/ggml/src/ggml-cuda/mmvq.cu:ggml_cuda_should_use_mmvq; '
                 'mmq.cu:ggml_cuda_should_use_mmq; conditional ordinary contiguous CUDA MUL_MAT; '
                 'registers/smem/issue/bandwidth are unmeasured analytical assumptions')

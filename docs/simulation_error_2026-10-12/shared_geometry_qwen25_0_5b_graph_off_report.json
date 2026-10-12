@@ -1,0 +1,61 @@
+{
+  "schema": "heterollm.shared-mmvq-accuracy-evidence/v1",
+  "status": "single_case_evidence",
+  "scenario": "frontend-gguf-native/qwen2_5_0_5b_q4_k_m/512-128",
+  "implementation_scope": "shared analytical source geometry and per-input activation conversion producer reuse",
+  "simulation_result": "docs/simulation_error_2026-10-12/current_qwen25_0_5b_graph_off_shared_geometry_v2.json",
+  "native_reference": "docs/simulation_error_2026-10-12/native_qwen2_5_0_5b_q4_k_m_graph_off.json",
+  "native_retested": false,
+  "native_reference_note": "Native medians are reused records from the existing 2026-10-08 capture; no new native timing was used.",
+  "metrics": {
+    "TTFT": {
+      "simulation_ns": 7146966.118347583,
+      "native_median_ns_reused": 13805000.0,
+      "signed_error_percent": -48.22914800182844,
+      "absolute_error_percent": 48.22914800182844,
+      "previous_simulation_ns": 8042941.327907801,
+      "previous_absolute_error_percent": 41.7389255493821,
+      "absolute_error_change_percentage_points": 6.490222452446339
+    },
+    "TPOT": {
+      "simulation_ns": 1425393.942506878,
+      "native_median_ns_reused": 3224866.1417322834,
+      "signed_error_percent": -55.79990362821054,
+      "absolute_error_percent": 55.79990362821054,
+      "previous_simulation_ns": 1436277.7411042766,
+      "previous_absolute_error_percent": 55.46240749289646,
+      "absolute_error_change_percentage_points": 0.3374961353140762
+    },
+    "E2E": {
+      "simulation_ns": 188171996.81672108,
+      "native_median_ns_reused": 423387000.0,
+      "signed_error_percent": -55.555556307415884,
+      "absolute_error_percent": 55.555556307415884,
+      "previous_simulation_ns": 190450214.44815093,
+      "previous_absolute_error_percent": 55.01746287719015,
+      "absolute_error_change_percentage_points": 0.5380934302257359
+    }
+  },
+  "compile_coverage": {
+    "schema": "heterollm.mmvq-source-geometry-coverage/v1",
+    "counting_unit": "deduplicated lowered GPU GEMM task",
+    "gpu_gemm_tasks": 21632,
+    "source_rule_geometry_tasks": 10796,
+    "uncovered_tasks": 10836,
+    "format_counts": {
+      "Q4_K": 1524,
+      "Q5_0": 6096,
+      "Q6_K": 1524,
+      "Q8_0": 1652
+    },
+    "batch_counts": {
+      "1": 10796
+    },
+    "activation_conversion_tasks_after_shared_producer_reuse": 15496,
+    "native_dispatch_proven_tasks": 0,
+    "timing_rates_used": false,
+    "fitted_parameters_used": false
+  },
+  "accuracy_scope": "This is one graph-off Qwen2.5 case; it does not replace the 20-pair overall MAPE.",
+  "interpretation": "The shared geometry path is active and auditable, but this measurement does not show an accuracy improvement. The remaining underprediction is not attributed to a fitted correction."
+}

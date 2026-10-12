@@ -1,0 +1,828 @@
+{
+  "schema": "heterollm.mmvq-coverage-inventory/v1",
+  "source_dir": "docs/gguf_preset_native_validation_2026-10-08/base",
+  "models": [
+    {
+      "model": "llama3_1_8b_q4_k_m",
+      "preset_id": "llama3_1-8b",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 4096,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 1024,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 4096,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q6_K",
+          "k": 4096,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q6_K",
+          "k": 4096,
+          "n": 128256,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q4_K",
+          "k": 14336,
+          "n": 4096,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q6_K",
+          "k": 14336,
+          "n": 4096,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 14336,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 14336,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 14336,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 14336,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    },
+    {
+      "model": "llama3_2_1b_q4_k_m",
+      "preset_id": "llama3_2-1b",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "Q4_K",
+          "k": 2048,
+          "n": 2048,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 2048,
+          "n": 512,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 2048,
+          "n": 512,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 2048,
+          "n": 2048,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q6_K",
+          "k": 2048,
+          "n": 512,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q6_K",
+          "k": 2048,
+          "n": 128256,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q4_K",
+          "k": 8192,
+          "n": 2048,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q6_K",
+          "k": 8192,
+          "n": 2048,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "Q4_K",
+          "k": 2048,
+          "n": 8192,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "Q4_K",
+          "k": 2048,
+          "n": 8192,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 2048,
+          "n": 8192,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 2048,
+          "n": 8192,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    },
+    {
+      "model": "qwen2_5_0_5b_q4_k_m",
+      "preset_id": "qwen2_5-0_5b",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "Q5_0",
+          "k": 896,
+          "n": 896,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q5_0",
+          "k": 896,
+          "n": 128,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q5_0",
+          "k": 896,
+          "n": 128,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q5_0",
+          "k": 896,
+          "n": 896,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q8_0",
+          "k": 896,
+          "n": 128,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q8_0",
+          "k": 896,
+          "n": 151936,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q4_K",
+          "k": 4864,
+          "n": 896,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q6_K",
+          "k": 4864,
+          "n": 896,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "Q5_0",
+          "k": 896,
+          "n": 4864,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "Q5_0",
+          "k": 896,
+          "n": 4864,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q5_0",
+          "k": 896,
+          "n": 4864,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q5_0",
+          "k": 896,
+          "n": 4864,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    },
+    {
+      "model": "qwen2_5_7b_q4_k_m",
+      "preset_id": "qwen2_5-7b",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "Q4_K",
+          "k": 3584,
+          "n": 3584,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 3584,
+          "n": 512,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 3584,
+          "n": 512,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 3584,
+          "n": 3584,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q6_K",
+          "k": 3584,
+          "n": 512,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q6_K",
+          "k": 3584,
+          "n": 152064,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q4_K",
+          "k": 18944,
+          "n": 3584,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q6_K",
+          "k": 18944,
+          "n": 3584,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "Q4_K",
+          "k": 3584,
+          "n": 18944,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "Q4_K",
+          "k": 3584,
+          "n": 18944,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 3584,
+          "n": 18944,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 3584,
+          "n": 18944,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    },
+    {
+      "model": "qwen3_0_6b_f16",
+      "preset_id": "qwen3-0_6b",
+      "records": []
+    },
+    {
+      "model": "qwen3_14b_q4_k_m",
+      "preset_id": "qwen3-14b",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "Q4_K",
+          "k": 5120,
+          "n": 5120,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 5120,
+          "n": 1024,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 5120,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 5120,
+          "n": 5120,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q6_K",
+          "k": 5120,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q6_K",
+          "k": 5120,
+          "n": 151936,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q4_K",
+          "k": 17408,
+          "n": 5120,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q6_K",
+          "k": 17408,
+          "n": 5120,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "Q4_K",
+          "k": 5120,
+          "n": 17408,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "Q4_K",
+          "k": 5120,
+          "n": 17408,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 5120,
+          "n": 17408,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 5120,
+          "n": 17408,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    },
+    {
+      "model": "qwen3_1_7b_q8_0",
+      "preset_id": "qwen3-1_7b",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 2048,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 1024,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 2048,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 151936,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q8_0",
+          "k": 6144,
+          "n": 2048,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 6144,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 6144,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 6144,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q8_0",
+          "k": 2048,
+          "n": 6144,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    },
+    {
+      "model": "qwen3_4b_q4_k_m",
+      "preset_id": "qwen3-4b",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 2560,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 2560,
+          "n": 1024,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 2560,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 2560,
+          "n": 4096,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q6_K",
+          "k": 2560,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q6_K",
+          "k": 2560,
+          "n": 151936,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q4_K",
+          "k": 9728,
+          "n": 2560,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q6_K",
+          "k": 9728,
+          "n": 2560,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "Q4_K",
+          "k": 2560,
+          "n": 9728,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "Q4_K",
+          "k": 2560,
+          "n": 9728,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 2560,
+          "n": 9728,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 2560,
+          "n": 9728,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    },
+    {
+      "model": "qwen3_8b_q4_k_m",
+      "preset_id": "qwen3-8b",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 4096,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 1024,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 4096,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q6_K",
+          "k": 4096,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q6_K",
+          "k": 4096,
+          "n": 151936,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q4_K",
+          "k": 12288,
+          "n": 4096,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "Q6_K",
+          "k": 12288,
+          "n": 4096,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 12288,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 12288,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 12288,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "Q4_K",
+          "k": 4096,
+          "n": 12288,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    },
+    {
+      "model": "qwen3_8_27b_mixed",
+      "preset_id": "qwen3_8-27b-iq3-s-iq4-xs",
+      "records": [
+        {
+          "projection_id": "attention.output",
+          "format": "IQ4_XS",
+          "k": 6144,
+          "n": 5120,
+          "segment_id": "output"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "IQ4_XS",
+          "k": 5120,
+          "n": 1024,
+          "segment_id": "k"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "IQ4_XS",
+          "k": 5120,
+          "n": 12288,
+          "segment_id": "q"
+        },
+        {
+          "projection_id": "attention.qkv",
+          "format": "Q5_K",
+          "k": 5120,
+          "n": 1024,
+          "segment_id": "v"
+        },
+        {
+          "projection_id": "linear_attention.alpha",
+          "format": "IQ4_XS",
+          "k": 5120,
+          "n": 48,
+          "segment_id": "linear_attention-alpha-0"
+        },
+        {
+          "projection_id": "linear_attention.beta",
+          "format": "IQ4_XS",
+          "k": 5120,
+          "n": 48,
+          "segment_id": "linear_attention-beta-0"
+        },
+        {
+          "projection_id": "linear_attention.output",
+          "format": "IQ4_XS",
+          "k": 6144,
+          "n": 5120,
+          "segment_id": "linear_attention-output-0"
+        },
+        {
+          "projection_id": "linear_attention.output_gate",
+          "format": "IQ4_XS",
+          "k": 5120,
+          "n": 6144,
+          "segment_id": "linear_attention-output_gate-0"
+        },
+        {
+          "projection_id": "linear_attention.qkv",
+          "format": "Q5_K",
+          "k": 5120,
+          "n": 10240,
+          "segment_id": "linear_attention-qkv-0"
+        },
+        {
+          "projection_id": "lm_head",
+          "format": "Q6_K",
+          "k": 5120,
+          "n": 248320,
+          "segment_id": "lm-head-0"
+        },
+        {
+          "projection_id": "mlp.down",
+          "format": "IQ4_XS",
+          "k": 17408,
+          "n": 5120,
+          "segment_id": "mlp-down-0"
+        },
+        {
+          "projection_id": "mlp.gate",
+          "format": "IQ3_S",
+          "k": 5120,
+          "n": 17408,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up",
+          "format": "IQ3_S",
+          "k": 5120,
+          "n": 17408,
+          "segment_id": "mlp-up_gate-1"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "IQ3_S",
+          "k": 5120,
+          "n": 17408,
+          "segment_id": "mlp-up_gate-0"
+        },
+        {
+          "projection_id": "mlp.up_gate",
+          "format": "IQ3_S",
+          "k": 5120,
+          "n": 17408,
+          "segment_id": "mlp-up_gate-1"
+        }
+      ]
+    }
+  ]
+}
