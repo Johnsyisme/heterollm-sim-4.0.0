@@ -2149,17 +2149,27 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
             raise ValueError("paged_pool requires pool_components")
         if offload_component:
             raise ValueError(
-                "paged_pool serving does not yet lower request swap/offload; "
-                "use DynamicKVPool.offload_page explicitly"
+                "paged_pool serving does not yet lower automatic request "
+                "swap/offload; use DynamicKVPool.offload_page explicitly"
             )
+        active_pool_component = False
         for component_id in pool_components:
             component = scenario.hardware.get_component(str(component_id))
-            if not component.is_active_memory or not component.is_writable:
+            if not component.is_writable or not (
+                component.is_active_memory or component.is_storage
+            ):
                 raise ValueError(
-                    "paged_pool requires writable active memory: {}".format(
+                    "paged_pool requires a writable active-memory or storage "
+                    "component: {}".format(
                         component_id
                     )
                 )
+            active_pool_component = active_pool_component or component.is_active_memory
+        if not active_pool_component:
+            raise ValueError(
+                "paged_pool requires at least one writable active-memory "
+                "component for request allocation"
+            )
         cache_component = cache_component or str(pool_components[0])
         capacity_bytes = sum(
             _dynamic_component_capacity(scenario, str(component_id), ("kv_cache",))
@@ -2904,6 +2914,35 @@ class _KVLedger:
         self.offload_peak_bytes = 0
         self.paged_pool: Optional[DynamicKVPool] = None
 
+    def _sync_paged_pool_physical_pages(self) -> None:
+        """Keep physical page allocations aligned with the logical pool.
+
+        The paged pool owns placement and capacity, while the physical
+        transfer executor owns addresses.  A resize can therefore only be
+        considered complete after both views have been updated.
+        """
+
+        pool = self.paged_pool
+        if pool is None:
+            return
+        executor = pool.transfer_executor
+        if executor is None:
+            return
+        sync = getattr(executor, "sync_pages", None)
+        if not callable(sync):
+            raise RuntimeError("paged_pool transfer executor must expose sync_pages")
+        snapshot = None
+        snapshot_fn = getattr(executor, "snapshot", None)
+        restore_fn = getattr(executor, "restore", None)
+        if callable(snapshot_fn) and callable(restore_fn):
+            snapshot = snapshot_fn()
+        try:
+            sync(pool.pages())
+        except Exception:
+            if snapshot is not None:
+                restore_fn(snapshot)
+            raise
+
     def configure_paged_pool(self, scenario: ScenarioConfig) -> None:
         """Attach the experimental page owner allocator to this ledger."""
 
@@ -2962,6 +3001,13 @@ class _KVLedger:
             )
             if not result.success:
                 return False
+            try:
+                self._sync_paged_pool_physical_pages()
+            except Exception:
+                # The logical resize is atomic by itself; restore its prior
+                # size if physical address materialisation fails as well.
+                self.paged_pool.resize(request.spec.request_id, request.kv_pages)
+                return False
             delta = pages - request.kv_pages
             self.used_pages += delta
             self.persistent_used_pages += delta
@@ -3011,6 +3057,11 @@ class _KVLedger:
             )
             if not result.success:
                 return False
+            try:
+                self._sync_paged_pool_physical_pages()
+            except Exception:
+                self.paged_pool.resize(request.spec.request_id, request.kv_pages)
+                return False
             request.temporary_kv_pages = temporary_pages
             self.used_pages += temporary_pages
             self.temporary_used_pages += temporary_pages
@@ -3047,6 +3098,7 @@ class _KVLedger:
         byte_count = temporary_pages * self.policy.bytes_per_page
         if self.paged_pool is not None:
             self.paged_pool.resize(request.spec.request_id, request.kv_pages)
+            self._sync_paged_pool_physical_pages()
             self.used_pages -= temporary_pages
             self.temporary_used_pages -= temporary_pages
             request.temporary_kv_pages = 0
@@ -5327,6 +5379,34 @@ class _OnlineRuntime:
                 raise ValueError("live kernel physical resource owners differ from scenario")
             execution_kernel.ensure_resource_capacities(resource_capacities)
             self._execution_resource_kernel = execution_kernel
+        self._paged_pool_transfer_executor = None
+        paged_pool = self.ledger.paged_pool
+        if paged_pool is not None:
+            # Attach the real physical lowerer only when every pool component
+            # declares a physical memory contract.  Older analytical
+            # paged-pool scenarios remain usable and continue to fail closed
+            # on migration instead of silently inventing a transfer cost.
+            pool_components = tuple(
+                plan.scenario.hardware.get_component(component_id)
+                for component_id in paged_pool.components
+            )
+            if all(
+                isinstance(component.metadata, Mapping)
+                and component.metadata.get("physical_memory_config") is not None
+                for component in pool_components
+            ):
+                from .communication import TopologyRouter
+                from .kv_transfer import PhysicalKVTransferExecutor
+
+                self._paged_pool_transfer_executor = PhysicalKVTransferExecutor(
+                    plan.scenario.hardware,
+                    runtime=self._execution_resource_kernel.physical_runtime,
+                    topology=TopologyRouter(plan.scenario.hardware),
+                    namespace="serving:" + str(id(self)),
+                )
+                paged_pool.set_transfer_executor(
+                    self._paged_pool_transfer_executor
+                )
         self._execution_task_sequence = 0
         self._live_cohort_metrics = None
         self._request_stage_ready_ns: Dict[Tuple[str, str, int], float] = {}

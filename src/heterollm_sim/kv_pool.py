@@ -472,8 +472,26 @@ class DynamicKVPool:
         return self._ledger.ledger
 
     @property
+    def transfer_executor(self) -> Any:
+        """Return the optional physical migration lowerer attached to the pool."""
+
+        return self._transfer_executor
+
+    @property
     def physical_ledger(self) -> Any:
         return self._ledger.ledger
+
+    def set_transfer_executor(
+        self,
+        transfer_executor: Optional[
+            Callable[[KvPoolTransferRequest], float | KvPoolTransferPlan]
+        ],
+    ) -> None:
+        """Attach the shared physical transfer executor after pool creation."""
+
+        if transfer_executor is not None and not callable(transfer_executor):
+            raise KvPoolError("transfer_executor must be callable")
+        self._transfer_executor = transfer_executor
 
     @property
     def capacity_bytes_by_component(self) -> Mapping[str, int]:
