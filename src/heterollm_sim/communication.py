@@ -559,6 +559,15 @@ class TopologyRouter:
                 if len(self._route_cache) > self._ROUTE_CACHE_MAX_ENTRIES:
                     self._route_cache.popitem(last=False)
                 return hops
+            # Endpoint-only devices are reachable but cannot silently become
+            # zero-cost fabric switches between their attached accelerators.
+            if (component_id != source_component and
+                    self.components[component_id].metadata.get("routing_transit") is False):
+                continue
+            transit_endpoints = self.components[component_id].metadata.get("routing_transit_endpoints")
+            if (component_id != source_component and transit_endpoints is not None
+                    and source_component not in transit_endpoints and target_component not in transit_endpoints):
+                continue
             for hop in self._adjacency.get(component_id, ()):
                 next_cost = cost + hop.transfer_ns(byte_count)
                 next_signature = signature + (hop.link_id, hop.target_component)

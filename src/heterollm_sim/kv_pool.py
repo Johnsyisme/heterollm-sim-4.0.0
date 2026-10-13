@@ -211,6 +211,13 @@ class KvPoolTransferPlan:
     completion_ns: Optional[float] = None
     commit: Optional[Callable[[], None]] = field(default=None, repr=False, compare=False)
     rollback: Optional[Callable[[], None]] = field(default=None, repr=False, compare=False)
+    # A staged asynchronous plan exposes the current phase end until advance
+    # has submitted every downstream phase. Only a plan without advance is
+    # a final completion contract that may publish the destination.
+    advance: Optional[Callable[[], "KvPoolTransferPlan"]] = field(default=None, repr=False, compare=False)
+    # Cancellation drains already-submitted work and releases only this copy's
+    # destination. Unlike admission rollback it never rewinds shared calendars.
+    cancel: Optional[Callable[[], Mapping[str, Any]]] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         try:
@@ -239,7 +246,7 @@ class KvPoolTransferPlan:
         if self.start_ns is not None and self.completion_ns is not None:
             if self.completion_ns < self.start_ns:
                 raise KvPoolError("transfer plan completion_ns precedes start_ns")
-        for name in ("commit", "rollback"):
+        for name in ("commit", "rollback", "advance", "cancel"):
             hook = getattr(self, name)
             if hook is not None and not callable(hook):
                 raise KvPoolError("transfer plan {} hook must be callable".format(name))
@@ -453,6 +460,10 @@ class DynamicKVPool:
         self._requests: Dict[str, List[int]] = {}
         self._request_components: Dict[str, Optional[str]] = {}
         self._prefixes: Dict[str, List[int]] = {}
+        # Destination capacity is reserved while the authoritative source page
+        # remains live.  Plans are owned by the caller's completion queue; this
+        # plain metadata can be copied by admission rollback/probe code.
+        self._pending_moves: Dict[int, Tuple[str, str, int, str]] = {}
         self._bindings: Dict[int, Set[str]] = defaultdict(set)
         self._owned_bytes: Dict[str, int] = defaultdict(int)
         self._cache_namespace = "kv_pool:" + uuid4().hex
@@ -587,7 +598,7 @@ class DynamicKVPool:
             return False
 
     def _transfer_plan(
-        self, page: KvPage, source: str, target: str, bytes_: int
+        self, page: KvPage, source: str, target: str, bytes_: int, *, staged: bool = False
     ) -> KvPoolTransferPlan:
         """Prepare a migration through an injected shared physical executor.
 
@@ -616,7 +627,8 @@ class DynamicKVPool:
             token_end=int(page.token_end),
         )
         try:
-            raw_plan = executor(request)
+            prepare = getattr(executor, "prepare_async", None) if staged else None
+            raw_plan = prepare(request) if callable(prepare) else executor(request)
         except KvPoolError:
             raise
         except Exception as error:
@@ -836,6 +848,9 @@ class DynamicKVPool:
         target_pages = int(target_pages)
         current_ids = list(self._requests.get(request_id, ()))
         current_count = len(current_ids)
+        if any(page_id in self._pending_moves for page_id in current_ids):
+            self._last_error = "cannot resize KV pages with an in-flight transfer"
+            return KvPoolResizeResult(False, request_id, current_count, error=self._last_error)
         if target_pages == current_count:
             for page_id in current_ids:
                 self._touch(self._pages[page_id])
@@ -910,7 +925,7 @@ class DynamicKVPool:
         """
         shadow = copy.copy(self)
         for name in ("_pages", "_requests", "_request_components", "_prefixes",
-                     "_bindings", "_owned_bytes", "_events"):
+                     "_bindings", "_owned_bytes", "_events", "_pending_moves"):
             setattr(shadow, name, copy.deepcopy(getattr(self, name)))
         initial = dict(self._ledger.used_bytes)
         ledger = _LocalLedger(self._ledger.limits)
@@ -936,7 +951,28 @@ class DynamicKVPool:
     def allocate(self, request_id: str, page_count: int, **kwargs: Any) -> bool:
         return self.resize(request_id, page_count, **kwargs)
 
+    def handoff_request(self, source_request: str, target_request: str) -> Tuple[int, ...]:
+        """Move exclusive page references between turns without copying KV."""
+        if source_request == target_request or self._requests.get(target_request):
+            raise KvPoolError("KV handoff requires a distinct empty destination request")
+        pages = self.request_pages(source_request)
+        if any(p.ref_count != 1 or p.pinned or p.prefix_key is not None
+               or p.logical_page_id in self._pending_moves for p in pages):
+            raise KvPoolError("KV handoff supports exclusive pages without in-flight copies only")
+        ids = self._requests.pop(source_request, [])
+        self._requests[target_request] = ids
+        component = self._request_components.pop(source_request, None)
+        if component is not None:
+            self._request_components[target_request] = component
+        for page in pages:
+            self._bindings[page.logical_page_id].remove(source_request)
+            self._bindings[page.logical_page_id].add(target_request)
+            page.request_id = target_request
+        return tuple(ids)
+
     def release(self, request_id: str) -> None:
+        if any(page in self._pending_moves for page in self._requests.get(request_id, ())):
+            raise KvPoolError("cannot release KV pages with an in-flight transfer")
         pending = list(self._requests.get(request_id, ()))
         while pending:
             page_id = pending[0]
@@ -964,6 +1000,8 @@ class DynamicKVPool:
         from .kernel_memory import paged_buffer_accesses
         from dataclasses import replace
         pages = self.request_pages(request_id)
+        if any(page.logical_page_id in self._pending_moves for page in pages):
+            raise KvPoolError("KV consumer must wait for the in-flight transfer completion")
         sizes = {p.bytes for p in pages}
         if not pages:
             # Still validate range and operation for empty requests.
@@ -1027,7 +1065,10 @@ class DynamicKVPool:
                 raise
             pending.pop(0)
             if key in self._prefixes:
-                self._prefixes[key] = pending
+                # _free_page edits this index in place. Keep the work list
+                # separate or freeing the next page also consumes pending,
+                # skipping a reference (or popping an empty list).
+                self._prefixes[key] = list(pending)
         self._prefixes.pop(key, None)
 
     def prefix_pages(self, prefix_key: str) -> Tuple[KvPage, ...]:
@@ -1093,6 +1134,9 @@ class DynamicKVPool:
         return freed
 
     def _move(self, page: KvPage, target_component: str, *, kind: str) -> bool:
+        if page.logical_page_id in self._pending_moves:
+            self._last_error = "KV page already has an in-flight transfer"
+            return False
         if target_component not in self.components:
             self._last_error = "unknown target component " + target_component
             return False
@@ -1172,6 +1216,93 @@ class DynamicKVPool:
         self._last_error = None
         return True
 
+    def prepare_restore_page(
+        self, logical_page_id: int, target_component: str, *, kind: str = "prefetch",
+    ) -> Optional[KvPoolTransferPlan]:
+        """Reserve a copy without publishing its destination to consumers.
+
+        The caller must complete the returned plan at/after completion_ns.
+        Abort is only legal immediately, before unrelated work is scheduled:
+        executor rollback restores the reservation calendar, not just one I/O.
+        """
+        page = self.page(logical_page_id)
+        target = self.components.get(target_component)
+        if (page.logical_page_id in self._pending_moves or target is None
+                or not target.active or not target.writable
+                or page.owner_component == target_component
+                or page.ref_count != 1 or page.pinned):
+            self._last_error = "invalid or already pending asynchronous restore"
+            return None
+        source = page.owner_component
+        self._require_storage_bandwidth(self.components[source], read=True)
+        self._require_storage_bandwidth(target, read=False)
+        if (not self._reachable(source, target_component, page.bytes)
+                or not self._ledger.can_adjust(target_component, page.bytes)):
+            self._last_error = "asynchronous restore has no route or destination capacity"
+            return None
+        plan = self._transfer_plan(page, source, target_component, page.bytes, staged=True)
+        if plan.start_ns is None or plan.completion_ns is None:
+            self._run_transfer_hook(plan, "rollback")
+            raise KvPoolUnsupported("asynchronous restore requires absolute physical completion timestamps")
+        if not self._ledger.adjust(target_component, page.bytes):
+            self._run_transfer_hook(plan, "rollback")
+            self._last_error = "physical ledger rejected asynchronous restore reservation"
+            return None
+        self._pending_moves[page.logical_page_id] = (
+            source, target_component, page.allocation_generation, str(kind))
+        self._last_error = None
+        return plan
+
+    def abort_prepared_restore(self, logical_page_id: int, plan: KvPoolTransferPlan) -> None:
+        """Undo a just-prepared restore; callers abort a batch in reverse order."""
+        page = self.page(logical_page_id)
+        _source, target, _generation, _kind = self._pending_moves[logical_page_id]
+        self._run_transfer_hook(plan, "rollback")
+        if not self._ledger.adjust(target, -page.bytes):
+            raise KvPoolError("could not release asynchronous restore reservation")
+        del self._pending_moves[logical_page_id]
+
+    def complete_prepared_restore(
+        self, logical_page_id: int, plan: KvPoolTransferPlan, *, now_ns: float,
+    ) -> None:
+        """Publish a completed copy and release only its original source."""
+        page = self.page(logical_page_id)
+        source, target, generation, kind = self._pending_moves[logical_page_id]
+        if plan.advance is not None or plan.completion_ns is None or now_ns < plan.completion_ns:
+            raise KvPoolError("cannot consume a KV transfer before its completion")
+        if page.owner_component != source or page.allocation_generation != generation:
+            raise KvPoolError("in-flight KV source identity changed")
+        self._run_transfer_hook(plan, "commit")
+        if not self._ledger.adjust(source, -page.bytes):
+            raise KvPoolError("could not release completed KV transfer source")
+        self._owned_bytes[source] -= page.bytes
+        self._owned_bytes[target] += page.bytes
+        page.owner_component = target
+        page.resident_tier = self.components[target].tier
+        page.allocation_generation += 1
+        self._touch(page)
+        del self._pending_moves[logical_page_id]
+        self._events.append(KvPoolTransfer(
+            kind, logical_page_id, source, target, page.bytes,
+            plan.duration_ns, plan.start_ns, plan.completion_ns))
+
+    def cancel_prepared_restore(self, logical_page_id: int, plan: KvPoolTransferPlan,
+                                *, now_ns: float) -> Mapping[str, Any]:
+        """Drain the submitted phase, retain source ownership, discard target."""
+        page = self.page(logical_page_id)
+        source, target, generation, _kind = self._pending_moves[logical_page_id]
+        if plan.completion_ns is None or now_ns < plan.completion_ns:
+            raise KvPoolError("cancellation must drain the currently submitted physical phase")
+        if page.owner_component != source or page.allocation_generation != generation:
+            raise KvPoolError("in-flight KV source identity changed")
+        if plan.cancel is None:
+            raise KvPoolUnsupported("executor does not support cost-preserving cancellation")
+        billed = plan.cancel()
+        if not self._ledger.adjust(target, -page.bytes):
+            raise KvPoolError("could not release cancelled restore reservation")
+        del self._pending_moves[logical_page_id]
+        return billed
+
     def migrate_page(self, logical_page_id: int, target_component: str) -> bool:
         page = self.page(logical_page_id)
         if not self.components[target_component].active:
@@ -1183,13 +1314,14 @@ class DynamicKVPool:
 
         return self.migrate_page(logical_page_id, target_component)
 
-    def offload_page(self, logical_page_id: int, target_component: Optional[str] = None) -> bool:
+    def offload_page(self, logical_page_id: int, target_component: Optional[str] = None,
+                     *, kind: str = "offload") -> bool:
         page = self.page(logical_page_id)
         targets = [str(target_component)] if target_component is not None else sorted(self.offload_components)
         for target in targets:
             if target not in self.components or target not in self.offload_components:
                 continue
-            if self._move(page, target, kind="offload"):
+            if self._move(page, target, kind=str(kind)):
                 return True
         self._last_error = self._last_error or "no writable offload component has capacity"
         return False

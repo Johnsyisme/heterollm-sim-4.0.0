@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from math import isfinite, sqrt
 from typing import Dict, Iterable, Optional
 
 from .memory_mapping import map_nand_address, split_nand_request, validate_nand_request
@@ -23,10 +24,15 @@ class _StagedPage:
     host_bytes: int = 0
     logical_bytes: int = 0
     request_count: int = 0
+    ready_ns: float = 0.0
+    ranges: tuple[tuple[int, int], ...] = ()
 
 
 class NandCore:
-    """Model page read, page program and block erase without FTL/GC state."""
+    """Page read/program/erase with optional thermal and explicit erase wear.
+
+    There is no FTL, garbage collector or cell-content validity model.
+    """
 
     def __init__(
         self,
@@ -47,6 +53,10 @@ class NandCore:
         self._array_ready: Dict[str, float] = {}
         self._buffer_ready: Dict[str, float] = {}
         self._inflight: list[float] = []
+        # Host request admission occupancy, bounded by max_outstanding_requests.
+        # These are not per-plane page/read/program queues. Buffered writes
+        # leave this host-level population at acknowledgement, before drain.
+        self._inflight_operations: list[tuple[float, Operation]] = []
         self._acceptance_ns = 0.0
         # A positive write_buffer_bytes models a shared host-side staging
         # budget.  Entries are released when their media program completes;
@@ -59,6 +69,10 @@ class NandCore:
         self._buffered_write_mode = config.buffered_write_mode
         self._staged_pages: Dict[tuple[int, ...], _StagedPage] = {}
         self._buffer_merge_bytes = 0
+        self._plane_thermal_state: Dict[str, dict] = {}
+        self._block_wear_state: Dict[str, dict] = {}
+        self._observation_events: list[dict] = []
+        self._observe_media = bool(config.detailed_observability or config.dynamic_thermal or config.wear_model)
 
     @property
     def buffered_write_mode(self) -> bool:
@@ -118,6 +132,66 @@ class NandCore:
         reservation = self.timeline.reserve(resource, earliest, duration)
         return StageTiming(name, reservation.start_ns, reservation.end_ns, resource, bytes)
 
+    def _media_stage(self, name, mapping, earliest, duration, *, eligible_ns):
+        """Execute an actual mapped array operation with optional feedback."""
+        resource = self._array_resource_id(mapping)
+        if not self._observe_media:
+            return self._array_stage(name, resource, earliest, duration)
+        prefix = str(self.config.metadata.get("array_resource_prefix", "nand:array"))
+        plane = prefix+":plane:"+":".join(str(getattr(mapping, key)) for key in
+            ("channel", "target", "die", "lun", "plane"))
+        block = plane+":block:"+str(mapping.block)
+        lanes = self.timeline.lane_available.get(resource)
+        start = max(float(earliest), min(lanes) if lanes else self.timeline.available_ns(resource))
+        wear_config = self.config.wear_model
+        wear = self._block_wear_state.get(block, {"programs": 0, "erases": 0})
+        pe_before = (wear_config.initial_pe_cycles if wear_config else 0)+wear["erases"]
+        wear_scale = 1.
+        if name == "PAGE_PROGRAM" and wear_config:
+            wear_scale = min(wear_config.max_program_latency_scale,
+                1.+wear_config.program_latency_growth_at_rated_pe*pe_before/wear_config.rated_pe_cycles)
+        work = float(duration)*wear_scale
+        thermal = {}
+        if self.config.dynamic_thermal:
+            from .thermal import advance_nand_thermal
+            state, thermal = advance_nand_thermal(self._plane_thermal_state.get(plane),
+                self.config.dynamic_thermal, start, work)
+            work = thermal["duration_ns"]
+            self._plane_thermal_state[plane] = state
+        stage = self._array_stage(name, resource, start, work)
+        if wear_config:
+            wear = {"programs": wear["programs"]+int(name == "PAGE_PROGRAM"),
+                    "erases": wear["erases"]+int(name == "BLOCK_ERASE")}
+            self._block_wear_state[block] = wear
+        self._observation_events.append({
+            "operation": "program" if name == "PAGE_PROGRAM" else "erase" if name == "BLOCK_ERASE" else "read",
+            "stage": name, "plane_id": plane, "block_id": block,
+            "execution_resource": resource, "eligible_ns": float(eligible_ns),
+            "start_ns": stage.start_ns, "end_ns": stage.end_ns,
+            "baseline_service_ns": float(duration), "wear_extra_ns": float(duration)*(wear_scale-1.),
+            "physical_bytes": self.config.page_bytes if name != "BLOCK_ERASE" else 0,
+            "pe_cycles_before": pe_before if wear_config else None,
+            "pe_cycles_after": pe_before+int(name == "BLOCK_ERASE") if wear_config else None,
+            "block_programs_after": wear["programs"] if wear_config else None,
+            "block_erases_after": wear["erases"] if wear_config else None,
+            "wear_enabled": wear_config is not None,
+            "rated_pe_cycles": wear_config.rated_pe_cycles if wear_config else None,
+            **thermal,
+        })
+        return stage
+
+    def _observations(self, first=0):
+        if not self._observe_media:
+            return {}
+        return {"nand_observations": {
+            "events": tuple(self._observation_events[first:]),
+            "configured_plane_count": self.config.channels*self.config.targets_per_channel*self.config.dies_per_target*self.config.luns_per_die*self.config.planes_per_lun,
+            "plane_owner_prefix": str(self.config.metadata.get("array_resource_prefix", "nand:array")),
+            "thermal_enabled": self.config.dynamic_thermal is not None,
+            "wear_enabled": self.config.wear_model is not None,
+            "scope": "actual modeled physical page array operations; queue is eligible-to-array-start waiting, excluding in-service operations; physical mapping geometry is authored, not calibrated",
+        }}
+
     def _write_buffer_payload_bytes(self, request: AccessRequest) -> int:
         if request.operation is not Operation.WRITE or self.config.write_buffer_bytes <= 0:
             return 0
@@ -138,7 +212,7 @@ class NandCore:
             int(mapping.lun), int(mapping.plane), int(mapping.block), int(mapping.page),
         )
 
-    def _stage_page(self, segment) -> tuple[int, int]:
+    def _stage_page(self, segment, request: AccessRequest, ready_ns: float) -> tuple[int, int]:
         """Merge one write segment into staging and return (merge, new)."""
 
         key = self._staged_key(segment.mapping)
@@ -150,6 +224,16 @@ class NandCore:
         page.host_bytes += int(segment.host_transfer_bytes)
         page.logical_bytes += int(segment.logical_bytes)
         page.request_count += 1
+        page.ready_ns = max(page.ready_ns, ready_ns)
+        start = max(request.address, segment.address) - segment.address
+        end = min(request.address + request.byte_count, segment.address + self.config.page_bytes) - segment.address
+        merged_ranges = []
+        for left, right in sorted((*page.ranges, (start, end))):
+            if merged_ranges and left <= merged_ranges[-1][1]:
+                merged_ranges[-1] = (merged_ranges[-1][0], max(right, merged_ranges[-1][1]))
+            else:
+                merged_ranges.append((left, right))
+        page.ranges = tuple(merged_ranges)
         self._buffer_merge_bytes += merge_bytes
         return merge_bytes, 1 if merge_bytes else 0
 
@@ -169,7 +253,7 @@ class NandCore:
 
     def _admit_write_buffer(
         self, request: AccessRequest, effective_arrival: float,
-    ) -> tuple[float, int, float]:
+    ) -> tuple[float, int, float, dict]:
         """Delay admission until a finite write buffer has room.
 
         Capacity is measured in host payload bytes, matching the host transfer
@@ -177,8 +261,12 @@ class NandCore:
         """
         payload_bytes = self._write_buffer_payload_bytes(request)
         if not payload_bytes:
+            if self._buffered_write_mode and request.operation is Operation.ERASE and self._staged_pages:
+                drained = self.flush(now_ns=effective_arrival)
+                arrival = max(effective_arrival, drained["media_drain_completion_ns"])
+                return arrival, 0, arrival - effective_arrival, drained
             self._release_write_buffer(effective_arrival)
-            return effective_arrival, 0, 0.0
+            return effective_arrival, 0, 0.0, {}
         capacity = self.config.write_buffer_bytes
         if payload_bytes > capacity:
             raise ValueError(
@@ -187,21 +275,24 @@ class NandCore:
             )
         initial_arrival = effective_arrival
         if self._buffered_write_mode:
+            drain_counters = {}
             # In buffered mode occupancy persists until an explicit or
             # automatic drain.  A full buffer therefore stalls admission at
             # the media-drain completion point instead of pretending that a
             # host acknowledgement freed the bytes.
             while self._write_buffer_occupancy + payload_bytes > capacity:
                 drained = self.flush(now_ns=effective_arrival)
+                for key in ("physical_programs", "physical_write_bytes", "pages_read", "physical_read_bytes", "internal_transfer_bytes"):
+                    drain_counters[key] = drain_counters.get(key, 0) + drained.get(key, 0)
                 drain_end = float(drained.get("media_drain_completion_ns", effective_arrival))
                 if drain_end <= effective_arrival and self._write_buffer_occupancy:
                     raise RuntimeError("write buffer occupancy cannot be drained")
                 effective_arrival = max(effective_arrival, drain_end)
-            return effective_arrival, payload_bytes, max(0.0, effective_arrival - initial_arrival)
+            return effective_arrival, payload_bytes, max(0.0, effective_arrival - initial_arrival), drain_counters
         while True:
             self._release_write_buffer(effective_arrival)
             if self._write_buffer_occupancy + payload_bytes <= capacity:
-                return effective_arrival, payload_bytes, max(0.0, effective_arrival - initial_arrival)
+                return effective_arrival, payload_bytes, max(0.0, effective_arrival - initial_arrival), {}
             future = [
                 release_ns for release_ns, _ in self._write_buffer_pending
                 if release_ns > effective_arrival
@@ -228,6 +319,9 @@ class NandCore:
         introducing a synthetic request into the event stream.
         """
 
+        observation_start = len(self._observation_events)
+        if now_ns is not None and (isinstance(now_ns, bool) or not isfinite(now_ns) or now_ns < 0):
+            raise ValueError("now_ns must be finite and non-negative")
         if not self._buffered_write_mode:
             return {
                 "buffered_write_mode": False,
@@ -261,22 +355,35 @@ class NandCore:
             )
         )
         start_ns: Optional[float] = None
+        earliest_ns = cursor
         physical_programs = 0
         physical_write_bytes = 0
         internal_transfer_bytes = 0
+        pages_read = 0
         host_bytes = 0
         for staged in tuple(self._staged_pages.values()):
             m = staged.mapping
             array_id = self._array_id(m)
             array_resource = self._array_resource_id(m)
-            dependency = max(cursor, self._array_ready.get(array_id, 0.0), self._buffer_ready.get(array_id, 0.0))
+            dependency = max(earliest_ns, staged.ready_ns, self._array_ready.get(array_id, 0.0), self._buffer_ready.get(array_id, 0.0))
+            if staged.ranges != ((0, self.config.page_bytes),):
+                read = self._media_stage("RMW_PAGE_READ", m, dependency, self.config.page_read_ns,
+                                         eligible_ns=max(earliest_ns, staged.ready_ns))
+                old_data = self.timeline.transfer(
+                    self._channel_id(m), self.config.transfer_page_bytes,
+                    read.end_ns, self.config.internal_bandwidth_gb_s, direction="read",
+                )
+                dependency = old_data.end_ns
+                internal_transfer_bytes += old_data.bytes
+                pages_read += 1
+                start_ns = read.start_ns if start_ns is None else min(start_ns, read.start_ns)
             internal = self.timeline.transfer(
                 self._channel_id(m), self.config.transfer_page_bytes,
                 dependency, self.config.internal_bandwidth_gb_s,
                 direction="write",
             )
-            program = self._array_stage(
-                "PAGE_PROGRAM", array_resource, internal.end_ns, self.config.page_program_ns
+            program = self._media_stage(
+                "PAGE_PROGRAM", m, internal.end_ns, self.config.page_program_ns, eligible_ns=internal.end_ns
             )
             self._array_ready[array_id] = program.end_ns
             self._buffer_ready[array_id] = program.end_ns
@@ -298,11 +405,14 @@ class NandCore:
             "merge_bytes": merge_bytes,
             "physical_programs": physical_programs,
             "physical_write_bytes": physical_write_bytes,
+            "pages_read": pages_read,
+            "physical_read_bytes": pages_read * self.config.page_bytes,
             "host_transfer_bytes": host_bytes,
             "internal_transfer_bytes": internal_transfer_bytes,
             "media_drain_start_ns": float(start_ns if start_ns is not None else cursor),
             "media_drain_completion_ns": float(cursor),
             "write_completion": "media_program_complete",
+            **self._observations(observation_start),
         }
 
     def drain(self, *, now_ns: Optional[float] = None) -> dict:
@@ -321,14 +431,12 @@ class NandCore:
 
     def submit(self, request: AccessRequest) -> TransactionResult:
         validate_nand_request(request, self.config)
+        self._observation_events = []
         effective_arrival = max(request.arrival_ns, self._acceptance_ns)
         inflight = [end for end in self._inflight if end > effective_arrival]
         if len(inflight) >= self.config.max_outstanding_requests:
             effective_arrival = max(effective_arrival, min(inflight))
             inflight = [end for end in inflight if end > effective_arrival]
-        effective_arrival, write_buffer_bytes, write_buffer_wait_ns = self._admit_write_buffer(
-            request, effective_arrival
-        )
         before_metrics = self.timeline.metrics_snapshot(
             max_intervals=(
                 self.config.max_expanded_segments
@@ -336,12 +444,44 @@ class NandCore:
                 else 0
             )
         )
+        effective_arrival, write_buffer_bytes, write_buffer_wait_ns, drained = self._admit_write_buffer(
+            request, effective_arrival
+        )
+        admitted = [(end, operation) for end, operation in self._inflight_operations
+                    if end > effective_arrival]
+        admission_depths = {
+            "host_outstanding_at_admission_peak": len(admitted) + 1,
+            "host_read_outstanding_at_admission_peak":
+                sum(operation is Operation.READ for _end, operation in admitted)
+                + int(request.operation is Operation.READ),
+            "host_write_outstanding_at_admission_peak":
+                sum(operation is Operation.WRITE for _end, operation in admitted)
+                + int(request.operation is Operation.WRITE),
+        }
         result = self._execute_accepted(
             request if effective_arrival == request.arrival_ns
             else replace(request, arrival_ns=effective_arrival)
         )
+        if drained:
+            counters = dict(result.counters)
+            for key in ("physical_write_bytes", "physical_read_bytes", "pages_read", "internal_transfer_bytes"):
+                counters[key] = counters.get(key, 0) + drained.get(key, 0)
+            counters["pages_programmed"] = counters.get("pages_programmed", 0) + drained.get("physical_programs", 0)
+            counters["auto_drain_physical_programs"] = drained.get("physical_programs", 0)
+            result = replace(result, counters=counters, transfer_bytes=result.transfer_bytes + drained.get("internal_transfer_bytes", 0))
         result = replace(result, arrival_ns=request.arrival_ns, counters={
             **result.counters,
+            "pages_touched": result.counters.get("page_count", 0),
+            "read_operations": result.counters.get("pages_read", 0),
+            "program_operations": result.counters.get("pages_programmed", 0),
+            "rmw_read_operations": (result.counters.get("pages_read", 0)
+                                    if request.operation is Operation.WRITE else 0),
+            "page_access_payload_bytes": request.byte_count if request.operation is not Operation.ERASE else 0,
+            "page_access_capacity_bytes": (result.counters.get("page_count", 0) * self.config.page_bytes
+                                            if request.operation is not Operation.ERASE else 0),
+            "host_admission_samples": 1,
+            **admission_depths,
+            "host_admission_depth_scope": "outstanding host requests sampled at admission, including the admitted request; not NAND page queues",
             "queue_wait_ns": effective_arrival - request.arrival_ns,
             "write_buffer_wait_ns": write_buffer_wait_ns,
             "write_buffer_bytes": write_buffer_bytes,
@@ -349,10 +489,12 @@ class NandCore:
             "write_buffer_peak_bytes": self._write_buffer_occupancy + write_buffer_bytes,
             "buffered_write_mode": self._buffered_write_mode,
             **self.timeline.metrics_delta(before_metrics),
+            **self._observations(),
         })
         self._reserve_write_buffer(result.completion_ns, write_buffer_bytes)
         self._acceptance_ns = effective_arrival
         self._inflight = [*inflight, result.completion_ns]
+        self._inflight_operations = [*admitted, (result.completion_ns, request.operation)]
         return result
 
     def _execute_accepted(self, request: AccessRequest) -> TransactionResult:
@@ -361,8 +503,10 @@ class NandCore:
         page_count = last_page - first_page + 1
         if (
             not self.capture_details
+            and not self._observe_media
             and request.operation is not Operation.ERASE
             and page_count >= 128
+            and not self._staged_pages
             # Positive write buffers are admitted at request granularity so
             # every buffered write observes the same capacity gate.
             and not (
@@ -404,7 +548,8 @@ class NandCore:
             buffer_ready = self._buffer_ready.get(array_id, 0.0)
             dependency = max(request.arrival_ns + self.config.front_ns, array_ready, buffer_ready)
             if request.operation is Operation.ERASE:
-                stage = self._array_stage("BLOCK_ERASE", array_resource, dependency, self.config.block_erase_ns)
+                stage = self._media_stage("BLOCK_ERASE", m, dependency, self.config.block_erase_ns,
+                                          eligible_ns=request.arrival_ns+self.config.front_ns)
                 record(stage)
                 self._array_ready[array_id] = stage.end_ns
                 self.timeline.ready_ns[array_id] = stage.end_ns
@@ -431,7 +576,7 @@ class NandCore:
                     direction="write",
                 )
                 record(StageTiming("HOST_TRANSFER", host.start_ns, host.end_ns, host.resource_id, host.bytes))
-                merged, merged_page = self._stage_page(segment)
+                merged, merged_page = self._stage_page(segment, request, host.end_ns)
                 merge_bytes += merged
                 merged_pages += merged_page
                 staging_write_pages += 1
@@ -441,7 +586,8 @@ class NandCore:
                 # Boundary pages need a simplified old-data read before the
                 # new bytes can be programmed.  This is intentionally not a
                 # persistent page cache.
-                read = self._array_stage("RMW_PAGE_READ", array_resource, dependency, self.config.page_read_ns)
+                read = self._media_stage("RMW_PAGE_READ", m, dependency, self.config.page_read_ns,
+                                         eligible_ns=request.arrival_ns+self.config.front_ns)
                 record(read)
                 dependency = read.end_ns
                 read_xfer = self.timeline.transfer(
@@ -456,13 +602,15 @@ class NandCore:
                 pages_read += 1
             if request.operation is Operation.READ:
                 staged = self._staged_pages.get(self._staged_key(m)) if self._buffered_write_mode else None
-                if staged is not None:
+                logical_start = max(request.address, segment.address) - segment.address
+                logical_end = min(request.address + request.byte_count, segment.address + self.config.page_bytes) - segment.address
+                if staged is not None and any(left <= logical_start and logical_end <= right for left, right in staged.ranges):
                     # The host copy is authoritative until media drain.  Do
                     # not charge a stale PAGE_READ or internal NAND transfer.
                     internal_bytes -= segment.internal_transfer_bytes
                     host = self.timeline.transfer(
                         self._host_id(), segment.host_transfer_bytes,
-                        request.arrival_ns + self.config.front_ns,
+                        max(request.arrival_ns + self.config.front_ns, staged.ready_ns),
                         self.config.host_bandwidth_for(Operation.READ),
                         direction="read",
                     )
@@ -470,7 +618,8 @@ class NandCore:
                     completion = max(completion, host.end_ns)
                     staging_read_hits += 1
                     continue
-                read = self._array_stage("PAGE_READ", array_resource, dependency, self.config.page_read_ns)
+                read = self._media_stage("PAGE_READ", m, dependency, self.config.page_read_ns,
+                                         eligible_ns=request.arrival_ns+self.config.front_ns)
                 record(read)
                 pages_read += 1
                 dependency = read.end_ns
@@ -505,7 +654,8 @@ class NandCore:
                     direction="write",
                 )
                 record(StageTiming("INTERNAL_TRANSFER", internal.start_ns, internal.end_ns, internal.resource_id, internal.bytes))
-                program = self._array_stage("PAGE_PROGRAM", array_resource, internal.end_ns, self.config.page_program_ns)
+                program = self._media_stage("PAGE_PROGRAM", m, internal.end_ns, self.config.page_program_ns,
+                                            eligible_ns=internal.end_ns)
                 record(program)
                 pages_programmed += 1
                 completion = max(completion, program.end_ns)
@@ -617,4 +767,94 @@ def nand_service(config: NandConfig, request: AccessRequest, *, timeline: Option
     return NandCore(config, timeline).execute(request)
 
 
-__all__ = ["NandCore", "nand_service"]
+def summarize_nand_observations(observations):
+    """Combine actual page event populations, retaining all idle plane zeros."""
+    observations = tuple(item for item in observations if item is not None)
+    if not observations:
+        return None
+    events = tuple(event for item in observations for event in item.get("events", ()))
+    planes_by_owner = {}
+    for item in observations:
+        for owner, count in item.get("configured_planes_by_owner", {
+                item.get("plane_owner_prefix", "nand:array"): item.get("configured_plane_count", 0)}).items():
+            if owner in planes_by_owner and planes_by_owner[owner] != count:
+                raise ValueError("NAND observation geometry changed within one physical owner")
+            planes_by_owner[owner] = count
+    start = min((e["eligible_ns"] for e in events), default=0.)
+    end = max((e["end_ns"] for e in events), default=start)
+    window = end-start
+    queues = {}
+    for operation in ("read", "program"):
+        selected = [e for e in events if e["operation"] == operation]
+        changes = {}
+        for event in selected:
+            if event["start_ns"] > event["eligible_ns"]:
+                changes[event["eligible_ns"]] = changes.get(event["eligible_ns"], 0)+1
+                changes[event["start_ns"]] = changes.get(event["start_ns"], 0)-1
+        histogram = {}
+        depth, peak, last = 0, 0, start
+        for timestamp, delta in sorted(changes.items()):
+            histogram[depth] = histogram.get(depth, 0.)+timestamp-last
+            depth += delta
+            peak = max(peak, depth)
+            last = timestamp
+        histogram[depth] = histogram.get(depth, 0.)+end-last
+        def quantile(q):
+            accumulated = 0.
+            for level, duration in sorted(histogram.items()):
+                accumulated += duration
+                if accumulated >= q*window:
+                    return level
+            return 0
+        wait = sum(e["start_ns"]-e["eligible_ns"] for e in selected)
+        queues[operation] = {"operations": len(selected), "peak": peak,
+            "mean_time_weighted": wait/window if window else 0.,
+            "p50_time_weighted": quantile(.5), "p95_time_weighted": quantile(.95),
+            "p99_time_weighted": quantile(.99), "p999_time_weighted": quantile(.999),
+            "total_page_wait_ns": wait, "depth_duration_ns": histogram,
+            "scope": "physical array-operation queue, eligible-to-start, excluding in-service; global sum across recorded owners"}
+    loads, blocks = {}, {}
+    for event in events:
+        row = loads.setdefault(event["plane_id"], {"read_operations": 0, "program_operations": 0,
+            "erase_operations": 0, "busy_ns": 0., "read_bytes": 0, "write_bytes": 0})
+        row[event["operation"]+"_operations"] += 1
+        row["busy_ns"] += event["end_ns"]-event["start_ns"]
+        if event["operation"] != "erase":
+            row["read_bytes" if event["operation"] == "read" else "write_bytes"] += event["physical_bytes"]
+        if event["wear_enabled"]:
+            old = blocks.get(event["block_id"])
+            if old is None or event["end_ns"] >= old["end_ns"]:
+                blocks[event["block_id"]] = {key: event[key] for key in
+                    ("end_ns", "pe_cycles_after", "block_programs_after", "block_erases_after", "rated_pe_cycles")}
+                blocks[event["block_id"]].update(
+                    authored_endurance_fraction_consumed=event["pe_cycles_after"]/event["rated_pe_cycles"],
+                    authored_pe_cycles_remaining=max(0,event["rated_pe_cycles"]-event["pe_cycles_after"]),
+                    at_or_above_authored_endurance=event["pe_cycles_after"]>=event["rated_pe_cycles"],
+                    endurance_scope="assumption budget only; reaching this value does not simulate data loss or failure")
+    count = sum(planes_by_owner.values())
+    busy = [r["busy_ns"] for r in loads.values()]
+    mean = sum(busy)/count if count else 0.
+    variance = (sum((x-mean)**2 for x in busy)+(count-len(busy))*mean**2)/count if count else 0.
+    return {"events": events, "configured_planes_by_owner": planes_by_owner,
+        "thermal_enabled": any(item.get("thermal_enabled") for item in observations),
+        "wear_enabled": any(item.get("wear_enabled") for item in observations),
+        "measurement_window": {"start_ns": start, "end_ns": end, "duration_ns": window},
+        "read_queue_depth": queues["read"], "program_queue_depth": queues["program"],
+        "physical_plane_loads": loads,
+        "physical_plane_imbalance": {"configured_planes": count, "observed_planes": len(loads),
+            "idle_planes": count-len(loads), "mean_busy_ns": mean,
+            "coefficient_of_variation": sqrt(variance)/mean if mean else None,
+            "max_over_mean": max(busy, default=0.)/mean if mean else None,
+            "scope": "authored physical channel/target/die/LUN/plane mapping, includes configured idle planes; distinct from effective service lane IDs; uncalibrated geometry"},
+        "wear_blocks": blocks,
+        "actual_erase_operations": sum(e["operation"] == "erase" for e in events),
+        "actual_program_operations": sum(e["operation"] == "program" for e in events),
+        "wear_extra_ns": sum(e.get("wear_extra_ns", 0.) for e in events),
+        "thermal_extra_ns": sum(e.get("thermal_extra_ns", 0.) for e in events),
+        "thermal_throttle_plane_ns": sum(e.get("thermal_throttle_ns", 0.) for e in events),
+        "peak_temperature_c": max((e["peak_temperature_c"] for e in events if "peak_temperature_c" in e), default=None),
+        "idle_recoveries": sum(e.get("idle_recoveries", 0) for e in events),
+        "scope": "actual executed array stages; independent-plane RC and explicit erase-count wear feedback when enabled; no FTL or implicit erase inference"}
+
+
+__all__ = ["NandCore", "nand_service", "summarize_nand_observations"]

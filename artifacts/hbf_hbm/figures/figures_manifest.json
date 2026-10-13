@@ -1,0 +1,794 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "input_results": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\results.json",
+  "input_selected_checks_passed": true,
+  "output_directory_relative_to_results": "figures",
+  "plotting_python": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\.venv\\Scripts\\python.exe",
+  "matplotlib_version": "3.10.9",
+  "language": "zh-CN",
+  "font_family": [
+    "Microsoft YaHei",
+    "DejaVu Sans"
+  ],
+  "global_caption_zh": "图表来自实际运行的仿真：完整算子服务与物理读带宽微基准分别标记，不是实测硬件性能。微基准不作为LLM TPS；有限SLO实验不解释为无限期稳定性证明。",
+  "figures": [
+    {
+      "id": "01_small_actual_batch",
+      "title_zh": "小模型实际 batch：TPS 与 goodput",
+      "caption_zh": "只取固定硬件的小模型 2K 完整服务点，排除带宽扫描及微基准。横轴取实际最大 batch；TPS/goodput 均按包含初始化等待的请求观测窗口计算。短输出与有限轨迹不代表稳态服务能力。",
+      "status": "complete",
+      "files": {
+        "png": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\01_small_actual_batch.png",
+        "svg": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\01_small_actual_batch.svg"
+      },
+      "relative_files": {
+        "png": "01_small_actual_batch.png",
+        "svg": "01_small_actual_batch.svg"
+      },
+      "source_row_ids": [
+        "fixed-2048-1-False",
+        "fixed-2048-1-True",
+        "fixed-2048-4-False",
+        "fixed-2048-4-True",
+        "fixed-2048-16-False",
+        "fixed-2048-16-True",
+        "fixed-2048-64-False",
+        "fixed-2048-64-True"
+      ],
+      "source_row_count": 8,
+      "observations": [
+        {
+          "id": "fixed-2048-1-False",
+          "requested_batch": 1,
+          "actual_batch": 1,
+          "node_tps": 17165.851018703233,
+          "goodput_tps": 17165.851018703233
+        },
+        {
+          "id": "fixed-2048-1-True",
+          "requested_batch": 1,
+          "actual_batch": 1,
+          "node_tps": 6826.40203628983,
+          "goodput_tps": 6826.40203628983
+        },
+        {
+          "id": "fixed-2048-4-False",
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "node_tps": 28378.31015637711,
+          "goodput_tps": 28378.31015637711
+        },
+        {
+          "id": "fixed-2048-4-True",
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "node_tps": 15178.920430673232,
+          "goodput_tps": 15178.920430673232
+        },
+        {
+          "id": "fixed-2048-16-False",
+          "requested_batch": 16,
+          "actual_batch": 16,
+          "node_tps": 32190.620754467727,
+          "goodput_tps": 32190.620754467727
+        },
+        {
+          "id": "fixed-2048-16-True",
+          "requested_batch": 16,
+          "actual_batch": 16,
+          "node_tps": 21404.420138821344,
+          "goodput_tps": 21404.420138821344
+        },
+        {
+          "id": "fixed-2048-64-False",
+          "requested_batch": 64,
+          "actual_batch": 64,
+          "node_tps": 32117.05615440583,
+          "goodput_tps": 0.0
+        },
+        {
+          "id": "fixed-2048-64-True",
+          "requested_batch": 64,
+          "actual_batch": 64,
+          "node_tps": 22115.342624026584,
+          "goodput_tps": 0.0
+        }
+      ],
+      "row_scope": "full_operator_serving only",
+      "report_relative_files": {
+        "png": "figures/01_small_actual_batch.png",
+        "svg": "figures/01_small_actual_batch.svg"
+      }
+    },
+    {
+      "id": "02_named_context",
+      "title_zh": "命名模型上下文：TPS 与 B/A 比率",
+      "caption_zh": "仅使用完整命名模型 A/B 配对；不是内存微基准。2K 点为 32 输出，长上下文点仅 4 输出，不能把折线斜率解释为纯上下文效应。128K 提示词加 4 输出也略超原生 131072-token 上限；1M 属大幅架构外推，二者均用星号及空心菱形标记，不包含语义准确率保证。比值仅匹配相同输出长度和硬件清单。",
+      "status": "complete",
+      "files": {
+        "png": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\02_named_context.png",
+        "svg": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\02_named_context.svg"
+      },
+      "relative_files": {
+        "png": "02_named_context.png",
+        "svg": "02_named_context.svg"
+      },
+      "source_row_ids": [
+        "model/llama3_1-8b/2048/A_hbm_only",
+        "model/llama3_1-8b/2048/B_all_kv_hbf",
+        "model/llama3_1-8b/131072/A_hbm_only",
+        "model/llama3_1-8b/131072/B_all_kv_hbf",
+        "model/llama3_1-8b/1048576/A_hbm_only",
+        "model/llama3_1-8b/1048576/B_all_kv_hbf",
+        "model/llama3_1-70b/2048/A_hbm_only",
+        "model/llama3_1-70b/2048/B_all_kv_hbf",
+        "model/llama3_1-70b/131072/A_hbm_only",
+        "model/llama3_1-70b/131072/B_all_kv_hbf",
+        "model/llama3_1-70b/1048576/A_hbm_only",
+        "model/llama3_1-70b/1048576/B_all_kv_hbf"
+      ],
+      "source_row_count": 12,
+      "observations": [
+        {
+          "model_id": "llama3_1-8b",
+          "context_tokens": 2048,
+          "B_over_A_tps": 0.9385337097699262,
+          "output_tokens_per_request": 32,
+          "context_extrapolation": null,
+          "paired_row_ids": [
+            "model/llama3_1-8b/2048/A_hbm_only",
+            "model/llama3_1-8b/2048/B_all_kv_hbf"
+          ]
+        },
+        {
+          "model_id": "llama3_1-8b",
+          "context_tokens": 131072,
+          "B_over_A_tps": 0.99377950042691,
+          "output_tokens_per_request": 4,
+          "context_extrapolation": {
+            "native_max_tokens": 131072,
+            "requested_tokens": 131076,
+            "accuracy_claim": false
+          },
+          "paired_row_ids": [
+            "model/llama3_1-8b/131072/A_hbm_only",
+            "model/llama3_1-8b/131072/B_all_kv_hbf"
+          ]
+        },
+        {
+          "model_id": "llama3_1-8b",
+          "context_tokens": 1048576,
+          "B_over_A_tps": 0.998952016785096,
+          "output_tokens_per_request": 4,
+          "context_extrapolation": {
+            "native_max_tokens": 131072,
+            "requested_tokens": 1048580,
+            "accuracy_claim": false
+          },
+          "paired_row_ids": [
+            "model/llama3_1-8b/1048576/A_hbm_only",
+            "model/llama3_1-8b/1048576/B_all_kv_hbf"
+          ]
+        },
+        {
+          "model_id": "llama3_1-70b",
+          "context_tokens": 2048,
+          "B_over_A_tps": 0.9851582582954204,
+          "output_tokens_per_request": 32,
+          "context_extrapolation": null,
+          "paired_row_ids": [
+            "model/llama3_1-70b/2048/A_hbm_only",
+            "model/llama3_1-70b/2048/B_all_kv_hbf"
+          ]
+        },
+        {
+          "model_id": "llama3_1-70b",
+          "context_tokens": 131072,
+          "B_over_A_tps": 0.9978273332920835,
+          "output_tokens_per_request": 4,
+          "context_extrapolation": {
+            "native_max_tokens": 131072,
+            "requested_tokens": 131076,
+            "accuracy_claim": false
+          },
+          "paired_row_ids": [
+            "model/llama3_1-70b/131072/A_hbm_only",
+            "model/llama3_1-70b/131072/B_all_kv_hbf"
+          ]
+        },
+        {
+          "model_id": "llama3_1-70b",
+          "context_tokens": 1048576,
+          "B_over_A_tps": 0.9995558835729889,
+          "output_tokens_per_request": 4,
+          "context_extrapolation": {
+            "native_max_tokens": 131072,
+            "requested_tokens": 1048580,
+            "accuracy_claim": false
+          },
+          "paired_row_ids": [
+            "model/llama3_1-70b/1048576/A_hbm_only",
+            "model/llama3_1-70b/1048576/B_all_kv_hbf"
+          ]
+        }
+      ],
+      "row_scope": "full_operator_serving only",
+      "report_relative_files": {
+        "png": "figures/02_named_context.png",
+        "svg": "figures/02_named_context.svg"
+      }
+    },
+    {
+      "id": "03_slo_observations",
+      "title_zh": "SLO 原始点：到达间隔、实际 batch 与延迟",
+      "caption_zh": "到达间隔和实际 batch 均保留原始可行/不可行点，不拟合、不插值稳态边界。到达间隔轴只标注 0/10/100/1000 微秒主刻度，所有细化散点仍保留，细化值见报告和 manifest 原始记录。p99 是各有限请求/TBT 样本的经验分位数；请求样本量随 batch 改变。水平 SLO 线仅为配置阈值，不能解释为估计服务容量。",
+      "status": "complete",
+      "files": {
+        "png": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\03_slo_observations.png",
+        "svg": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\03_slo_observations.svg"
+      },
+      "relative_files": {
+        "png": "03_slo_observations.png",
+        "svg": "03_slo_observations.svg"
+      },
+      "source_row_ids": [
+        "slo/A_hbm_only/0.0",
+        "slo/A_hbm_only/10000.0",
+        "slo/A_hbm_only/100000.0",
+        "slo/A_hbm_only/1000000.0",
+        "slo-batch/A_hbm_only/1",
+        "slo-batch/A_hbm_only/4",
+        "slo-batch/A_hbm_only/16",
+        "slo-batch/A_hbm_only/64",
+        "slo/B_all_kv_hbf/0.0",
+        "slo/B_all_kv_hbf/10000.0",
+        "slo/B_all_kv_hbf/100000.0",
+        "slo/B_all_kv_hbf/1000000.0",
+        "slo-refine/B_all_kv_hbf/55000.0",
+        "slo-refine/B_all_kv_hbf/77500.0",
+        "slo-refine/B_all_kv_hbf/88750.0",
+        "slo-refine/B_all_kv_hbf/94375.0",
+        "slo-batch/B_all_kv_hbf/1",
+        "slo-batch/B_all_kv_hbf/4",
+        "slo-batch/B_all_kv_hbf/16",
+        "slo-batch/B_all_kv_hbf/64"
+      ],
+      "source_row_count": 20,
+      "observations": [
+        {
+          "id": "slo/A_hbm_only/0.0",
+          "axis": "arrival_interval_us",
+          "x": 0.0,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 32,
+          "request_count": 32,
+          "ttft_p99_ns": 1990476.0334025004,
+          "tbt_p99_ns": 33682.801562500186
+        },
+        {
+          "id": "slo/A_hbm_only/10000.0",
+          "axis": "arrival_interval_us",
+          "x": 10.0,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 32,
+          "request_count": 32,
+          "ttft_p99_ns": 1952542.8680360685,
+          "tbt_p99_ns": 33682.801562500186
+        },
+        {
+          "id": "slo/A_hbm_only/100000.0",
+          "axis": "arrival_interval_us",
+          "x": 100.0,
+          "requested_batch": 4,
+          "actual_batch": 3,
+          "qualified_requests": 32,
+          "request_count": 32,
+          "ttft_p99_ns": 292032.27103986376,
+          "tbt_p99_ns": 33434.75908854208
+        },
+        {
+          "id": "slo/A_hbm_only/1000000.0",
+          "axis": "arrival_interval_us",
+          "x": 1000.0,
+          "requested_batch": 4,
+          "actual_batch": 1,
+          "qualified_requests": 32,
+          "request_count": 32,
+          "ttft_p99_ns": 34752.89755159173,
+          "tbt_p99_ns": 32941.090807296336
+        },
+        {
+          "id": "slo/B_all_kv_hbf/0.0",
+          "axis": "arrival_interval_us",
+          "x": 0.0,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 24,
+          "request_count": 32,
+          "ttft_p99_ns": 6734905.662220837,
+          "tbt_p99_ns": 116545.23228250211
+        },
+        {
+          "id": "slo/B_all_kv_hbf/10000.0",
+          "axis": "arrival_interval_us",
+          "x": 10.0,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 21,
+          "request_count": 32,
+          "ttft_p99_ns": 7354351.932374391,
+          "tbt_p99_ns": 116545.23228250211
+        },
+        {
+          "id": "slo/B_all_kv_hbf/100000.0",
+          "axis": "arrival_interval_us",
+          "x": 100.0,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 32,
+          "request_count": 32,
+          "ttft_p99_ns": 4716451.932374391,
+          "tbt_p99_ns": 116545.23228250211
+        },
+        {
+          "id": "slo/B_all_kv_hbf/1000000.0",
+          "axis": "arrival_interval_us",
+          "x": 1000.0,
+          "requested_batch": 4,
+          "actual_batch": 1,
+          "qualified_requests": 32,
+          "request_count": 32,
+          "ttft_p99_ns": 114543.24177216487,
+          "tbt_p99_ns": 115726.7215272924
+        },
+        {
+          "id": "slo-refine/B_all_kv_hbf/55000.0",
+          "axis": "arrival_interval_us",
+          "x": 55.0,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 25,
+          "request_count": 32,
+          "ttft_p99_ns": 6035401.932374391,
+          "tbt_p99_ns": 116545.23228250211
+        },
+        {
+          "id": "slo-refine/B_all_kv_hbf/77500.0",
+          "axis": "arrival_interval_us",
+          "x": 77.5,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 29,
+          "request_count": 32,
+          "ttft_p99_ns": 5375926.932374391,
+          "tbt_p99_ns": 116545.23228250211
+        },
+        {
+          "id": "slo-refine/B_all_kv_hbf/88750.0",
+          "axis": "arrival_interval_us",
+          "x": 88.75,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 31,
+          "request_count": 32,
+          "ttft_p99_ns": 5046189.432374391,
+          "tbt_p99_ns": 116545.23228250211
+        },
+        {
+          "id": "slo-refine/B_all_kv_hbf/94375.0",
+          "axis": "arrival_interval_us",
+          "x": 94.375,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 32,
+          "request_count": 32,
+          "ttft_p99_ns": 4881320.682374391,
+          "tbt_p99_ns": 116545.23228250211
+        },
+        {
+          "id": "slo-batch/A_hbm_only/1",
+          "axis": "actual_batch",
+          "x": 1,
+          "requested_batch": 1,
+          "actual_batch": 1,
+          "qualified_requests": 1,
+          "request_count": 1,
+          "ttft_p99_ns": 132718.17946606333,
+          "tbt_p99_ns": 33331.14474394324
+        },
+        {
+          "id": "slo-batch/A_hbm_only/4",
+          "axis": "actual_batch",
+          "x": 4,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 4,
+          "request_count": 4,
+          "ttft_p99_ns": 457560.1878642534,
+          "tbt_p99_ns": 35318.108229166595
+        },
+        {
+          "id": "slo-batch/A_hbm_only/16",
+          "axis": "actual_batch",
+          "x": 16,
+          "requested_batch": 16,
+          "actual_batch": 16,
+          "qualified_requests": 16,
+          "request_count": 16,
+          "ttft_p99_ns": 1856787.4214570133,
+          "tbt_p99_ns": 43703.78791666636
+        },
+        {
+          "id": "slo-batch/A_hbm_only/64",
+          "axis": "actual_batch",
+          "x": 64,
+          "requested_batch": 64,
+          "actual_batch": 64,
+          "qualified_requests": 0,
+          "request_count": 64,
+          "ttft_p99_ns": 7728176.742390397,
+          "tbt_p99_ns": 80853.83672699891
+        },
+        {
+          "id": "slo-batch/B_all_kv_hbf/1",
+          "axis": "actual_batch",
+          "x": 1,
+          "requested_batch": 1,
+          "actual_batch": 1,
+          "qualified_requests": 1,
+          "request_count": 1,
+          "ttft_p99_ns": 237549.2830393967,
+          "tbt_p99_ns": 116033.92152729136
+        },
+        {
+          "id": "slo-batch/B_all_kv_hbf/4",
+          "axis": "actual_batch",
+          "x": 4,
+          "requested_batch": 4,
+          "actual_batch": 4,
+          "qualified_requests": 4,
+          "request_count": 4,
+          "ttft_p99_ns": 680232.9652509199,
+          "tbt_p99_ns": 124517.09276250005
+        },
+        {
+          "id": "slo-batch/B_all_kv_hbf/16",
+          "axis": "actual_batch",
+          "x": 16,
+          "requested_batch": 16,
+          "actual_batch": 16,
+          "qualified_requests": 16,
+          "request_count": 16,
+          "ttft_p99_ns": 2524526.5002836804,
+          "tbt_p99_ns": 155066.98365000868
+        },
+        {
+          "id": "slo-batch/B_all_kv_hbf/64",
+          "axis": "actual_batch",
+          "x": 64,
+          "requested_batch": 64,
+          "actual_batch": 64,
+          "qualified_requests": 0,
+          "request_count": 64,
+          "ttft_p99_ns": 10087869.016737062,
+          "tbt_p99_ns": 495831.98990033567
+        }
+      ],
+      "row_scope": "full_operator_serving only",
+      "report_relative_files": {
+        "png": "figures/03_slo_observations.png",
+        "svg": "figures/03_slo_observations.svg"
+      }
+    },
+    {
+      "id": "04_prefetch_overlap",
+      "title_zh": "预取对照：GPU 算子重叠与 TPS",
+      "caption_zh": "C 热冷 KV 策略，按同一场景 distance=0 对照比较 TPS。重叠取真实 GPU invocation 算子阶段与预取复制区间的交集，排除主机设置和批次空白包络；算子阶段仍可能包含内存等待，不等于 tensor-core 忙碌时间。decode 为全部算子重叠的子集，不能相加。",
+      "status": "complete",
+      "files": {
+        "png": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\04_prefetch_overlap.png",
+        "svg": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\04_prefetch_overlap.svg"
+      },
+      "relative_files": {
+        "png": "04_prefetch_overlap.png",
+        "svg": "04_prefetch_overlap.svg"
+      },
+      "source_row_ids": [
+        "prefetch/C_hot_cold/0",
+        "prefetch/C_hot_cold/16",
+        "prefetch/C_hot_cold/32",
+        "prefetch-stress/C_hot_cold/0",
+        "prefetch-stress/C_hot_cold/16",
+        "prefetch-stress/C_hot_cold/75000ns/0",
+        "prefetch-stress/C_hot_cold/75000ns/16"
+      ],
+      "source_row_count": 7,
+      "observations": [
+        {
+          "id": "prefetch/C_hot_cold/0",
+          "prefetch_distance_tokens": 0,
+          "hbf_page_read_ns": 4000.0,
+          "node_tps": 27380.196287702347,
+          "tps_relative_to_same_case_zero_distance": 1.0,
+          "operator_overlap_ns": 0.0,
+          "decode_operator_overlap_ns": 0.0,
+          "premature_consumer_overlap_ns": 0
+        },
+        {
+          "id": "prefetch/C_hot_cold/16",
+          "prefetch_distance_tokens": 16,
+          "hbf_page_read_ns": 4000.0,
+          "node_tps": 27383.400274386207,
+          "tps_relative_to_same_case_zero_distance": 1.0001170183971726,
+          "operator_overlap_ns": 0.0,
+          "decode_operator_overlap_ns": 0.0,
+          "premature_consumer_overlap_ns": 0.0
+        },
+        {
+          "id": "prefetch/C_hot_cold/32",
+          "prefetch_distance_tokens": 32,
+          "hbf_page_read_ns": 4000.0,
+          "node_tps": 27386.605011008596,
+          "tps_relative_to_same_case_zero_distance": 1.000234064184161,
+          "operator_overlap_ns": 0.0,
+          "decode_operator_overlap_ns": 0.0,
+          "premature_consumer_overlap_ns": 0.0
+        },
+        {
+          "id": "prefetch-stress/C_hot_cold/0",
+          "prefetch_distance_tokens": 0,
+          "hbf_page_read_ns": 25000.0,
+          "node_tps": 26128.252112582457,
+          "tps_relative_to_same_case_zero_distance": 1.0,
+          "operator_overlap_ns": 0.0,
+          "decode_operator_overlap_ns": 0.0,
+          "premature_consumer_overlap_ns": 0
+        },
+        {
+          "id": "prefetch-stress/C_hot_cold/16",
+          "prefetch_distance_tokens": 16,
+          "hbf_page_read_ns": 25000.0,
+          "node_tps": 26131.169781307122,
+          "tps_relative_to_same_case_zero_distance": 1.0001116671988655,
+          "operator_overlap_ns": 15288.107531666668,
+          "decode_operator_overlap_ns": 0.0,
+          "premature_consumer_overlap_ns": 0.0
+        },
+        {
+          "id": "prefetch-stress/C_hot_cold/75000ns/0",
+          "prefetch_distance_tokens": 0,
+          "hbf_page_read_ns": 75000.0,
+          "node_tps": 23563.00188815357,
+          "tps_relative_to_same_case_zero_distance": 1.0,
+          "operator_overlap_ns": 0.0,
+          "decode_operator_overlap_ns": 0.0,
+          "premature_consumer_overlap_ns": 0
+        },
+        {
+          "id": "prefetch-stress/C_hot_cold/75000ns/16",
+          "prefetch_distance_tokens": 16,
+          "hbf_page_read_ns": 75000.0,
+          "node_tps": 23565.374746097154,
+          "tps_relative_to_same_case_zero_distance": 1.000100702701415,
+          "operator_overlap_ns": 48397.285917083296,
+          "decode_operator_overlap_ns": 28229.86956715869,
+          "premature_consumer_overlap_ns": 0.0
+        }
+      ],
+      "row_scope": "full_operator_serving only",
+      "report_relative_files": {
+        "png": "figures/04_prefetch_overlap.png",
+        "svg": "figures/04_prefetch_overlap.svg"
+      }
+    },
+    {
+      "id": "05_multi_gpu",
+      "title_zh": "多GPU共享池：实际节点与每GPU吞吐",
+      "caption_zh": "小模型A/B/D/G与8B命名模型A/B固定共享池，显式1/2/4 GPU执行；红叉为机架网络变体。多GPU没有直接按单GPU吞吐倍乘。",
+      "status": "complete",
+      "files": {
+        "png": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\05_multi_gpu.png",
+        "svg": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\05_multi_gpu.svg"
+      },
+      "relative_files": {
+        "png": "05_multi_gpu.png",
+        "svg": "05_multi_gpu.svg"
+      },
+      "source_row_ids": [
+        "system/A_hbm_only/1gpu/local",
+        "system/A_hbm_only/2gpu/local",
+        "system/A_hbm_only/4gpu/local",
+        "system/B_all_kv_hbf/1gpu/local",
+        "system/B_all_kv_hbf/2gpu/local",
+        "system/B_all_kv_hbf/4gpu/local",
+        "system/B_all_kv_hbf/4gpu/rack",
+        "system/D_hbf_weights/1gpu/local",
+        "system/D_hbf_weights/2gpu/local",
+        "system/D_hbf_weights/4gpu/local",
+        "system/G_cxl_dram/1gpu/local",
+        "system/G_cxl_dram/2gpu/local",
+        "system/G_cxl_dram/4gpu/local",
+        "system/G_cxl_dram/4gpu/rack",
+        "system/A_hbm_only/1gpu/local/llama3_1-8b/2048",
+        "system/A_hbm_only/2gpu/local/llama3_1-8b/2048",
+        "system/A_hbm_only/4gpu/local/llama3_1-8b/2048",
+        "system/B_all_kv_hbf/1gpu/local/llama3_1-8b/2048",
+        "system/B_all_kv_hbf/2gpu/local/llama3_1-8b/2048",
+        "system/B_all_kv_hbf/4gpu/local/llama3_1-8b/2048"
+      ],
+      "source_row_count": 20,
+      "observations": [],
+      "row_scope": "full_operator_serving only",
+      "report_relative_files": {
+        "png": "figures/05_multi_gpu.png",
+        "svg": "figures/05_multi_gpu.svg"
+      }
+    },
+    {
+      "id": "06_internal_feedback",
+      "title_zh": "完整服务中的消融、真实多轮会话与动态热反馈",
+      "caption_zh": "分别对照理想介质、静态/启发式冷热策略和开关热磨损反馈。所有倍率只使用同一列对应基准；压力参数不代表真实设备。",
+      "status": "complete",
+      "files": {
+        "png": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\06_internal_feedback.png",
+        "svg": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\06_internal_feedback.svg"
+      },
+      "relative_files": {
+        "png": "06_internal_feedback.png",
+        "svg": "06_internal_feedback.svg"
+      },
+      "source_row_ids": [
+        "ablation/hbm/ideal",
+        "ablation/hbf/ideal",
+        "ablation/hbf/read_latency",
+        "ablation/hbf/write_restriction",
+        "ablation/hbf/finite_concurrency",
+        "ablation/hbf/read_write",
+        "ablation/hbf/read_write_finite",
+        "agent-static-cold",
+        "agent-heuristic",
+        "14-B_all_kv_hbf-thermal-0-wear-0",
+        "14-B_all_kv_hbf-thermal-1-wear-0",
+        "14-B_all_kv_hbf-thermal-0-wear-1",
+        "14-B_all_kv_hbf-thermal-1-wear-1"
+      ],
+      "source_row_count": 13,
+      "observations": [],
+      "row_scope": "full_operator_serving only",
+      "report_relative_files": {
+        "png": "figures/06_internal_feedback.png",
+        "svg": "figures/06_internal_feedback.svg"
+      }
+    },
+    {
+      "id": "07_sustained_slo",
+      "title_zh": "持续负载与session/GPU边界",
+      "caption_zh": "负载搜索使用三个轨迹长度核验。并发边界与到达率边界采用不同的明确工作负载，不混为统一生产容量。",
+      "status": "complete",
+      "files": {
+        "png": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\07_sustained_slo.png",
+        "svg": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\07_sustained_slo.svg"
+      },
+      "relative_files": {
+        "png": "07_sustained_slo.png",
+        "svg": "07_sustained_slo.svg"
+      },
+      "source_row_ids": [
+        "sustained/A_hbm_only/rps-2000/n-256",
+        "sustained/A_hbm_only/rps-8000/n-256",
+        "sustained/A_hbm_only/rps-32000/n-256",
+        "sustained/A_hbm_only/rps-128000/n-256",
+        "sustained/A_hbm_only/rps-80000/n-256",
+        "sustained/A_hbm_only/rps-104000/n-256",
+        "sustained/A_hbm_only/rps-92000/n-256",
+        "sustained/A_hbm_only/rps-86000/n-256",
+        "sustained/A_hbm_only/rps-80000/n-128",
+        "sustained/A_hbm_only/rps-80000/n-512",
+        "sustained/A_hbm_only/rps-72000/n-128",
+        "sustained/A_hbm_only/rps-72000/n-256",
+        "sustained/A_hbm_only/rps-72000/n-512",
+        "sustained/A_hbm_only/rps-64800/n-128",
+        "sustained/A_hbm_only/rps-64800/n-256",
+        "sustained/A_hbm_only/rps-64800/n-512",
+        "sustained/A_hbm_only/rps-58320/n-128",
+        "sustained/A_hbm_only/rps-58320/n-256",
+        "sustained/A_hbm_only/rps-58320/n-512",
+        "sustained/A_hbm_only/rps-86000/n-128",
+        "sustained/A_hbm_only/rps-86000/n-512",
+        "sustained/A_hbm_only/rps-94600/n-128",
+        "sustained/A_hbm_only/rps-94600/n-256",
+        "sustained/A_hbm_only/rps-94600/n-512",
+        "sustained-concurrency/A_hbm_only/16",
+        "sustained-concurrency/A_hbm_only/64",
+        "sustained-concurrency/A_hbm_only/40",
+        "sustained-concurrency/A_hbm_only/52",
+        "sustained-concurrency/A_hbm_only/46",
+        "sustained-concurrency/A_hbm_only/43",
+        "sustained-concurrency/A_hbm_only/41",
+        "sustained-concurrency/A_hbm_only/42",
+        "sustained/B_all_kv_hbf/rps-2000/n-256",
+        "sustained/B_all_kv_hbf/rps-8000/n-256",
+        "sustained/B_all_kv_hbf/rps-32000/n-256",
+        "sustained/B_all_kv_hbf/rps-128000/n-256",
+        "sustained/B_all_kv_hbf/rps-20000/n-256",
+        "sustained/B_all_kv_hbf/rps-26000/n-256",
+        "sustained/B_all_kv_hbf/rps-23000/n-256",
+        "sustained/B_all_kv_hbf/rps-24500/n-256",
+        "sustained/B_all_kv_hbf/rps-23000/n-128",
+        "sustained/B_all_kv_hbf/rps-23000/n-512",
+        "sustained/B_all_kv_hbf/rps-20700/n-128",
+        "sustained/B_all_kv_hbf/rps-20700/n-256",
+        "sustained/B_all_kv_hbf/rps-20700/n-512",
+        "sustained/B_all_kv_hbf/rps-18630/n-128",
+        "sustained/B_all_kv_hbf/rps-18630/n-256",
+        "sustained/B_all_kv_hbf/rps-18630/n-512",
+        "sustained/B_all_kv_hbf/rps-24500/n-128",
+        "sustained/B_all_kv_hbf/rps-24500/n-512",
+        "sustained-concurrency/B_all_kv_hbf/16",
+        "sustained-concurrency/B_all_kv_hbf/64",
+        "sustained-concurrency/B_all_kv_hbf/40",
+        "sustained-concurrency/B_all_kv_hbf/28",
+        "sustained-concurrency/B_all_kv_hbf/34",
+        "sustained-concurrency/B_all_kv_hbf/31",
+        "sustained-concurrency/B_all_kv_hbf/32",
+        "sustained/A_hbm_only/rps-116000/n-256",
+        "sustained/A_hbm_only/rps-110000/n-256",
+        "sustained/A_hbm_only/rps-110000/n-128",
+        "sustained/A_hbm_only/rps-110000/n-512",
+        "sustained/A_hbm_only/rps-99000/n-128",
+        "sustained/A_hbm_only/rps-99000/n-256",
+        "sustained/A_hbm_only/rps-99000/n-512",
+        "sustained/A_hbm_only/rps-116000/n-128",
+        "sustained/A_hbm_only/rps-116000/n-512",
+        "sustained/A_hbm_only/rps-127600/n-128",
+        "sustained/A_hbm_only/rps-127600/n-256",
+        "sustained/A_hbm_only/rps-127600/n-512",
+        "sustained/B_all_kv_hbf/rps-80000/n-256",
+        "sustained/B_all_kv_hbf/rps-56000/n-256",
+        "sustained/B_all_kv_hbf/rps-44000/n-256",
+        "sustained/B_all_kv_hbf/rps-38000/n-256",
+        "sustained/B_all_kv_hbf/rps-32000/n-128",
+        "sustained/B_all_kv_hbf/rps-32000/n-512",
+        "sustained/B_all_kv_hbf/rps-38000/n-128",
+        "sustained/B_all_kv_hbf/rps-38000/n-512"
+      ],
+      "source_row_count": 77,
+      "observations": [],
+      "row_scope": "full_operator_serving only",
+      "report_relative_files": {
+        "png": "figures/07_sustained_slo.png",
+        "svg": "figures/07_sustained_slo.svg"
+      }
+    },
+    {
+      "id": "08_effective_bandwidth",
+      "title_zh": "端口与有效带宽：含链路瓶颈负对照",
+      "caption_zh": "物理内存读取与真实链路占用后计算端到端有效带宽；计入启动、延迟与有限缓冲反压。",
+      "status": "complete",
+      "files": {
+        "png": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\08_effective_bandwidth.png",
+        "svg": "F:\\codex_project\\37_LLMsim\\heterollm-sim-4.0.0\\artifacts\\hbf_hbm\\figures\\08_effective_bandwidth.svg"
+      },
+      "relative_files": {
+        "png": "08_effective_bandwidth.png",
+        "svg": "08_effective_bandwidth.svg"
+      },
+      "source_row_ids": [
+        "read-port400-link400-page16384-lat4000",
+        "read-port1600-link1600-page16384-lat4000",
+        "read-port3000-link3000-page16384-lat4000",
+        "read-port3000-link1600-page16384-lat4000"
+      ],
+      "source_row_count": 4,
+      "observations": [],
+      "row_scope": "physical sequential-read and link microbenchmark; no LLM TPS",
+      "report_relative_files": {
+        "png": "figures/08_effective_bandwidth.png",
+        "svg": "figures/08_effective_bandwidth.svg"
+      }
+    }
+  ]
+}

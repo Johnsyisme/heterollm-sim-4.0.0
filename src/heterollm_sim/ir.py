@@ -2716,7 +2716,15 @@ class PlacementSpec:
 
 @dataclass(frozen=True)
 class RequestSpec:
-    """One request in a trace-driven workload."""
+    """One request in a trace-driven workload.
+
+    Opt-in multi-turn serving uses workload.metadata.agent_lifecycle and
+    metadata.agent_turn: session_id, turn_index, parent_request_id, think_time_ns,
+    optional predicted_think_time_ns and ttl_ns. A dependent turn's prompt_tokens
+    includes its parent's complete prompt/output history. Its actual arrival is
+    parent completion plus think time; arrival_ns is only used for root turns.
+    The runtime validates a single-child chain and hands over exclusive KV pages.
+    """
 
     request_id: str
     arrival_ns: float

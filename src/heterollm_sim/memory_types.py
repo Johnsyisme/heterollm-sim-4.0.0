@@ -325,6 +325,64 @@ class DramConfig:
 
 
 @dataclass(frozen=True)
+class NandThermalConfig:
+    """Explicit, uncalibrated independent-plane RC feedback assumptions."""
+
+    ambient_c: float = 35.0
+    initial_c: float = 35.0
+    resistance_k_per_w: float = 1.0
+    capacitance_j_per_k: float = 0.001
+    active_power_w: float = 30.0
+    idle_power_w: float = 1.0
+    throttle_threshold_c: float = 60.0
+    hysteresis_c: float = 5.0
+    throttled_service_rate: float = 0.5
+    throttled_power_fraction: float = 0.6
+    assumption: str = ""
+
+    def __post_init__(self):
+        for name in ("ambient_c", "initial_c", "throttle_threshold_c"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= -273.15:
+                raise ValueError(name + " must be finite and above absolute zero")
+        for name in ("resistance_k_per_w", "capacitance_j_per_k", "hysteresis_c"):
+            if _nonnegative(name, getattr(self, name)) <= 0:
+                raise ValueError(name + " must be positive")
+        for name in ("active_power_w", "idle_power_w"):
+            _nonnegative(name, getattr(self, name))
+        for name in ("throttled_service_rate", "throttled_power_fraction"):
+            if not 0 < _nonnegative(name, getattr(self, name)) <= 1:
+                raise ValueError(name + " must be in (0, 1]")
+        if self.idle_power_w > self.active_power_w:
+            raise ValueError("idle_power_w must not exceed active_power_w")
+        if self.throttle_threshold_c-self.hysteresis_c <= self.ambient_c:
+            raise ValueError("thermal release threshold must exceed ambient temperature")
+        if not isinstance(self.assumption, str) or not self.assumption.strip():
+            raise ValueError("dynamic NAND thermal feedback requires an explicit assumption label")
+
+
+@dataclass(frozen=True)
+class NandWearConfig:
+    """Explicit erase/program accounting without FTL or implicit erasures."""
+
+    rated_pe_cycles: int = 3000
+    initial_pe_cycles: int = 0
+    program_latency_growth_at_rated_pe: float = 0.0
+    max_program_latency_scale: float = 2.0
+    assumption: str = ""
+
+    def __post_init__(self):
+        _positive_int("rated_pe_cycles", self.rated_pe_cycles)
+        if isinstance(self.initial_pe_cycles, bool) or not isinstance(self.initial_pe_cycles, int) or self.initial_pe_cycles < 0:
+            raise ValueError("initial_pe_cycles must be a non-negative integer")
+        _nonnegative("program_latency_growth_at_rated_pe", self.program_latency_growth_at_rated_pe)
+        if _nonnegative("max_program_latency_scale", self.max_program_latency_scale) < 1:
+            raise ValueError("max_program_latency_scale must be at least one")
+        if not isinstance(self.assumption, str) or not self.assumption.strip():
+            raise ValueError("NAND wear feedback requires an explicit assumption label")
+
+
+@dataclass(frozen=True)
 class NandConfig:
     """Parameterized page NAND organization for SSD or HBF."""
 
@@ -357,6 +415,9 @@ class NandConfig:
     # behavior; positive values model finite admission buffering without
     # adding an FTL or garbage-collection state machine.
     write_buffer_bytes: int = field(default=0, kw_only=True)
+    dynamic_thermal: Optional[NandThermalConfig | Mapping[str, Any]] = field(default=None, kw_only=True)
+    wear_model: Optional[NandWearConfig | Mapping[str, Any]] = field(default=None, kw_only=True)
+    detailed_observability: bool = field(default=False, kw_only=True)
     partial_page_policy: str = "read_modify_write"
     capacity_bytes: Optional[int] = None
     max_outstanding_requests: int = 32
@@ -375,6 +436,14 @@ class NandConfig:
         if kind not in {MemoryKind.SSD, MemoryKind.HBF}:
             raise ValueError("NandConfig.kind must be SSD or HBF")
         object.__setattr__(self, "kind", kind)
+        for name, cls in (("dynamic_thermal", NandThermalConfig), ("wear_model", NandWearConfig)):
+            value = getattr(self, name)
+            if isinstance(value, Mapping):
+                object.__setattr__(self, name, cls(**dict(value)))
+            elif value is not None and not isinstance(value, cls):
+                raise ValueError(name + " must be its typed config, a mapping or None")
+        if not isinstance(self.detailed_observability, bool):
+            raise ValueError("detailed_observability must be a boolean")
         for name in ("channels", "targets_per_channel", "dies_per_target", "luns_per_die", "planes_per_lun", "blocks_per_plane", "pages_per_block", "page_bytes", "host_granularity_bytes"):
             _positive_int(name, getattr(self, name))
         if self.parallel_units is not None:
@@ -761,6 +830,7 @@ def make_hbf_config(**kwargs: Any) -> NandConfig:
 
 __all__ = [
     "AccessRequest", "AddressMapping", "BatchResult", "DramConfig", "MemoryKind", "NandConfig",
+    "NandThermalConfig", "NandWearConfig",
     "Operation", "Segment", "StageTiming", "TransactionResult",
     "make_ddr_config", "make_lpddr_config", "make_hbm_config", "make_gddr_config",
     "parse_physical_memory_config",

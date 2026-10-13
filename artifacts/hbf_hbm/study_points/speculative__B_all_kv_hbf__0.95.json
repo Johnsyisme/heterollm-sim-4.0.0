@@ -1,0 +1,2140 @@
+{
+  "id": "speculative/B_all_kv_hbf/0.95",
+  "mode": "full_operator_serving",
+  "model": "synthetic-small-dense-explicit-mtp",
+  "placement": "B_all_kv_hbf",
+  "resolved_placement": {
+    "tensor_to_component": {
+      "embedding_weights": "hbm0",
+      "dense0.attention_weights": "hbm0",
+      "dense0.mlp_weights": "hbm0",
+      "lm_head_weights": "hbm0",
+      "mtp.prediction_layer.000.weights": "hbm0",
+      "mtp.aux_head.weights": "hbm0",
+      "kv_cache": "hbf0"
+    },
+    "op_to_component": {
+      "embedding": "gpu0",
+      "dense0.attention": "gpu0",
+      "dense0.mlp": "gpu0",
+      "dense0.input_norm.reduce": "gpu0",
+      "dense0.input_norm.apply": "gpu0",
+      "dense0.post_attention_norm.reduce": "gpu0",
+      "dense0.post_attention_norm.apply": "gpu0",
+      "dense0.attention.rope": "gpu0",
+      "dense0.attention.qk": "gpu0",
+      "dense0.attention.pv": "gpu0",
+      "dense0.attention.softmax.reduce": "gpu0",
+      "dense0.attention.softmax.normalize": "gpu0",
+      "dense0.attention.residual": "gpu0",
+      "dense0.mlp.activation": "gpu0",
+      "dense0.mlp.residual": "gpu0",
+      "lm_head": "gpu0",
+      "mtp.prediction_layer.000": "gpu0",
+      "mtp.aux_head": "gpu0"
+    },
+    "kv_cache_component": "hbf0",
+    "kv_policy": {
+      "layout_mode": "legacy_single",
+      "allocation_policy": "eager",
+      "offload_component": null,
+      "prefetch_distance": 0
+    }
+  },
+  "prompt_tokens": 128,
+  "output_tokens_per_request": 32,
+  "requested_concurrency": 4,
+  "request_count": 4,
+  "completed_requests": 4,
+  "rejected_requests": 0,
+  "unfinished_requests": 0,
+  "rejection_reasons": [],
+  "rejection_rate": 0.0,
+  "node_tps": 93414.32278163687,
+  "per_gpu_tps": 93414.32278163687,
+  "gpu_count": 1,
+  "visible_output_tokens": 128,
+  "runtime_tps": 93867.60619981392,
+  "runtime_goodput_tps": 93867.60619981392,
+  "goodput_tps": 93414.32278163687,
+  "qualified_requests": 4,
+  "requests_per_s": 2919.1975869261523,
+  "makespan_ns": 1370239.5541549854,
+  "measurement_window": "earliest request arrival through simulation end, including initialization wait",
+  "measurement_windows": {
+    "primary": "request_window",
+    "request_window": {
+      "start_ns": 0.0,
+      "end_ns": 1370239.5541549854,
+      "duration_ns": 1370239.5541549854
+    },
+    "runtime_window": {
+      "start_ns": 6616.839333333333,
+      "end_ns": 1370239.5541549854,
+      "duration_ns": 1363622.714821652
+    },
+    "initialization_ns": 6616.839333333333,
+    "initialization_wait_in_request_window_ns": 6616.839333333333,
+    "semantics": "primary rates span earliest request arrival through simulation end; TTFT/E2E start at each request arrival; runtime rates exclude initialization"
+  },
+  "ttft_ns": {
+    "count": 4,
+    "p50": 142579.1679166516,
+    "p95": 142579.1679166516,
+    "p99": 142579.1679166516,
+    "p999": 142579.1679166516
+  },
+  "tpot_ns": {
+    "count": 4,
+    "p50": 39601.947943172054,
+    "p95": 39601.947943172054,
+    "p99": 39601.947943172054,
+    "p999": 39601.947943172054
+  },
+  "tbt_ns": {
+    "count": 124,
+    "p50": 0.0,
+    "p95": 178169.10878583326,
+    "p99": 178169.10878583358,
+    "p999": 178169.10878583358
+  },
+  "e2e_ns": {
+    "count": 4,
+    "p50": 1370239.5541549854,
+    "p95": 1370239.5541549854,
+    "p99": 1370239.5541549854,
+    "p999": 1370239.5541549854
+  },
+  "phase_service_rates": {
+    "prefill": {
+      "scheduled_tokens": 512,
+      "useful_tokens": 512,
+      "batch_occupied_ns": 135962.32858331827,
+      "tokens_per_batch_busy_second": 3765748.9786683396,
+      "wall_clock_tokens_per_second": 373657.2911265475,
+      "wall_clock_denominator_ns": 1370239.5541549854,
+      "semantics": "wall rate uses completed requests' input tokens once for prefill and committed non-prefill output tokens for decode; both use the primary request window. Busy rate includes scheduled/recomputed work; mixed batches overlap and busy rates are not additive"
+    },
+    "decode": {
+      "scheduled_tokens": 0,
+      "useful_tokens": 124,
+      "batch_occupied_ns": 0,
+      "tokens_per_batch_busy_second": null,
+      "wall_clock_tokens_per_second": 90495.12519471072,
+      "wall_clock_denominator_ns": 1370239.5541549854,
+      "semantics": "wall rate uses completed requests' input tokens once for prefill and committed non-prefill output tokens for decode; both use the primary request window. Busy rate includes scheduled/recomputed work; mixed batches overlap and busy rates are not additive"
+    }
+  },
+  "speculative": {
+    "drafted_tokens": 108,
+    "accepted_draft_tokens": 96,
+    "rejected_draft_tokens": 12,
+    "acceptance_rate": 0.8888888888888888,
+    "rounds": [
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 320748.2767024849,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 6,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 320748.2767024849,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 6,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 320748.2767024849,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 6,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 320748.2767024849,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 6,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 498917.38548831776,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 10,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 498917.38548831776,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 10,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 498917.38548831776,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 10,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 498917.38548831776,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 10,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 677086.4942741507,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 15,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 677086.4942741507,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 15,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 677086.4942741507,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 15,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 677086.4942741507,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 15,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 855255.6030599839,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 19,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 855255.6030599839,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 19,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 855255.6030599839,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 19,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 855255.6030599839,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 19,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1033424.7118458172,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 24,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1033424.7118458172,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 24,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1033424.7118458172,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 24,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1033424.7118458172,
+        "proposed": 5,
+        "accepted": 5,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 5,
+        "accepted_draft_tokens": 4,
+        "rejected_draft_tokens": 0,
+        "committed": 24,
+        "visible_tokens": 5,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 5,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1211593.8206316507,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 28,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1211593.8206316507,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 28,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1211593.8206316507,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 28,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1211593.8206316507,
+        "proposed": 5,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 1,
+        "committed": 28,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 1
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1370239.5541549854,
+        "proposed": 4,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 3,
+        "verifier_tokens": 4,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 0,
+        "committed": 32,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 4,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1370239.5541549854,
+        "proposed": 4,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 3,
+        "verifier_tokens": 4,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 0,
+        "committed": 32,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 4,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1370239.5541549854,
+        "proposed": 4,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 3,
+        "verifier_tokens": 4,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 0,
+        "committed": 32,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 4,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1370239.5541549854,
+        "proposed": 4,
+        "accepted": 4,
+        "main_tokens": 1,
+        "draft_tokens": 3,
+        "verifier_tokens": 4,
+        "committed_tokens": 4,
+        "accepted_draft_tokens": 3,
+        "rejected_draft_tokens": 0,
+        "committed": 32,
+        "visible_tokens": 4,
+        "kv_materialized_tokens": 4,
+        "kv_persistent_append_tokens": 4,
+        "kv_temporary_tokens": 0
+      }
+    ],
+    "status": "observed"
+  },
+  "memory_metrics": {
+    "scope": "operator NAND traffic (HBF/SSD); separately reported KV migration traffic is not implicitly included",
+    "measurement_duration_ns": 1370239.5541549854,
+    "directional_bandwidth": {
+      "read": {
+        "logical_bytes": 5086208,
+        "media_bytes": 9437184,
+        "effective_logical_gb_s": 3.7119115300511227,
+        "media_gb_s": 6.887251190044523
+      },
+      "write": {
+        "logical_bytes": 165888,
+        "media_bytes": 1048576,
+        "effective_logical_gb_s": 0.12106496232500139,
+        "media_gb_s": 0.7652501322271693
+      }
+    },
+    "page_access_count": 584,
+    "page_access_payload_utilization": 0.548908390410959,
+    "host_admission_peak_depths": {
+      "host_outstanding_at_admission_peak": 32,
+      "host_read_outstanding_at_admission_peak": 32,
+      "host_write_outstanding_at_admission_peak": 8
+    },
+    "host_admission_scope": "max per-device outstanding host requests sampled at admission, including the new request; buffered writes end at host acknowledgement; not NAND page/program queues",
+    "pages_read": 576,
+    "pages_programmed": 64,
+    "logical_to_media_byte_ratio": 0.50087890625,
+    "write_amplification": 6.320987654320987,
+    "channel_busy_fraction": {
+      "hbf0.memory:nand:channel:0": 2.690332496111144e-07,
+      "hbf0.memory:nand:channel:1": 3.288184161913622e-07,
+      "hbf0.memory:nand:channel:10": 2.690332496111144e-07,
+      "hbf0.memory:nand:channel:11": 3.288184161913622e-07,
+      "hbf0.memory:nand:channel:12": 2.690332496111144e-07,
+      "hbf0.memory:nand:channel:13": 3.288184161913622e-07,
+      "hbf0.memory:nand:channel:14": 2.690332496111144e-07,
+      "hbf0.memory:nand:channel:15": 3.288184161913622e-07,
+      "hbf0.memory:nand:channel:2": 2.690332496111144e-07,
+      "hbf0.memory:nand:channel:3": 3.288184161913622e-07,
+      "hbf0.memory:nand:channel:4": 2.690332496111144e-07,
+      "hbf0.memory:nand:channel:5": 3.288184161913622e-07,
+      "hbf0.memory:nand:channel:6": 2.690332496111144e-07,
+      "hbf0.memory:nand:channel:7": 3.288184161913622e-07,
+      "hbf0.memory:nand:channel:8": 2.690332496111144e-07,
+      "hbf0.memory:nand:channel:9": 3.288184161913622e-07
+    },
+    "active_service_lane_imbalance": {
+      "coefficient_of_variation": 0.5157657657657657,
+      "max_over_mean": 1.5157657657657657,
+      "observed_lanes": 16,
+      "semantics": "busy-time imbalance among observed effective service lanes; not a physical-plane measurement and not all configured idle lanes"
+    },
+    "physical_plane_imbalance": null,
+    "read_queue_depth": null,
+    "program_queue_depth": null,
+    "unavailable": {
+      "physical_plane_imbalance": "effective-lane mapping is not a calibrated plane geometry",
+      "read_queue_depth": "page-level queue occupancy timeline not recorded",
+      "program_queue_depth": "page-level queue occupancy timeline not recorded"
+    },
+    "semantics": "GB/s equals bytes/ns; logical/media ratios include RMW and merging and must not be called physical page fill fractions"
+  },
+  "migration_ledger": {
+    "events": [],
+    "bytes_by_kind": {},
+    "scope": "physical KV pool transfers, separate from operator NAND traffic; explicit endpoints and completion times"
+  },
+  "prefetch": {
+    "submitted_bytes": 0,
+    "completed_bytes": 0,
+    "useful_bytes": 0,
+    "unused_bytes": 0,
+    "inflight_bytes": 0,
+    "useful_byte_fraction": null,
+    "semantics": "fraction of completed lookahead bytes consumed by resumed requests; not learned-router prediction accuracy"
+  },
+  "prefetch_overlap": {
+    "copies": [],
+    "operator_overlap_ns": 0.0,
+    "decode_operator_overlap_ns": 0.0,
+    "premature_consumer_overlap_ns": 0,
+    "scope": "intersection with realized GPU operator stages of other requests; host setup and GPU frontend/controller stages excluded; operator envelopes may include memory stalls, not tensor-core busy time"
+  },
+  "energy": {
+    "analytical_dynamic_joules": 0.00039594571959999995,
+    "analytical_dynamic_joules_per_token": 3.0933259343749996e-06,
+    "analytical_average_dynamic_watts": 0.2889609473025147,
+    "scope": "sum of configured batch task energies; excludes unpriced components, initialization, idle/board/cooling; not calibrated node energy"
+  },
+  "request_metrics": [
+    {
+      "id": "study-0",
+      "arrival_ns": 0.0,
+      "finish_ns": 1370239.5541549854,
+      "first_token_ns": 142579.1679166516,
+      "status": "finished",
+      "output_tokens": 32,
+      "ttft_ns": 142579.1679166516,
+      "tpot_ns": 39601.947943172054,
+      "qualified": true
+    },
+    {
+      "id": "study-1",
+      "arrival_ns": 0.0,
+      "finish_ns": 1370239.5541549854,
+      "first_token_ns": 142579.1679166516,
+      "status": "finished",
+      "output_tokens": 32,
+      "ttft_ns": 142579.1679166516,
+      "tpot_ns": 39601.947943172054,
+      "qualified": true
+    },
+    {
+      "id": "study-2",
+      "arrival_ns": 0.0,
+      "finish_ns": 1370239.5541549854,
+      "first_token_ns": 142579.1679166516,
+      "status": "finished",
+      "output_tokens": 32,
+      "ttft_ns": 142579.1679166516,
+      "tpot_ns": 39601.947943172054,
+      "qualified": true
+    },
+    {
+      "id": "study-3",
+      "arrival_ns": 0.0,
+      "finish_ns": 1370239.5541549854,
+      "first_token_ns": 142579.1679166516,
+      "status": "finished",
+      "output_tokens": 32,
+      "ttft_ns": 142579.1679166516,
+      "tpot_ns": 39601.947943172054,
+      "qualified": true
+    }
+  ],
+  "quantile_scope": "empirical interpolation over reported sample count; no population tail-latency guarantee",
+  "address_assumptions": {
+    "embedding": "No token-ID trace is supplied. Analytical remote embedding row traffic uses a bounded cyclic address model when reads exceed the resident table; repeated traffic is retained and the allocation is not enlarged. This is not a measured token locality trace."
+  },
+  "max_observed_batch_requests": 4,
+  "kv": {
+    "tokens_per_page": 16,
+    "bytes_per_page": 4096,
+    "capacity_pages": 268435456,
+    "capacity_bytes": 1099511627776,
+    "peak_used_pages": 40,
+    "peak_used_bytes": 163840,
+    "allocation_events": 8,
+    "release_events": 8,
+    "swap_events": 0,
+    "swap_bytes": 0,
+    "recompute_events": 0,
+    "recompute_tokens": 0,
+    "offload_peak_bytes": 0,
+    "rejected_requests": 0,
+    "swap_in_bytes": 0,
+    "swap_transfer_time_ns": 0.0,
+    "swap_transfer_energy_pj": 0.0,
+    "logical_prefill_read_bytes": 0,
+    "logical_prefill_write_bytes": 131072,
+    "logical_decode_read_bytes": 4920320,
+    "logical_decode_write_bytes": 31744,
+    "logical_decode_append_bytes": 31744,
+    "physical_prefill_read_bytes": 0,
+    "physical_prefill_write_bytes": 131072,
+    "physical_decode_read_bytes": 4920320,
+    "physical_decode_write_bytes": 31744,
+    "physical_decode_append_bytes": 31744,
+    "prefetch_events": 0,
+    "prefetch_bytes": 0,
+    "prefetch_transfer_time_ns": 0.0,
+    "prefetch_distance_tokens": 0,
+    "prefetch_lookahead_pages": 0,
+    "prefetch_completed_bytes": 0,
+    "prefetch_useful_bytes": 0,
+    "prefetch_unused_bytes": 0,
+    "prefetch_inflight_bytes": 0,
+    "prefetch_reclaim_bytes": 0,
+    "prefetch_execution_mode": "disabled",
+    "prefetch_cancelled_bytes": null,
+    "prefetch_metric_semantics": "useful bytes are completed copies exposed to a successful consumer cohort; unused bytes include reclaimed copies and completed copies not consumed; transfer time sums per-page latency and is not GPU stall time; in-flight cancellation is not modeled",
+    "offload_events": 0,
+    "offload_bytes": 0,
+    "migration_events": 0,
+    "migration_bytes": 0,
+    "swap_out_bytes": 0,
+    "physical_swap_bytes": 0,
+    "logical_bytes_per_token": 256,
+    "logical_swap_out_bytes": 0,
+    "logical_swap_in_bytes": 0,
+    "logical_migration_bytes": 0,
+    "physical_offload_bytes": 0,
+    "max_live_tokens_per_request": 159,
+    "peak_semantics": "realized_persistent_plus_mtp_temporary_reservation",
+    "prefetch_distance_modeled": false,
+    "traffic_semantics": "persistent_kv_traffic_separate_from_mtp_temporary_verification_and_resource_accounting",
+    "persistent_peak_used_pages": 40,
+    "persistent_peak_used_bytes": 163840,
+    "mtp_materialized_tokens": 136,
+    "mtp_temporary_tokens": 12,
+    "mtp_temporary_peak_pages": 4,
+    "mtp_temporary_peak_bytes": 16384,
+    "mtp_temporary_allocation_events": 4,
+    "mtp_temporary_release_events": 4,
+    "logical_mtp_materialized_write_bytes": 34816,
+    "physical_mtp_materialized_write_bytes": 34816,
+    "logical_mtp_temporary_write_bytes": 3072,
+    "physical_mtp_temporary_write_bytes": 3072,
+    "logical_mtp_verification_read_bytes": 102400,
+    "physical_mtp_verification_read_bytes": 102400,
+    "layout_mode": "legacy_single",
+    "split_mode": "None",
+    "kv_unified": true,
+    "logical_context_tokens": 262144,
+    "n_seq_max": 4,
+    "capacity_bytes_by_component": {
+      "hbf0": 1099511627776
+    },
+    "used_bytes_by_component": {
+      "hbf0": 0
+    },
+    "peak_bytes_by_component": {
+      "hbf0": 163840
+    },
+    "layer_owner": {},
+    "layer_bytes_per_token": {},
+    "layer_bytes_per_page": {},
+    "layer_component_shards": {},
+    "component_owner_layers": {
+      "hbf0": []
+    },
+    "bottleneck_component": null,
+    "effective_physical_capacity_bytes": 1099511627776,
+    "batch_retry_count": 0,
+    "batch_reduced": false,
+    "idle_slots_cleared": 0,
+    "context_shift_count": 0,
+    "capacity_failure_count": 0,
+    "capacity_failure_reason": null,
+    "requested_allocation_policy": "eager",
+    "effective_allocation_policy": "eager",
+    "allocation_policy_reason": null,
+    "kv_layout_mode": "legacy_single",
+    "kv_capacity_bytes_by_component": {
+      "hbf0": 1099511627776
+    },
+    "kv_used_bytes_by_component": {
+      "hbf0": 0
+    },
+    "kv_peak_bytes_by_component": {
+      "hbf0": 163840
+    },
+    "kv_layer_owner": {},
+    "kv_layer_components": {},
+    "kv_layer_bytes_per_token": {},
+    "kv_layer_bytes_per_page": {},
+    "kv_layer_component_shards": {},
+    "kv_component_owner_layers": {
+      "hbf0": []
+    },
+    "kv_bottleneck_component": null,
+    "effective_physical_capacity": 1099511627776,
+    "kv_idle_slots_cleared": 0,
+    "prefetch_distance_semantics": {
+      "value": 0,
+      "unit": "tokens",
+      "lookahead_pages": 0,
+      "modeled": false,
+      "mode": "disabled",
+      "contract": "fixed_token_lookahead",
+      "description": "prefetch disabled when prefetch_distance=0"
+    },
+    "modeling_limits": [
+      "offload_ratio bounds pressure-triggered migratable capacity; it is not a per-token mirror ratio",
+      "prefetch disabled when prefetch_distance=0",
+      "logical KV traffic counters are not added to resource-accounted bytes when attention kernels already include local memory traffic",
+      "KV read means external persisted-cache access only; prefill/recompute historical-prompt attention remains modeled as causal compute and ordinary attention/activation traffic"
+    ]
+  },
+  "resources": {
+    "dram_traffic": {
+      "schema_version": "heterollm.dram-traffic/v1",
+      "task_count": 24,
+      "logical_read_bytes": 11328,
+      "logical_write_bytes": 6176,
+      "physical_read_bytes": 11904,
+      "physical_write_bytes": 6656,
+      "physical_bytes": 18560,
+      "logical_bytes": 17504,
+      "burst_count": 290,
+      "row_hits": 214,
+      "row_misses": 76,
+      "row_conflicts": 0,
+      "queue_wait_ns": 0.0,
+      "service_ns": 1149.0,
+      "read_write_switches": null,
+      "refresh_wait_ns": null,
+      "turnaround_wait_ns": null,
+      "metric_availability": {
+        "read_write_switches": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 8
+        },
+        "refresh_wait_ns": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 8
+        },
+        "turnaround_wait_ns": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 8
+        },
+        "organization_profiles": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 8
+        }
+      },
+      "resource_totals": {
+        "cpu0.memory:dram:bank:0:0:0:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:2:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:2:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:2:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:2:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 55.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 48.75,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 45.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 45.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:4": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 43.75,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:5": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 43.75,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:6": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 41.25,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:7": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 40.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:data:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 2816,
+          "service_ns": 55.0,
+          "energy_pj": 33792.0
+        },
+        "cpu0.memory:dram:data:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 2496,
+          "service_ns": 48.75,
+          "energy_pj": 29952.0
+        },
+        "cpu0.memory:dram:data:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 2304,
+          "service_ns": 45.0,
+          "energy_pj": 27648.0
+        },
+        "cpu0.memory:dram:data:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 2304,
+          "service_ns": 45.0,
+          "energy_pj": 27648.0
+        },
+        "cpu0.memory:dram:data:4": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 2240,
+          "service_ns": 43.75,
+          "energy_pj": 26880.0
+        },
+        "cpu0.memory:dram:data:5": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 2240,
+          "service_ns": 43.75,
+          "energy_pj": 26880.0
+        },
+        "cpu0.memory:dram:data:6": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 2112,
+          "service_ns": 41.25,
+          "energy_pj": 25344.0
+        },
+        "cpu0.memory:dram:data:7": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 2048,
+          "service_ns": 40.0,
+          "energy_pj": 24576.0
+        }
+      },
+      "owner_ids": [
+        "cpu0.memory"
+      ],
+      "organization_profiles": [],
+      "organization_profile_limit": 32,
+      "accounting_semantics": "resolved analytical burst bytes and controller waits; null means not fully recorded; empty organization_profiles is not evidence of complete geometry reporting; no device accuracy claim"
+    },
+    "storage_traffic": {
+      "schema_version": "heterollm.nand-traffic/v1",
+      "task_count": 24,
+      "logical_bytes": 5252096,
+      "host_transfer_bytes": 5931008,
+      "physical_bytes": 10485760,
+      "physical_read_bytes": 9437184,
+      "physical_write_bytes": 1048576,
+      "queue_wait_ns": 721051.4431999977,
+      "erase_operations": 0,
+      "service_ns": 1503895.6313599995,
+      "energy_pj": 0.0,
+      "logical_read_bytes": 5086208,
+      "logical_write_bytes": 165888,
+      "internal_transfer_bytes": 10485760,
+      "pages_read": 576,
+      "pages_programmed": 64,
+      "pages_touched": 584,
+      "media_waves": null,
+      "read_operations": 576,
+      "program_operations": 64,
+      "rmw_read_operations": 56,
+      "page_access_payload_bytes": 5252096,
+      "page_access_capacity_bytes": 9568256,
+      "host_admission_samples": 344,
+      "host_queue_wait_ns": null,
+      "media_queue_wait_ns": null,
+      "host_outstanding_at_admission_peak": 32,
+      "host_read_outstanding_at_admission_peak": 32,
+      "host_write_outstanding_at_admission_peak": 8,
+      "page_access_payload_utilization": 0.548908390410959,
+      "nand_read_queue_depth": null,
+      "nand_program_queue_depth": null,
+      "queue_depth_scope": "max per-device outstanding host requests sampled at admission, including the new request; buffered writes end at host acknowledgement; not NAND page/program queues",
+      "page_utilization_scope": "logical payload / sum of per-access page-rounded spans; repeated accesses count again; not unique resident capacity utilization",
+      "metric_availability": {
+        "nand_read_queue_depth": {
+          "status": "not_recorded",
+          "reason": "no per-page queue event population is retained"
+        },
+        "nand_program_queue_depth": {
+          "status": "not_recorded",
+          "reason": "host write requests are not physical program operations"
+        },
+        "logical_read_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "logical_write_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "internal_transfer_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "pages_read": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "pages_programmed": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "pages_touched": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "media_waves": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 8
+        },
+        "read_operations": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "program_operations": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "rmw_read_operations": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "page_access_payload_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "page_access_capacity_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "host_admission_samples": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "host_queue_wait_ns": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 8
+        },
+        "media_queue_wait_ns": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 8
+        },
+        "host_outstanding_at_admission_peak": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "host_read_outstanding_at_admission_peak": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "host_write_outstanding_at_admission_peak": {
+          "status": "recorded",
+          "recorded_batch_count": 8,
+          "physical_batch_count": 8
+        },
+        "organization_profiles": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 8
+        }
+      },
+      "operation_counts": {
+        "read": 8,
+        "write": 16
+      },
+      "resource_totals": {
+        "hbf0.memory:nand:channel:0": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 589824,
+          "service_ns": 0.3686400000000003,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:1": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 720896,
+          "service_ns": 0.4505600000000005,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:10": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 589824,
+          "service_ns": 0.3686400000000003,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:11": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 720896,
+          "service_ns": 0.4505600000000005,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:12": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 589824,
+          "service_ns": 0.3686400000000003,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:13": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 720896,
+          "service_ns": 0.4505600000000005,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:14": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 589824,
+          "service_ns": 0.3686400000000003,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:15": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 720896,
+          "service_ns": 0.4505600000000005,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:2": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 589824,
+          "service_ns": 0.3686400000000003,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:3": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 720896,
+          "service_ns": 0.4505600000000005,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:4": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 589824,
+          "service_ns": 0.3686400000000003,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:5": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 720896,
+          "service_ns": 0.4505600000000005,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:6": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 589824,
+          "service_ns": 0.3686400000000003,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:7": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 720896,
+          "service_ns": 0.4505600000000005,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:8": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 589824,
+          "service_ns": 0.3686400000000003,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:9": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 720896,
+          "service_ns": 0.4505600000000005,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:host": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 5931008,
+          "service_ns": 26009.60000000037,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:0": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 215000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:1": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 673000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:10": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 215000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:11": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 673000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:12": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 215000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:13": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 673000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:14": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 215000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:15": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 673000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:2": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 215000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:3": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 673000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:4": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 215000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:5": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 673000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:6": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 215000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:7": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 673000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:8": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 215000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:9": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 673000.0,
+          "energy_pj": 0.0
+        }
+      },
+      "owner_ids": [
+        "hbf0.memory"
+      ],
+      "profile_evidence": [],
+      "background_work": [],
+      "organization_profiles": [],
+      "organization_profile_limit": 32,
+      "accounting_semantics": "host_transfer_bytes is logical host payload; physical_* and pages_read/pages_programmed are NAND media accounting; null means not fully recorded; operation_counts classifies task-owner ledgers, not media operations; service_ns/energy_pj are analytical"
+    },
+    "resource_utilization": {
+      "cpu0.control_cache": 7.040070464986044e-05,
+      "cpu0.h2d_dma": 0.0025300253233543598,
+      "cpu0.iommu": 0.0014666813468720925,
+      "cpu0.l1d": 1.218909978007167e-05,
+      "cpu0.l2": 4.693380309990696e-05,
+      "cpu0.l3": 0.00021120211394958134,
+      "cpu0.memory:dram:bank:0:0:0:0:0:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:0:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:0:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:0:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:1:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:1:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:1:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:1:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:2:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:2:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:0:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:0:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:0:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:0:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:1:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:1:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:1:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:1:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:2:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:2:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:0:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:0:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:0:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:0:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:1:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:1:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:1:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:1:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:2:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:2:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:0:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:0:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:0:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:0:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:1:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:1:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:1:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:1:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:2:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:2:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:0:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:0:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:0:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:0:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:1:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:1:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:1:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:1:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:2:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:0:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:0:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:0:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:0:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:1:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:1:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:1:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:1:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:2:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:0:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:0:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:0:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:0:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:1:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:1:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:1:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:1:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:2:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:0:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:0:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:0:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:0:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:1:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:1:1": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:1:2": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:1:3": 1.0266769428104648e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:2:0": 1.0266769428104648e-05,
+      "cpu0.memory:dram:command:0": 4.033373703898255e-05,
+      "cpu0.memory:dram:command:1": 3.575035783000726e-05,
+      "cpu0.memory:dram:command:2": 3.300033030462208e-05,
+      "cpu0.memory:dram:command:3": 3.300033030462208e-05,
+      "cpu0.memory:dram:command:4": 3.208365446282702e-05,
+      "cpu0.memory:dram:command:5": 3.208365446282702e-05,
+      "cpu0.memory:dram:command:6": 3.025030277923691e-05,
+      "cpu0.memory:dram:command:7": 2.933362693744185e-05,
+      "cpu0.memory:dram:data:0": 4.033373703898255e-05,
+      "cpu0.memory:dram:data:1": 3.575035783000726e-05,
+      "cpu0.memory:dram:data:2": 3.300033030462208e-05,
+      "cpu0.memory:dram:data:3": 3.300033030462208e-05,
+      "cpu0.memory:dram:data:4": 3.208365446282702e-05,
+      "cpu0.memory:dram:data:5": 3.208365446282702e-05,
+      "cpu0.memory:dram:data:6": 3.025030277923691e-05,
+      "cpu0.memory:dram:data:7": 2.933362693744185e-05,
+      "cpu0.pack": 0.005702457076638696,
+      "cpu0.pipeline": 0.006643679460419597,
+      "cpu0.scheduler": 0.00042702771167621656,
+      "gpu0.command_processor": 0.08433417744514532,
+      "gpu0.command_queue": 0.007883412239437497,
+      "gpu0.frontend": 0.13346800256536043,
+      "gpu0.l1_shared": 0.0027403083169932345,
+      "gpu0.l2": 0.016016160307843252,
+      "gpu0.mmu_tlb": 0.0050600506467087195,
+      "gpu0.scalar": 0.00042250875383225415,
+      "gpu0.sfu": 0.0002511037367254834,
+      "gpu0.tensor_core": 0.015692421127827285,
+      "gpu0.vram_controller": 0.011440114505602322,
+      "hbf0.memory:nand:channel:0": 2.703387058554643e-07,
+      "hbf0.memory:nand:channel:1": 3.3041397382334537e-07,
+      "hbf0.memory:nand:channel:10": 2.703387058554643e-07,
+      "hbf0.memory:nand:channel:11": 3.3041397382334537e-07,
+      "hbf0.memory:nand:channel:12": 2.703387058554643e-07,
+      "hbf0.memory:nand:channel:13": 3.3041397382334537e-07,
+      "hbf0.memory:nand:channel:14": 2.703387058554643e-07,
+      "hbf0.memory:nand:channel:15": 3.3041397382334537e-07,
+      "hbf0.memory:nand:channel:2": 2.703387058554643e-07,
+      "hbf0.memory:nand:channel:3": 3.3041397382334537e-07,
+      "hbf0.memory:nand:channel:4": 2.703387058554643e-07,
+      "hbf0.memory:nand:channel:5": 3.3041397382334537e-07,
+      "hbf0.memory:nand:channel:6": 2.703387058554643e-07,
+      "hbf0.memory:nand:channel:7": 3.3041397382334537e-07,
+      "hbf0.memory:nand:channel:8": 2.703387058554643e-07,
+      "hbf0.memory:nand:channel:9": 3.3041397382334537e-07,
+      "hbf0.memory:nand:host": 0.01907389757980246,
+      "hbf0.memory:nand:parallel:0": 0.15766824478874994,
+      "hbf0.memory:nand:parallel:1": 0.49353827322245913,
+      "hbf0.memory:nand:parallel:10": 0.15766824478874994,
+      "hbf0.memory:nand:parallel:11": 0.49353827322245913,
+      "hbf0.memory:nand:parallel:12": 0.15766824478874994,
+      "hbf0.memory:nand:parallel:13": 0.49353827322245913,
+      "hbf0.memory:nand:parallel:14": 0.15766824478874994,
+      "hbf0.memory:nand:parallel:15": 0.49353827322245913,
+      "hbf0.memory:nand:parallel:2": 0.15766824478874994,
+      "hbf0.memory:nand:parallel:3": 0.49353827322245913,
+      "hbf0.memory:nand:parallel:4": 0.15766824478874994,
+      "hbf0.memory:nand:parallel:5": 0.49353827322245913,
+      "hbf0.memory:nand:parallel:6": 0.15766824478874994,
+      "hbf0.memory:nand:parallel:7": 0.49353827322245913,
+      "hbf0.memory:nand:parallel:8": 0.15766824478874994,
+      "hbf0.memory:nand:parallel:9": 0.49353827322245913,
+      "hbm0.hbm_fabric": 0.0951372095741068,
+      "interrupt": 0.0,
+      "link.cpu-gpu-pcie.cpu0->gpu0": 6.49006495990901e-05,
+      "link.cpu-gpu-pcie.cpu0->gpu0.inflight": 0.004758280959589786,
+      "link.cpu-hostmem-ddr.hostmem0->cpu0": 1.0140726499857827e-05,
+      "link.cpu-hostmem-ddr.hostmem0->cpu0.inflight": 0.00047947875749892744,
+      "link.gpu-hbf-ucie.gpu0->hbf0": 7.603276102184929e-05,
+      "link.gpu-hbf-ucie.gpu0->hbf0.inflight": 0.0012493778385195234,
+      "link.gpu-hbf-ucie.hbf0->gpu0": 0.002331201999972379,
+      "link.gpu-hbf-ucie.hbf0->gpu0.inflight": 0.002917874538721216,
+      "link.gpu-hbm0.gpu0->hbm0": 2.596025983963604e-06,
+      "link.gpu-hbm0.gpu0->hbm0.inflight": 0.0002372650414834984
+    }
+  },
+  "scheduler": {
+    "scheduling_rounds": 8,
+    "total_batches": 8,
+    "prefill_batches": 1,
+    "decode_batches": 0,
+    "mtp_batches": 7,
+    "preemptions": 0,
+    "priority_preemptions": 0,
+    "memory_preemptions": 0,
+    "max_batch_sequences": 4,
+    "max_batch_tokens": 512,
+    "idle_time_ns": 6616.839333333333,
+    "kv_transfer_batches": 0,
+    "linear_state_transfer_batches": 0
+  },
+  "owner_residency": {
+    "enabled": false,
+    "component_id": null,
+    "capacity_bytes": 0,
+    "committed_bytes": 0,
+    "resident_bytes": 0,
+    "peak_resident_bytes": 0,
+    "available_bytes": 0,
+    "allocation_count": 0,
+    "view_count": 0,
+    "access_count": 0,
+    "weight_access_count": 0,
+    "kv_access_count": 0,
+    "state_access_count": 0,
+    "temporary_allocation_count": 0,
+    "temporary_release_count": 0,
+    "migration_event_count": 0,
+    "fault_batch_count": 0,
+    "clean_eviction_batch_count": 0,
+    "page_in_bytes": 0,
+    "page_out_bytes": 0,
+    "clean_discard_bytes": 0,
+    "dirty_writeback_bytes": 0,
+    "clean_discard_time_ns": 0.0,
+    "clean_discard_energy_pj": 0.0,
+    "transfer_time_ns": 0.0,
+    "transfer_energy_pj": 0.0,
+    "initialization_migration_event_count": 0,
+    "initialization_page_in_bytes": 0,
+    "initialization_page_out_bytes": 0,
+    "initialization_clean_discard_bytes": 0,
+    "initialization_dirty_writeback_bytes": 0,
+    "timing_completeness": "complete",
+    "submission_latency_known": true,
+    "unmodeled_timing_terms": [],
+    "interval_baseline_resident_bytes": 0,
+    "interval_peak_resident_bytes": 0,
+    "interval_resident_delta_bytes": 0
+  },
+  "applied_hardware": {
+    "hbf_read_gb_s": 1600.0,
+    "memory_kinds": {
+      "hostmem0": "host_memory",
+      "hbm0": "hbm",
+      "hbf0": "hbf"
+    },
+    "hbf_write_gb_s": 16.0,
+    "hbf_parallel_units": 64,
+    "hbf_page_bytes": 16384,
+    "hbf_read_ns": 4000.0,
+    "hbf_program_ns": 75000.0,
+    "hbm_peak_read_gb_s": 1600.0,
+    "hbm_efficiency": 0.75,
+    "links": [
+      {
+        "id": "gpu-hbf-ucie",
+        "bandwidth_gbps": 12800.0,
+        "latency_ns": 100.0
+      }
+    ],
+    "kv_allocation_policy": "eager"
+  },
+  "slo": {
+    "ttft_ns": 10000000000.0,
+    "tbt_ns": 100000000.0
+  },
+  "wall_seconds": 0.30076070001814514,
+  "unavailable": {
+    "calibrated_node_energy": "no independent energy measurements",
+    "lifetime": "not a stateful wear experiment"
+  },
+  "parameters": {
+    "prompt": 128,
+    "batch": 4,
+    "output": 32,
+    "mtp_branch": true,
+    "speculative_acceptance": 0.95
+  },
+  "executed_serving": true,
+  "model_structure": {
+    "model_id": "small",
+    "layers": 1,
+    "weight_bytes": 1507328,
+    "context_extrapolation": null,
+    "mtp_branch": {
+      "kind": "synthetic_prediction_layer_and_auxiliary_head",
+      "trained_draft_model": false,
+      "accuracy_claim": false
+    },
+    "mtp_descriptor_count": 2
+  },
+  "fixed_inventory": {
+    "hostmem0": {
+      "kind": "host_memory",
+      "capacity_bytes": 274877906944
+    },
+    "hbm0": {
+      "kind": "hbm",
+      "capacity_bytes": 549755813888
+    },
+    "hbf0": {
+      "kind": "hbf",
+      "capacity_bytes": 1099511627776
+    }
+  },
+  "placement_contract": {
+    "weights": "hbm0",
+    "kv": "hbf0",
+    "layout": "legacy_single",
+    "cold": null
+  },
+  "placement_verification": {
+    "all_resolved_weights_on_requested_tier": true,
+    "resolved_kv_on_requested_tier": true,
+    "resolved_weight_tensor_count": 6,
+    "all_resolved_model_ops_on_gpu": true
+  },
+  "point_result_version": 2
+}

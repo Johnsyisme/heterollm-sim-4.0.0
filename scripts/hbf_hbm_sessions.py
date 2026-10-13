@@ -216,7 +216,9 @@ class SessionTrace:
             selected = []
         moved = 0
         for page in selected:
-            if page.owner_component == "hbm" and self.pool.offload_page(page.logical_page_id, "hbf"):
+            if page.owner_component == "hbm":
+                if not self.pool.offload_page(page.logical_page_id, "hbf"):
+                    raise RuntimeError(self.pool.last_error or "session offload failed")
                 moved += 1
         self._capture_transfers()
         self._pause_count += 1
@@ -289,8 +291,19 @@ class SessionTrace:
         ]
         migration_bytes = sum(int(event.details["bytes"]) for event in migration_events)
         restore_wait = max(self._resume_wait_ns, default=0.0)
+        memory_phases = [
+            phase for event in self._executor.events for phase in event["phases"]
+            if phase.get("kind") in {"source_read", "target_write", "relay_read", "relay_write"}
+        ]
         return {
             "mode": self.mode,
+            "placement_semantics": (
+                "all paused pages offload to HBF and restore to HBM before execution; not active all-KV-HBF"
+                if self.mode == "all_hbf" else
+                "first hot_pages pages stay in HBM; other paused pages offload and restore before execution"
+                if self.mode == "hot_cold" else "all pages remain in HBM"
+            ),
+            "scope": "allocation/migration lifecycle only; append allocates pages and does not model token computation or KV writes",
             "pause_duration_ns": self.pause_duration_ns,
             "resume_cycles": self.resume_cycles,
             "events": [event.as_dict() for event in sorted(
@@ -313,8 +326,10 @@ class SessionTrace:
             "used_bytes_by_component": dict(self.pool.used_bytes_by_component),
             "capacity_bytes_by_component": dict(self.pool.capacity_bytes_by_component),
             "physical_transfer_count": self._executor.counters["transfer_count"],
-            "physical_read_bytes": self._executor.counters["read_bytes"],
-            "physical_write_bytes": self._executor.counters["write_bytes"],
+            "logical_transfer_read_bytes": self._executor.counters["read_bytes"],
+            "logical_transfer_write_bytes": self._executor.counters["write_bytes"],
+            "physical_read_bytes": sum(int(phase.get("physical_read_bytes", 0)) for phase in memory_phases),
+            "physical_write_bytes": sum(int(phase.get("physical_write_bytes", 0)) for phase in memory_phases),
             "makespan_ns": self.clock,
         }
 
@@ -345,6 +360,8 @@ def run_matrix() -> dict[str, Any]:
         "experiments": rows,
         "limitations": [
             "session lifecycle is a focused trace harness below the serving scheduler",
+            "all_hbf is the legacy name for full paused-session offload, not decode directly from HBF",
+            "two sessions are scripted; active/retained peaks do not measure maximum supported session capacity",
             "hot_cold keeps the first page resident and offloads later pages",
         ],
     }

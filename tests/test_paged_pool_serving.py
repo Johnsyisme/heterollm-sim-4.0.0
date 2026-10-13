@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
 from heterollm_sim.config import kv_policy_from_dict
 from heterollm_sim.ir import ComponentSpec, KVCachePolicy, LinkSpec, PortSpec
@@ -11,6 +12,59 @@ from heterollm_sim.serving import BatchCost, _OnlineRuntime, compile_serving_pla
 
 
 class PagedPoolServingTests(unittest.TestCase):
+    def _runtime(self):
+        plan = compile_serving_plan(self._scenario_with_hbf())
+        runtime = _OnlineRuntime(
+            plan, lambda *_: BatchCost(0.0),
+            apply_measurement_start_residency=False,
+        )
+        return runtime, runtime.states[plan.requests[0].request_id]
+
+    def test_transfer_sync_preserves_physical_cohort_completion(self):
+        runtime, request = self._runtime()
+        self.assertTrue(runtime.ledger.resize(request, 3))
+        self.assertTrue(runtime.ledger.offload(request))
+        transfers = runtime.ledger.paged_pool.events
+        completion = max(item.completion_ns for item in transfers)
+        self.assertGreater(sum(item.duration_ns for item in transfers), completion)
+        runtime._sync_paged_pool_events()
+        self.assertEqual(runtime.now, completion)
+        self.assertEqual(runtime.swap_transfer_time_ns, completion)
+        observed = [event.timestamp_ns for event in runtime.events
+                    if event.event_type == "kv_pool_transfer_complete"]
+        self.assertEqual(observed, [item.completion_ns for item in transfers])
+
+    def test_transfer_sync_survives_page_release(self):
+        runtime, request = self._runtime()
+        self.assertTrue(runtime.ledger.resize(request, 1))
+        self.assertTrue(runtime.ledger.offload(request))
+        runtime.ledger.discard_offload(request)
+        runtime._sync_paged_pool_events()
+        self.assertGreater(runtime.now, 0)
+
+    def test_failed_shrink_restores_page_identity_and_physical_binding(self):
+        runtime, request = self._runtime()
+        self.assertTrue(runtime.ledger.resize(request, 2))
+        pool = runtime.ledger.paged_pool
+        executor = pool.transfer_executor
+        identities = tuple(page.logical_page_id for page in pool.pages())
+        addresses = tuple(executor.address(page) for page in pool.pages())
+        physical = dict(runtime.physical_ledger.used_bytes)
+        with patch.object(executor, "sync_pages", side_effect=RuntimeError("sync failed")):
+            self.assertFalse(runtime.ledger.resize(request, 1))
+        self.assertEqual(tuple(page.logical_page_id for page in pool.pages()), identities)
+        self.assertEqual(tuple(executor.address(page) for page in pool.pages()), addresses)
+        self.assertEqual(runtime.physical_ledger.used_bytes, physical)
+        self.assertEqual(request.kv_pages, 2)
+
+    def test_temporary_reservation_cannot_shrink_persistent_pages(self):
+        runtime, request = self._runtime()
+        self.assertTrue(runtime.ledger.resize(request, 2))
+        self.assertTrue(runtime.ledger.reserve_temporary(request, 1))
+        self.assertEqual(len(runtime.ledger.paged_pool.pages()), 2)
+        self.assertEqual(request.kv_pages, 2)
+        self.assertEqual(request.temporary_kv_pages, 0)
+
     def test_relay_component_survives_json_policy_normalization(self):
         policy = kv_policy_from_dict({
             "layout_mode": "paged_pool",

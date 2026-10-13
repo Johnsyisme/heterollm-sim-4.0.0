@@ -297,6 +297,7 @@ class ServingRequest:
     output_tokens: int
     priority: int = 0
     deadline_ns: Optional[float] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 class _SyntheticServingRequestSequence(Sequence[ServingRequest]):
@@ -1618,6 +1619,20 @@ class KVCacheMetrics:
     prefetch_transfer_time_ns: float = 0.0
     prefetch_distance_tokens: int = 0
     prefetch_lookahead_pages: int = 0
+    prefetch_completed_bytes: int = 0
+    prefetch_useful_bytes: int = 0
+    prefetch_unused_bytes: int = 0
+    prefetch_inflight_bytes: int = 0
+    prefetch_reclaim_bytes: int = 0
+    prefetch_execution_mode: str = "disabled"
+    prefetch_cancelled_bytes: Optional[int] = None
+    prefetch_metric_semantics: str = (
+        "useful bytes are completed copies exposed to a successful consumer cohort; "
+        "unused bytes include reclaimed copies and completed copies not consumed; "
+        "transfer time sums per-page latency and is not GPU stall time; "
+        "opt-in lifecycle cancellation drains submitted physical phases, preserves their cost, "
+        "then frees the destination; cancelled bytes are separate from completed/unused bytes"
+    )
     offload_events: int = 0
     offload_bytes: int = 0
     migration_events: int = 0
@@ -1668,6 +1683,9 @@ class KVCacheMetrics:
     context_shift_count: int = 0
     capacity_failure_count: int = 0
     capacity_failure_reason: Optional[str] = None
+    requested_allocation_policy: str = "lazy"
+    effective_allocation_policy: str = "lazy"
+    allocation_policy_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1824,6 +1842,7 @@ class ServingResult:
     # timestamp as a duration.  This field stays last to preserve legacy
     # positional construction of ServingResult.
     runtime_origin_ns: float = 0.0
+    agent_lifecycle_metrics: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def trace(self) -> Tuple[ServingEvent, ...]:
@@ -2586,6 +2605,7 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
                     output_tokens=int(request.output_tokens),
                     priority=priority,
                     deadline_ns=_optional_float(deadline),
+                    metadata=dict(metadata),
                 )
             )
         requests.sort(key=lambda item: (item.arrival_ns, item.request_id))
@@ -2952,6 +2972,12 @@ class _PhysicalCapacityLedger:
             self.used_bytes[target] = (
                 self.used_bytes.get(target, 0) + target_extra_bytes
             )
+        # Transfers update the same observed peak as ordinary allocations.
+        # In particular, a backing tier touched only by swap would otherwise
+        # misleadingly report a zero peak despite holding live KV pages.
+        if target is not None and target in self.limits:
+            self.peak_used_bytes[target] = max(
+                self.peak_used_bytes.get(target, 0), self.used_bytes.get(target, 0))
         return True
 
 
@@ -3014,6 +3040,7 @@ class _KVLedger:
                 "_pages", "_requests", "_request_components", "_prefixes",
                 "_bindings", "_owned_bytes", "_page_counter", "_clock",
                 "_events", "_last_error",
+                "_pending_moves",
             )
         }
         return {
@@ -3094,6 +3121,7 @@ class _KVLedger:
                 return False
             if pages == request.kv_pages:
                 return True
+            snapshot = self._snapshot_paged_pool_state()
             result = self.paged_pool.resize_detailed(
                 request.spec.request_id, pages
             )
@@ -3102,9 +3130,9 @@ class _KVLedger:
             try:
                 self._sync_paged_pool_physical_pages()
             except Exception:
-                # The logical resize is atomic by itself; restore its prior
-                # size if physical address materialisation fails as well.
-                self.paged_pool.resize(request.spec.request_id, request.kv_pages)
+                # A compensating resize cannot restore identities of pages
+                # freed by a shrink. Restore both owner and address state.
+                self._restore_paged_pool_state(snapshot)
                 return False
             delta = pages - request.kv_pages
             self.used_pages += delta
@@ -3149,7 +3177,10 @@ class _KVLedger:
         if request.temporary_kv_pages:
             raise RuntimeError("temporary KV reservation already active")
         temporary_pages = max(0, target_total_pages - request.kv_pages)
+        if temporary_pages == 0:
+            return True
         if self.paged_pool is not None:
+            snapshot = self._snapshot_paged_pool_state()
             result = self.paged_pool.resize_detailed(
                 request.spec.request_id, target_total_pages
             )
@@ -3158,7 +3189,7 @@ class _KVLedger:
             try:
                 self._sync_paged_pool_physical_pages()
             except Exception:
-                self.paged_pool.resize(request.spec.request_id, request.kv_pages)
+                self._restore_paged_pool_state(snapshot)
                 return False
             request.temporary_kv_pages = temporary_pages
             self.used_pages += temporary_pages
@@ -3195,8 +3226,14 @@ class _KVLedger:
             return
         byte_count = temporary_pages * self.policy.bytes_per_page
         if self.paged_pool is not None:
-            self.paged_pool.resize(request.spec.request_id, request.kv_pages)
-            self._sync_paged_pool_physical_pages()
+            snapshot = self._snapshot_paged_pool_state()
+            try:
+                if not self.paged_pool.resize(request.spec.request_id, request.kv_pages):
+                    raise RuntimeError("failed to release temporary KV pages")
+                self._sync_paged_pool_physical_pages()
+            except Exception:
+                self._restore_paged_pool_state(snapshot)
+                raise
             self.used_pages -= temporary_pages
             self.temporary_used_pages -= temporary_pages
             request.temporary_kv_pages = 0
@@ -3340,6 +3377,79 @@ class _KVLedger:
             self._restore_paged_pool_state(snapshot)
             raise RuntimeError("KV request accounting underflow while prefetching")
         return moved
+
+    def prepare_prefetch(self, request: _MutableRequest, page_count: int) -> Tuple[Any, ...]:
+        """Reserve an asynchronous page cohort while retaining source ownership."""
+        pool = self.paged_pool
+        source, target = self.policy.offload_component, self.policy.cache_component
+        if pool is None or not source or not target or request.swapped_pages <= 0:
+            return ()
+        pages = tuple(page for page in pool.request_pages(request.spec.request_id)
+                      if page.owner_component == source)[:min(max(0, page_count), request.swapped_pages)]
+        if not pages or not self.physical.can_adjust(target, sum(page.bytes for page in pages)):
+            return ()
+        prepared = []
+        try:
+            for page in pages:
+                plan = pool.prepare_restore_page(page.logical_page_id, target)
+                if plan is None:
+                    raise RuntimeError(pool.last_error or "asynchronous KV prefetch failed")
+                prepared.append((page.logical_page_id, plan))
+        except Exception:
+            # No other work runs between preparations at a scheduler boundary.
+            # Reverse rollback therefore cannot erase an unrelated reservation.
+            for page_id, plan in reversed(prepared):
+                pool.abort_prepared_restore(page_id, plan)
+            return ()
+        return tuple(prepared)
+
+    def complete_prefetch(self, request: _MutableRequest, prepared: Tuple[Any, ...], *, now_ns: float) -> None:
+        pool = self.paged_pool
+        moved = len(prepared)
+        moved_bytes = moved * self.policy.bytes_per_page
+        if pool is None or request.swapped_pages < moved or request.swap_bytes < moved_bytes:
+            raise RuntimeError("in-flight prefetch lost its offloaded KV accounting")
+        if self.offload_used_bytes < moved_bytes:
+            raise RuntimeError("in-flight prefetch offload ledger underflow")
+        for page_id, plan in prepared:
+            pool.complete_prepared_restore(page_id, plan, now_ns=now_ns)
+        self.used_pages += moved
+        self.persistent_used_pages += moved
+        self.peak_pages = max(self.peak_pages, self.used_pages)
+        self.persistent_peak_pages = max(self.persistent_peak_pages, self.persistent_used_pages)
+        self.offload_used_bytes -= moved_bytes
+        request.kv_pages += moved
+        request.swapped_pages -= moved
+        request.swap_bytes -= moved_bytes
+
+    def reclaim_prefetch(self, request: _MutableRequest) -> int:
+        """Return completed but unused copies to backing storage under pressure."""
+        pool = self.paged_pool
+        if pool is None or request.kv_pages <= 0:
+            return 0
+        pages = tuple(page for page in pool.request_pages(request.spec.request_id)
+                      if page.owner_component == self.policy.cache_component)
+        if len(pages) != request.kv_pages:
+            return 0
+        snapshot = self._snapshot_paged_pool_state()
+        try:
+            for page in pages:
+                if not pool.offload_page(page.logical_page_id, self.policy.offload_component,
+                                         kind="prefetch_reclaim"):
+                    raise RuntimeError(pool.last_error or "unused prefetch reclaim failed")
+            self._sync_paged_pool_physical_pages()
+        except Exception:
+            self._restore_paged_pool_state(snapshot)
+            return 0
+        moved_bytes = len(pages) * self.policy.bytes_per_page
+        self.used_pages -= len(pages)
+        self.persistent_used_pages -= len(pages)
+        self.offload_used_bytes += moved_bytes
+        self.offload_peak_bytes = max(self.offload_peak_bytes, self.offload_used_bytes)
+        request.kv_pages -= len(pages)
+        request.swapped_pages += len(pages)
+        request.swap_bytes += moved_bytes
+        return moved_bytes
 
     def can_restore(
         self, request: _MutableRequest, target_pages: Optional[int] = None
@@ -5425,6 +5535,31 @@ class _OnlineRuntime:
             raise TypeError("execution_kernel must be a UnifiedEventKernel")
         if execution_kernel is not None and execution_kernel.has_active_tasks:
             raise ValueError("execution_kernel must be drained before serving append")
+        self._requested_kv_allocation_policy = plan.kv_policy.allocation_policy
+        self._kv_allocation_policy_reason = None
+        cache_components = set(plan.kv_policy.component_bytes_per_page)
+        if plan.kv_policy.cache_component:
+            cache_components.add(plan.kv_policy.cache_component)
+        physical_contiguous_kv = (
+            isinstance(lowerer, TopologyAwareBatchCostProvider)
+            and plan.scenario.llama_cpp_config is None
+            and not plan.scenario.workload.metadata.get("llama_cpp_runtime")
+            and plan.kv_policy.layout_mode == "legacy_single"
+            and plan.kv_policy.bytes_per_page > 0
+            and any(
+                (component := plan.scenario.hardware.get_component(component_id))
+                .metadata.get("physical_memory_config") is not None
+                and str(component.metadata.get("memory_execution_mode", "physical")).lower() != "aggregate"
+                for component_id in cache_components
+            )
+        )
+        if physical_contiguous_kv and plan.kv_policy.allocation_policy == "lazy":
+            # Generic physical KV uses a stable contiguous request buffer.
+            # It cannot grow/relocate between token steps. Match admission to
+            # that real allocation instead of over-admitting prompt-only pages
+            # and later surfacing a raw AllocationError in physical dispatch.
+            plan = replace(plan, kv_policy=replace(plan.kv_policy, allocation_policy="eager"))
+            self._kv_allocation_policy_reason = "physical_contiguous_request_buffer_requires_full_live_token_reservation"
         self.plan = plan
         self._llama_engine_boundary_enabled = (
             bool(plan.scenario.workload.metadata.get("llama_cpp_runtime"))
@@ -5470,6 +5605,7 @@ class _OnlineRuntime:
             for item in plan.requests
         }
         self._state_values = tuple(self.states.values())
+        self._configure_agent_lifecycle()
         self.pending = plan.requests
         self._pending_index = 0
         self._request_count = len(self._state_values)
@@ -5697,6 +5833,8 @@ class _OnlineRuntime:
                 paged_pool.set_transfer_executor(
                     self._paged_pool_transfer_executor
                 )
+        if self._agent_config and self._paged_pool_transfer_executor is None:
+            raise ValueError("agent_lifecycle requires physical KV transfer profiles for every pool/relay component")
         self._execution_task_sequence = 0
         self._live_cohort_metrics = None
         self._request_stage_ready_ns: Dict[Tuple[str, str, int], float] = {}
@@ -5728,6 +5866,14 @@ class _OnlineRuntime:
         self.prefetch_transfer_time_ns = 0.0
         self.prefetch_distance_tokens = 0
         self.prefetch_lookahead_pages = 0
+        self.prefetch_completed_bytes = 0
+        self.prefetch_useful_bytes = 0
+        self.prefetch_reclaim_bytes = 0
+        self.prefetch_cancelled_bytes = 0
+        self._prefetch_discarded_bytes = 0
+        self._prefetch_reclaimed_requests: set[str] = set()
+        self._pending_prefetches: Dict[str, Mapping[str, Any]] = {}
+        self._unconsumed_prefetch_bytes: Dict[str, int] = {}
         self.logical_swap_out_bytes = 0
         self.logical_swap_in_bytes = 0
         self.linear_state_swap_in_bytes = 0
@@ -5866,24 +6012,22 @@ class _OnlineRuntime:
         if pool is None:
             return
         transfers = pool.events
+        pages_by_id = {page.logical_page_id: page for page in pool.pages()}
         for transfer in transfers[self._paged_pool_event_cursor:]:
             declared_start = getattr(transfer, "start_ns", None)
             declared_completion = getattr(transfer, "completion_ns", None)
-            start = self.now if declared_start is None else max(
-                self.now, float(declared_start)
-            )
+            start = self.now if declared_start is None else float(declared_start)
             duration = max(0.0, float(transfer.duration_ns))
-            end = start + duration
-            if declared_completion is not None:
-                end = max(end, float(declared_completion))
+            # The physical executor has already scheduled shared resources.
+            # Preserve its absolute timestamps; serializing each page's
+            # queue-inclusive duration again double-counts queue waits.
+            end = start + duration if declared_completion is None else float(declared_completion)
+            additional_wait = max(0.0, end - self.now)
+            page = pages_by_id.get(transfer.logical_page_id)
             details = {
                 "kind": transfer.kind,
                 "logical_page_id": transfer.logical_page_id,
-                "request_id": (
-                    self.ledger.paged_pool.page(transfer.logical_page_id).request_id
-                    if self.ledger.paged_pool.page(transfer.logical_page_id) is not None
-                    else None
-                ),
+                "request_id": page.request_id if page is not None else None,
                 "source_component": transfer.source_component,
                 "target_component": transfer.target_component,
                 "bytes": int(transfer.bytes),
@@ -5895,12 +6039,16 @@ class _OnlineRuntime:
             self.events.append(ServingEvent(start, "kv_pool_transfer_start", details=details))
             self.events.append(ServingEvent(end, "kv_pool_transfer_complete", details=details))
             if transfer.kind in {"offload", "restore"}:
-                self.swap_transfer_time_ns += max(0.0, end - start)
+                self.swap_transfer_time_ns += additional_wait
             elif transfer.kind == "prefetch":
                 self.prefetch_events += 1
                 self.prefetch_bytes += int(transfer.bytes)
-                self.prefetch_transfer_time_ns += max(0.0, end - start)
-            self.now = end
+                self.prefetch_transfer_time_ns += duration
+                # Asynchronous copies publish only at their completion event.
+                # Their source/link/target queues were already reserved at
+                # submission.  Do not stall unrelated host/GPU work here.
+                continue
+            self.now = max(self.now, end)
             self._host_available_ns = max(self._host_available_ns, end)
             self._gpu_available_ns = max(self._gpu_available_ns, end)
         self._paged_pool_event_cursor = len(transfers)
@@ -9846,7 +9994,8 @@ class _OnlineRuntime:
             # Prompt-cache save and retained-slot contracts can still use KV
             # after the request finishes. Ordinary requests have no later
             # owner: release their persistent physical buffers at this boundary.
-            if not self.prompt_cache.enabled and self._retained_kv_state is None:
+            if (not self.prompt_cache.enabled and self._retained_kv_state is None
+                    and state.spec.request_id not in self._agent_handed_off):
                 self._execution_resource_kernel.release_request_physical_allocations(
                     state.spec.request_id
                 )
@@ -9919,6 +10068,219 @@ class _OnlineRuntime:
         retained["retention_details_truncated"] = True
         return retained
 
+    def _configure_agent_lifecycle(self) -> None:
+        """Opt-in single-chain sessions; forecast inputs are explicit hints."""
+        self._agent_config = dict(self.plan.scenario.workload.metadata.get("agent_lifecycle", {}) or {})
+        self._agent_children: Dict[str, str] = {}
+        self._agent_parents: Dict[str, str] = {}
+        self._agent_paused: Dict[str, Dict[str, Any]] = {}
+        self._agent_handed_off: set[str] = set()
+        self._agent_last_idle: Dict[str, float] = {}
+        self._agent_metrics: Dict[str, Any] = {}
+        if not self._agent_config:
+            return
+        config = self._agent_config
+        if config.get("policy", "static_cold") not in {"static_cold", "heuristic"}:
+            raise ValueError("agent_lifecycle policy must be static_cold or heuristic")
+        if (self.plan.kv_policy.layout_mode != "paged_pool" or self.plan.mtp.enabled
+                or self.plan.linear_state_policy.bytes_per_request
+                or (self.resource_policy.prompt_cache is not None and self.resource_policy.prompt_cache.enabled)
+                or self._llama_engine_boundary_enabled):
+            raise ValueError("agent_lifecycle requires paged KV without speculative/recurrent/retained prompt-cache state")
+        for key in ("cold_after_ns", "ttl_ns", "prefetch_lead_ns", "write_budget_bytes", "initial_idle_prediction_ns"):
+            value = config.get(key)
+            if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+                raise ValueError("agent_lifecycle requires finite nonnegative " + key)
+        for state in self._state_values:
+            turn = state.spec.metadata.get("agent_turn", {})
+            if not turn:
+                continue
+            if not turn.get("session_id"):
+                raise ValueError("agent_turn requires session_id")
+            if not isinstance(turn.get("turn_index"), int) or turn["turn_index"] < 0:
+                raise ValueError("agent_turn requires a nonnegative integer turn_index")
+            parent_id = turn.get("parent_request_id")
+            if parent_id is None:
+                continue
+            if parent_id not in self.states or parent_id == state.spec.request_id:
+                raise ValueError("agent_turn parent must name another request")
+            if parent_id in self._agent_children:
+                raise ValueError("agent lifecycle supports a single child per parent; shared prefixes must be explicit")
+            parent = self.states[parent_id].spec
+            parent_turn = parent.metadata.get("agent_turn", {})
+            if parent_turn.get("session_id") != turn["session_id"]:
+                raise ValueError("agent child must share the parent's session_id")
+            if int(turn.get("turn_index", -1)) != int(parent_turn.get("turn_index", -1)) + 1:
+                raise ValueError("agent turn_index must increment along its parent chain")
+            if state.spec.prompt_tokens < parent.prompt_tokens + parent.output_tokens:
+                raise ValueError("agent child prompt must contain the parent's prompt and generated tokens")
+            for key in ("think_time_ns", "predicted_think_time_ns", "ttl_ns"):
+                value = turn.get(key, 0 if key == "think_time_ns" else None)
+                if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+                    raise ValueError("agent turn requires finite nonnegative " + key)
+            self._agent_children[parent_id] = state.spec.request_id
+            self._agent_parents[state.spec.request_id] = parent_id
+        self._agent_metrics = {"policy": config.get("policy", "static_cold"),
+            "forecast_kind": "explicit_hint_or_last_observed_think_time_heuristic",
+            "trained_predictor": False, "handoffs": 0, "retained_tokens": 0,
+            "reused_tokens": 0, "expired_tokens": 0, "cold_write_bytes": 0,
+            "cold_decisions": 0, "hot_decisions": 0, "write_budget_denials": 0,
+            "prediction_absolute_error_ns": 0.0, "prediction_misses": 0,
+            "ttl_expirations": 0, "cancellations": 0}
+
+    def _finish_agent_turn(self, state: _MutableRequest, timestamp_ns: float) -> bool:
+        child_id = self._agent_children.get(state.spec.request_id)
+        if child_id is None or self.states[child_id].status in _TERMINAL_STATUSES:
+            return False
+        child = self.states[child_id]
+        pool = self.ledger.paged_pool
+        retained = state.cached_tokens
+        pages = self.ledger.pages_for_tokens(retained)
+        self.ledger.release_temporary(state)
+        if not self.ledger.resize(state, pages):
+            raise RuntimeError("cannot trim a completed agent turn to its materialized KV")
+        before = [(p.logical_page_id, p.allocation_generation,
+                   self._paged_pool_transfer_executor.address(p)) for p in pool.request_pages(state.spec.request_id)]
+        page_ids = pool.handoff_request(state.spec.request_id, child_id)
+        self.ledger._sync_paged_pool_physical_pages()
+        after = [(p.logical_page_id, p.allocation_generation,
+                  self._paged_pool_transfer_executor.address(p)) for p in pool.request_pages(child_id)]
+        child.kv_pages = state.kv_pages
+        child.peak_kv_pages = child.kv_pages
+        state.kv_pages = 0
+        child.prefill_cursor = retained
+        turn = child.spec.metadata["agent_turn"]
+        session = str(turn["session_id"])
+        think = float(turn.get("think_time_ns", 0.0))
+        predicted = float(turn.get("predicted_think_time_ns", self._agent_last_idle.get(
+            session, self._agent_config.get("initial_idle_prediction_ns", 0.0))))
+        arrival = timestamp_ns + think
+        child.spec = replace(child.spec, arrival_ns=arrival)
+        child.queued_since_ns = arrival
+        ttl = turn.get("ttl_ns", self._agent_config.get("ttl_ns"))
+        self._agent_paused[child_id] = {"pause_ns": timestamp_ns, "resume_ns": arrival,
+            "predicted_think_ns": predicted, "actual_think_ns": think,
+            "ttl_at_ns": timestamp_ns + float(ttl) if ttl is not None else None,
+            "prefetch_at_ns": timestamp_ns + max(0.0, predicted - float(self._agent_config.get("prefetch_lead_ns", 0.0))),
+            "offload_pending": True, "expired": False, "session_id": session}
+        self._agent_handed_off.add(state.spec.request_id)
+        self._set_status(state, RequestStatus.FINISHED)
+        state.finished_ns = timestamp_ns
+        self._set_status(child, RequestStatus.WAITING)
+        self._agent_metrics["handoffs"] += 1
+        self._agent_metrics["retained_tokens"] += retained
+        self._agent_metrics["prediction_absolute_error_ns"] += abs(think - predicted)
+        self._agent_metrics["prediction_misses"] += int(abs(think - predicted) > float(
+            self._agent_config.get("prefetch_lead_ns", 0.0)))
+        self.events.append(ServingEvent(timestamp_ns, "request_finished", state.spec.request_id,
+                                       details={"committed": state.committed, "agent_child": child_id}))
+        self.events.append(ServingEvent(timestamp_ns, "agent_kv_handoff", child_id,
+            details={"parent_request_id": state.spec.request_id, "session_id": session,
+                "cached_tokens": retained, "page_ids": page_ids, "physical_identities": before,
+                "physical_identities_after": after,
+                "copy_bytes": 0, "resume_ns": arrival, "predicted_think_ns": predicted}))
+        return True
+
+    def _agent_prefetch_allowed(self, request_id: str) -> bool:
+        info = self._agent_paused.get(request_id)
+        if info is None:
+            return True
+        return (self._agent_config.get("policy") == "heuristic" and not info["expired"]
+                and not info.get("expiration_requested") and self.now >= info["prefetch_at_ns"])
+
+    def _next_agent_event(self) -> Optional[float]:
+        times = []
+        for request_id, info in self._agent_paused.items():
+            times.append(info["resume_ns"])
+            if not info["expired"] and not info.get("expiration_requested") and info["ttl_at_ns"] is not None:
+                times.append(info["ttl_at_ns"])
+            if (self._agent_config.get("policy") == "heuristic" and not info["expired"]
+                    and request_id not in self._pending_prefetches and request_id not in self._unconsumed_prefetch_bytes):
+                times.append(info["prefetch_at_ns"])
+        return min((value for value in times if value > self.now), default=None)
+
+    def _cancel_prefetch(self, request_id: str, timestamp_ns: float, reason: str) -> None:
+        entry = self._pending_prefetches[request_id]
+        if entry.get("cancel_requested_ns") is not None:
+            return
+        entry["cancel_requested_ns"] = timestamp_ns
+        entry["cancel_reason"] = reason
+        self._agent_paused[request_id]["expiration_requested"] = True
+        self._agent_metrics["cancellations"] += 1
+        self.events.append(ServingEvent(timestamp_ns, "kv_prefetch_cancel_requested", request_id,
+            details={"reason": reason, "bytes": entry["details"]["bytes"],
+                "drain_until_ns": entry["completion_ns"]}))
+
+    def _expire_agent_kv(self, request_id: str) -> None:
+        info = self._agent_paused[request_id]
+        if info["expired"]:
+            return
+        state = self.states[request_id]
+        tokens = state.prefill_cursor
+        # A completed prefetch may leave mixed active/cold pages. Release all
+        # references once, then adjust each ledger by its actual resident share.
+        self.ledger.paged_pool.release(request_id)
+        self.ledger._sync_paged_pool_physical_pages()
+        self.ledger.used_pages -= state.kv_pages
+        self.ledger.persistent_used_pages -= state.kv_pages
+        self.ledger.offload_used_bytes -= state.swap_bytes
+        self._prefetch_discarded_bytes += self._unconsumed_prefetch_bytes.pop(request_id, 0)
+        state.kv_pages = state.swapped_pages = state.swap_bytes = 0
+        state.prefill_cursor = 0
+        state.preemption_strategy = None
+        self._set_status(state, RequestStatus.WAITING)
+        info["expired"] = True
+        self._agent_metrics["ttl_expirations"] += 1
+        self._agent_metrics["expired_tokens"] += tokens
+        self.recompute_events += 1
+        self.recompute_tokens += tokens
+        self.events.append(ServingEvent(self.now, "agent_kv_expired", request_id,
+            details={"cached_tokens_discarded": tokens, "ttl_at_ns": info["ttl_at_ns"],
+                     "recompute_on_resume": True}))
+
+    def _process_agent_events(self) -> None:
+        for request_id, info in tuple(self._agent_paused.items()):
+            state = self.states[request_id]
+            if info["offload_pending"]:
+                info["offload_pending"] = False
+                cold = (self._agent_config.get("policy", "static_cold") == "static_cold"
+                        or info["predicted_think_ns"] >= float(self._agent_config.get("cold_after_ns", 0.0)))
+                size = state.kv_pages * self.plan.kv_policy.bytes_per_page
+                budget = self._agent_config.get("write_budget_bytes")
+                if cold and budget is not None and self._agent_metrics["cold_write_bytes"] + size > budget:
+                    cold = False
+                    self._agent_metrics["write_budget_denials"] += 1
+                if cold and state.kv_pages:
+                    if not self.ledger.offload(state):
+                        raise RuntimeError("agent cold migration failed: " + str(self.ledger.paged_pool.last_error))
+                    self._set_status(state, RequestStatus.SWAPPED)
+                    state.preemption_strategy = "swap"
+                    self._agent_metrics["cold_write_bytes"] += size
+                    self.logical_swap_out_bytes += size
+                    self.swap_bytes += size
+                    self.swap_events += 1
+                    self._sync_paged_pool_events()
+                self._agent_metrics["cold_decisions" if cold else "hot_decisions"] += 1
+                self.events.append(ServingEvent(self.now, "agent_pause_policy", request_id,
+                    details={"decision": "cold" if cold else "keep_hot", "bytes": size,
+                        "predicted_think_ns": info["predicted_think_ns"], "actual_resume_ns": info["resume_ns"]}))
+            # Once a turn's declared arrival has passed it is useful work,
+            # even if it must wait for a free GPU slot. TTL is paused-idle TTL.
+            if (not info["expired"] and info["ttl_at_ns"] is not None
+                    and info["ttl_at_ns"] <= min(self.now, info["resume_ns"])):
+                if request_id in self._pending_prefetches:
+                    self._cancel_prefetch(request_id, info["ttl_at_ns"], "session_ttl")
+                else:
+                    self._expire_agent_kv(request_id)
+            if self.now >= info["resume_ns"] and request_id not in self._pending_prefetches:
+                self._agent_metrics["reused_tokens"] += state.prefill_cursor
+                self._agent_last_idle[info["session_id"]] = info["actual_think_ns"]
+                self.events.append(ServingEvent(info["resume_ns"], "agent_turn_arrival", request_id,
+                    details={"reused_tokens": state.prefill_cursor, "expired": info["expired"],
+                             "session_id": info["session_id"]}))
+                self.events.append(ServingEvent(info["resume_ns"], "request_arrival", request_id))
+                del self._agent_paused[request_id]
+
     def run(self) -> ServingResult:
         self.execution_control.raise_if_cancelled()
         self.execution_control.report(
@@ -9953,10 +10315,12 @@ class _OnlineRuntime:
                     },
                 )
                 continue
-            next_arrival = self._next_arrival()
-            if next_arrival is not None and next_arrival > self.now:
-                self.idle_ns += next_arrival - self.now
-                self.now = next_arrival
+            wakeups = [time for time in (self._next_arrival(), self._next_prefetch_completion(), self._next_agent_event())
+                       if time is not None and time > self.now]
+            if wakeups:
+                next_wakeup = min(wakeups)
+                self.idle_ns += next_wakeup - self.now
+                self.now = next_wakeup
                 continue
             if self._recover_stalled():
                 continue
@@ -9983,23 +10347,32 @@ class _OnlineRuntime:
         limit = max(4, self._request_count * 4)
         for _ in range(limit):
             before = self.now
+            self._complete_prefetches()
+            self._process_agent_events()
             self._arrive()
             self._priority_preempt()
-            self._prefetch_waiting()
             self._fill_slots()
+            self._prefetch_waiting()
             if self.now == before:
                 return
         raise RuntimeError("online scheduler could not stabilize a boundary")
 
     def _prefetch_waiting(self) -> bool:
-        """Move a fixed page lookahead into the active tier at a free-slot boundary."""
+        """Submit a fixed page lookahead without taking a GPU serving slot.
+
+        Admission runs first so speculative copies cannot displace a waiting
+        request's initial pages. A pending consumer remains SWAPPED until its
+        completion event; independent running cohorts continue in the meantime.
+        """
 
         distance = max(0, int(self.plan.kv_policy.prefetch_distance))
         pool = self.ledger.paged_pool
         if (
             distance <= 0
             or pool is None
-            or self._running_count >= self.plan.scheduler.max_num_seqs
+            or self._paged_pool_transfer_executor is None
+            or self._pending_prefetches
+            or self._unconsumed_prefetch_bytes
         ):
             return False
         tokens_per_page = max(1, int(self.plan.kv_policy.tokens_per_page))
@@ -10009,6 +10382,10 @@ class _OnlineRuntime:
             if state.status == RequestStatus.SWAPPED
             and state.preemption_strategy == "swap"
             and state.swapped_pages > 0
+            and state.spec.request_id not in self._pending_prefetches
+            and state.spec.request_id not in self._unconsumed_prefetch_bytes
+            and state.spec.request_id not in self._prefetch_reclaimed_requests
+            and self._agent_prefetch_allowed(state.spec.request_id)
         ]
         if not candidates:
             return False
@@ -10017,35 +10394,36 @@ class _OnlineRuntime:
             pages = min(lookahead_pages, int(state.swapped_pages))
             if pages <= 0:
                 continue
-            transfer_cursor = self._paged_pool_event_cursor
-            moved = self.ledger.prefetch(state, pages)
-            if moved <= 0:
+            # Preserve growth headroom for the running requests; a speculative
+            # destination reservation must not prevent their next decode step.
+            growth_pages = sum(max(0, self.ledger.pages_for_tokens(
+                _max_live_kv_tokens(active.spec.prompt_tokens, active.spec.output_tokens))
+                - active.kv_pages) for active in self._state_values
+                if active.status == RequestStatus.RUNNING)
+            if not self.physical_ledger.can_adjust(
+                    self.plan.kv_policy.cache_component,
+                    (pages + growth_pages) * self.plan.kv_policy.bytes_per_page):
                 continue
-            self._sync_paged_pool_events()
-            # Put the aggregate boundary before the per-page physical events
-            # while retaining their actual completion timestamps.
-            start = self.now
-            if transfer_cursor < len(pool.events):
-                start = min(
-                    float(
-                        pool.events[index].start_ns
-                        if pool.events[index].start_ns is not None
-                        else self.now
-                    )
-                    for index in range(transfer_cursor, len(pool.events))
-                )
+            prepared = self.ledger.prepare_prefetch(state, pages)
+            if not prepared:
+                continue
+            self._publish_prefetch_resource_availability()
+            start = min(plan.start_ns for _page, plan in prepared)
+            completion = max(plan.completion_ns for _page, plan in prepared)
             details = {
                 "distance_tokens": distance,
                 "lookahead_pages": lookahead_pages,
-                "pages": moved,
-                "bytes": moved * self.plan.kv_policy.bytes_per_page,
+                "pages": len(prepared),
+                "bytes": len(prepared) * self.plan.kv_policy.bytes_per_page,
+                "completion_ns": completion,
+                "completion_is_final": all(plan.advance is None for _page, plan in prepared),
+                "execution_mode": "asynchronous_physical_copy",
+                "consumer_dependency": state.spec.request_id,
             }
+            self._pending_prefetches[state.spec.request_id] = {
+                "prepared": prepared, "completion_ns": completion, "details": details}
             self.events.append(
                 ServingEvent(start, "kv_prefetch_start", state.spec.request_id,
-                             details=details)
-            )
-            self.events.append(
-                ServingEvent(self.now, "kv_prefetch", state.spec.request_id,
                              details=details)
             )
             self.prefetch_distance_tokens = max(
@@ -10056,6 +10434,117 @@ class _OnlineRuntime:
             )
             return True
         return False
+
+    def _next_prefetch_completion(self) -> Optional[float]:
+        # A staged copy first wakes at its next dependency boundary; only
+        # after the target write is submitted is its end a final completion.
+        times = []
+        for entry in self._pending_prefetches.values():
+            if entry.get("cancel_requested_ns") is not None:
+                times.append(float(entry["completion_ns"]))
+                continue
+            advancing = [float(plan.completion_ns) for _page, plan in entry["prepared"]
+                         if plan.advance is not None]
+            times.append(min(advancing) if advancing else float(entry["completion_ns"]))
+        return min(times, default=None)
+
+    def _advance_prefetches_until(self, timestamp_ns: float) -> None:
+        """Submit downstream copy phases only after their inputs are ready.
+
+        This advances neither serving time nor the host/GPU clocks. The live
+        kernel calls it between task admissions so a future HBM write cannot
+        push the memory admission clock past earlier independent work.
+        """
+        while True:
+            ready = [(float(plan.completion_ns), request_id, index, plan)
+                     for request_id, entry in self._pending_prefetches.items()
+                     for index, (_page, plan) in enumerate(entry["prepared"])
+                     if entry.get("cancel_requested_ns") is None
+                     and plan.advance is not None and float(plan.completion_ns) <= timestamp_ns]
+            deadlines = [(float(info["ttl_at_ns"]), request_id)
+                         for request_id, info in self._agent_paused.items()
+                         if request_id in self._pending_prefetches
+                         and self._pending_prefetches[request_id].get("cancel_requested_ns") is None
+                         and info.get("ttl_at_ns") is not None
+                         and float(info["ttl_at_ns"]) <= float(info["resume_ns"])
+                         and (not all(plan.advance is None for _page, plan in self._pending_prefetches[request_id]["prepared"])
+                              or float(self._pending_prefetches[request_id]["completion_ns"]) > float(info["ttl_at_ns"]))
+                         and float(info["ttl_at_ns"]) <= timestamp_ns]
+            if deadlines and (not ready or min(deadlines)[0] <= min(ready)[0]):
+                deadline, request_id = min(deadlines)
+                self._cancel_prefetch(request_id, deadline, "session_ttl")
+                continue
+            if not ready:
+                return
+            _end, request_id, index, plan = min(ready, key=lambda value: value[:3])
+            entry = self._pending_prefetches[request_id]
+            prepared = list(entry["prepared"])
+            prepared[index] = (prepared[index][0], plan.advance())
+            entry["prepared"] = tuple(prepared)
+            entry["completion_ns"] = max(float(item.completion_ns) for _page, item in prepared)
+            entry["details"]["completion_ns"] = entry["completion_ns"]
+            entry["details"]["completion_is_final"] = all(item.advance is None for _page, item in prepared)
+            self._publish_prefetch_resource_availability()
+
+    def _publish_prefetch_resource_availability(self) -> None:
+        # Physical cores reserve the shared lane calendar directly. Ordinary
+        # link/controller tasks read the kernel's scalar readiness mirror;
+        # update it just as kernel.step does after physical task resolution.
+        kernel = self._execution_resource_kernel
+        for resource_id, lanes in kernel.physical_runtime.timeline.lane_available.items():
+            if lanes:
+                kernel.resource_available[resource_id] = min(lanes)
+        for logical_id, owner in kernel.resource_owners.items():
+            if owner in kernel.resource_available:
+                kernel.resource_available[logical_id] = kernel.resource_available[owner]
+
+    def _advance_prefetches_before_kernel_step(self, kernel: UnifiedEventKernel) -> None:
+        while self._pending_prefetches:
+            ready = kernel.peek_ready_key()
+            if ready is None:
+                return
+            phase_ready = min((float(plan.completion_ns)
+                for entry in self._pending_prefetches.values() for _page, plan in entry["prepared"]
+                if entry.get("cancel_requested_ns") is None and plan.advance is not None), default=None)
+            if phase_ready is None or phase_ready > float(ready[0]):
+                return
+            self._advance_prefetches_until(phase_ready)
+
+    def _complete_prefetches(self) -> None:
+        """Publish ready copies before admission; retain both copies until then."""
+        self._advance_prefetches_until(self.now)
+        for request_id, entry in tuple(self._pending_prefetches.items()):
+            if entry.get("cancel_requested_ns") is None or float(entry["completion_ns"]) > self.now:
+                continue
+            bills = [self.ledger.paged_pool.cancel_prepared_restore(page, plan, now_ns=self.now)
+                     for page, plan in entry["prepared"]]
+            size = int(entry["details"]["bytes"])
+            self.prefetch_cancelled_bytes += size
+            self.events.append(ServingEvent(float(entry["completion_ns"]), "kv_prefetch_cancelled", request_id,
+                details={"bytes": size, "requested_ns": entry["cancel_requested_ns"],
+                    "reason": entry["cancel_reason"], "source_preserved": True,
+                    "submitted_phases": tuple(phase for bill in bills for phase in bill["phases"]),
+                    "release_semantics": "drain_current_phase_then_free_destination"}))
+            del self._pending_prefetches[request_id]
+            if request_id in self._agent_paused:
+                self._expire_agent_kv(request_id)
+        ready = sorted((float(entry["completion_ns"]), request_id)
+                       for request_id, entry in self._pending_prefetches.items()
+                       if entry["details"]["completion_is_final"]
+                       and float(entry["completion_ns"]) <= self.now)
+        for completion, request_id in ready:
+            entry = self._pending_prefetches[request_id]
+            state = self.states[request_id]
+            self.ledger.complete_prefetch(state, entry["prepared"], now_ns=completion)
+            size = int(entry["details"]["bytes"])
+            self.prefetch_completed_bytes += size
+            self._unconsumed_prefetch_bytes[request_id] = size
+            self._request_device_ready_ns[request_id] = max(
+                self._request_device_ready_ns.get(request_id, 0.0), completion)
+            self.events.append(ServingEvent(completion, "kv_prefetch", request_id,
+                                           details=dict(entry["details"])))
+            del self._pending_prefetches[request_id]
+        self._sync_paged_pool_events()
 
     def _terminal(self) -> bool:
         return self._terminal_count >= self._request_count
@@ -10092,6 +10581,8 @@ class _OnlineRuntime:
                 return
             self._pending_index += 1
             state = self.states[request.request_id]
+            if request.request_id in self._agent_parents:
+                continue
             if state.status == RequestStatus.REJECTED:
                 continue
             self._set_status(state, RequestStatus.WAITING)
@@ -10166,6 +10657,7 @@ class _OnlineRuntime:
             candidates = [
                 state for state in self._state_values
                 if state.status in (RequestStatus.WAITING, RequestStatus.SWAPPED)
+                and state.spec.request_id not in self._agent_paused
             ]
             if not candidates:
                 return
@@ -11205,6 +11697,8 @@ class _OnlineRuntime:
         )
 
     def _resume_swap(self, state: _MutableRequest) -> bool:
+        if state.spec.request_id in self._pending_prefetches:
+            return False
         byte_count = state.swap_bytes
         swapped_pages = state.swapped_pages
         state_byte_count = state.linear_state_swapped_bytes
@@ -11267,17 +11761,19 @@ class _OnlineRuntime:
                     )
                 ):
                     return False
-            if self.ledger.paged_pool is None:
-                extra_bytes = (
-                    target_pages - swapped_pages
-                ) * self.plan.kv_policy.bytes_per_page
-                if not restore_check.transfer(
-                    self.plan.kv_policy.offload_component,
-                    self.plan.kv_policy.cache_component,
-                    byte_count,
-                    extra_bytes,
-                ):
-                    return False
+            # This is a scratch preflight, not a second live transfer. It
+            # must include KV even for paged pools or colocated linear state
+            # can consume the space promised to the pending restore.
+            extra_bytes = (
+                target_pages - swapped_pages - max(0, int(state.kv_pages))
+            ) * self.plan.kv_policy.bytes_per_page
+            if not restore_check.transfer(
+                self.plan.kv_policy.offload_component,
+                self.plan.kv_policy.cache_component,
+                byte_count,
+                extra_bytes,
+            ):
+                return False
         elif not self._reserve_with_pressure(state, target_pages):
             return False
         if byte_count > 0:
@@ -11431,6 +11927,8 @@ class _OnlineRuntime:
         active: List[_MutableRequest] = []
         for state in self._state_values:
             if state.status in (RequestStatus.WAITING, RequestStatus.SWAPPED):
+                if state.spec.request_id in self._pending_prefetches:
+                    continue
                 rank = self._rank(state)
                 if best_rank is None or rank < best_rank:
                     best = state
@@ -11923,6 +12421,24 @@ class _OnlineRuntime:
     ) -> bool:
         if reserve():
             return True
+        # A later arrival can need more space than the requests that were
+        # running when lookahead was submitted. Reclaim unused completed
+        # copies before preempting useful work; in-flight copies finish first
+        # through the event-loop wakeup and retain both capacity reservations.
+        for request_id in tuple(self._unconsumed_prefetch_bytes):
+            candidate = self.states[request_id]
+            if candidate is owner or candidate.status != RequestStatus.SWAPPED:
+                continue
+            reclaimed = self.ledger.reclaim_prefetch(candidate)
+            if reclaimed:
+                self._prefetch_discarded_bytes += self._unconsumed_prefetch_bytes.pop(request_id)
+                self.prefetch_reclaim_bytes += reclaimed
+                self._prefetch_reclaimed_requests.add(request_id)
+                self._sync_paged_pool_events()
+                self.events.append(ServingEvent(self.now, "kv_prefetch_unused", request_id,
+                                               details={"bytes": reclaimed, "reason": "active_capacity_pressure"}))
+                if reserve():
+                    return True
         if not self.plan.scheduler.preemption_enabled:
             return False
         protected = set(protected_request_ids)
@@ -13064,6 +13580,7 @@ class _OnlineRuntime:
         isolated_shadow: Optional[_UniformIsolatedReplay] = None,
         live_metrics=None,
         execution_control: Optional[ExecutionControl] = None,
+        before_step=None,
     ) -> Mapping[str, Tuple[float, float]]:
         specs, source_by_id = cls._stage_task_specs(
             stages, ready_by_stage, namespace
@@ -13081,6 +13598,8 @@ class _OnlineRuntime:
             execution_control.raise_if_cancelled()
             execution_control.report("cohort_tasks", 0, len(specs), message="正在连续物理状态上执行当前批次")
         while remaining:
+            if before_step is not None:
+                before_step(kernel)
             event = kernel.step()
             if event is None:
                 raise ValueError("execution stage task graph could not drain")
@@ -14388,6 +14907,7 @@ class _OnlineRuntime:
                 isolated_shadow,
                 self._live_cohort_metrics,
                 self.execution_control if live_physical else None,
+                self._advance_prefetches_before_kernel_step if self._pending_prefetches else None,
             )
         else:
             stage_envelopes = self._replay_cached_execution_stage_tasks(
@@ -14803,6 +15323,7 @@ class _OnlineRuntime:
                     "_pages", "_requests", "_request_components", "_prefixes",
                     "_bindings", "_owned_bytes", "_page_counter", "_clock",
                     "_events", "_last_error",
+                    "_pending_moves",
                 )
             }
             paged_pool_transfer_executor_snapshot = (
@@ -14811,6 +15332,10 @@ class _OnlineRuntime:
         else:
             paged_pool_transfer_executor_snapshot = None
         physical_snapshot = copy.deepcopy(self.physical_ledger.__dict__)
+        pending_prefetch_snapshot = {
+            request_id: (entry["prepared"], entry["completion_ns"], dict(entry["details"]))
+            for request_id, entry in self._pending_prefetches.items()
+        }
         lifecycle_snapshot = {
             key: getattr(self, key)
             for key in (
@@ -14864,6 +15389,12 @@ class _OnlineRuntime:
             self.ledger.__dict__.update(copy.deepcopy(ledger_snapshot))
             self.physical_ledger.__dict__.clear()
             self.physical_ledger.__dict__.update(copy.deepcopy(physical_snapshot))
+            for request_id, (prepared, completion, details) in pending_prefetch_snapshot.items():
+                entry = self._pending_prefetches[request_id]
+                entry["prepared"] = prepared
+                entry["completion_ns"] = completion
+                entry["details"].clear()
+                entry["details"].update(details)
             if paged_pool is not None and paged_pool_snapshot is not None:
                 for key, value in paged_pool_snapshot.items():
                     setattr(paged_pool, key, copy.deepcopy(value))
@@ -14910,6 +15441,8 @@ class _OnlineRuntime:
             if retained is not None:
                 retained.mark_invalid("cohort execution or commit failed: " + type(error).__name__)
             raise
+        for request_id in set(item.request_id for item in cohort.items):
+            self.prefetch_useful_bytes += self._unconsumed_prefetch_bytes.pop(request_id, 0)
 
     def _execute_cohort(self, cohort: BatchCohort) -> None:
         cohort = self._with_kv_scan_lower_bound(cohort)
@@ -15546,6 +16079,8 @@ class _OnlineRuntime:
     def _finish(self, state: _MutableRequest, timestamp_ns: float) -> None:
         if state.status == RequestStatus.FINISHED:
             return
+        if self._finish_agent_turn(state, timestamp_ns):
+            return
         if self._retained_kv_state is not None:
             self._retained_kv_state.finish(state.spec.request_id)
         if self._prompt_cache_save_enabled() and self.prompt_cache.policy.recurrent_state_layout is not None:
@@ -15573,6 +16108,11 @@ class _OnlineRuntime:
         self._set_status(state, RequestStatus.FINISHED)
         state.finished_ns = timestamp_ns
         finish_details: Dict[str, object] = {"committed": state.committed}
+        ancestor = self._agent_parents.get(state.spec.request_id)
+        while ancestor is not None:
+            self._execution_resource_kernel.release_request_physical_allocations(ancestor)
+            self._agent_handed_off.discard(ancestor)
+            ancestor = self._agent_parents.get(ancestor)
         if defer_prompt_cache_save:
             finish_details["prompt_cache_save_deferred"] = True
         if prompt_cache_entry is not None:
@@ -15596,10 +16136,17 @@ class _OnlineRuntime:
         )
 
     def _recover_stalled(self) -> bool:
+        completion = self._next_prefetch_completion()
+        if completion is not None:
+            self.idle_ns += max(0.0, completion - self.now)
+            self.now = max(self.now, completion)
+            self._complete_prefetches()
+            return True
         unfinished = [
             state for state in self._state_values
             if state.status not in _TERMINAL_STATUSES
             and state.status != RequestStatus.ARRIVALS
+            and state.spec.request_id not in self._agent_paused
         ]
         if not unfinished:
             return False
@@ -15726,15 +16273,32 @@ class _OnlineRuntime:
             prefetch_transfer_time_ns=self.prefetch_transfer_time_ns,
             prefetch_distance_tokens=self.prefetch_distance_tokens,
             prefetch_lookahead_pages=self.prefetch_lookahead_pages,
+            prefetch_completed_bytes=self.prefetch_completed_bytes,
+            prefetch_useful_bytes=self.prefetch_useful_bytes,
+            prefetch_unused_bytes=self._prefetch_discarded_bytes + sum(self._unconsumed_prefetch_bytes.values()),
+            prefetch_inflight_bytes=sum(int(entry["details"]["bytes"])
+                                        for entry in self._pending_prefetches.values()),
+            prefetch_reclaim_bytes=self.prefetch_reclaim_bytes,
+            prefetch_cancelled_bytes=self.prefetch_cancelled_bytes if self._agent_config else None,
+            prefetch_execution_mode=("asynchronous_physical_copy" if
+                self.plan.kv_policy.prefetch_distance > 0 and self._paged_pool_transfer_executor is not None
+                else "disabled"),
+            requested_allocation_policy=self._requested_kv_allocation_policy,
+            effective_allocation_policy=self.plan.kv_policy.allocation_policy,
+            allocation_policy_reason=self._kv_allocation_policy_reason,
             prefetch_distance_modeled=(
                 self.plan.kv_policy.prefetch_distance > 0
+                and self.ledger.paged_pool is not None
+                and self.ledger.paged_pool.transfer_executor is not None
+                and self.plan.kv_policy.offload_component is not None
             ),
             offload_events=self.swap_events,
             offload_bytes=self.swap_bytes,
             migration_events=self.swap_events
-            + batch_kind_counts.get("kv_swap_in", 0)
-            + self.prefetch_events,
-            migration_bytes=self.swap_bytes + self.swap_in_bytes + self.prefetch_bytes,
+            + sum(event.event_type == "kv_swap_in" for event in self.events)
+            + self.prefetch_events
+            + sum(event.event_type == "kv_prefetch_unused" for event in self.events),
+            migration_bytes=self.swap_bytes + self.swap_in_bytes + self.prefetch_bytes + self.prefetch_reclaim_bytes,
             swap_out_bytes=self.swap_bytes,
             physical_swap_bytes=self.swap_bytes + self.swap_in_bytes,
             logical_bytes_per_token=self.plan.kv_policy.logical_bytes_per_token,
@@ -15742,7 +16306,7 @@ class _OnlineRuntime:
             logical_swap_in_bytes=self.logical_swap_in_bytes,
             logical_migration_bytes=self.logical_swap_out_bytes
             + self.logical_swap_in_bytes
-            + self._logical_bytes_for_physical(self.prefetch_bytes),
+            + self._logical_bytes_for_physical(self.prefetch_bytes + self.prefetch_reclaim_bytes),
             physical_offload_bytes=self.swap_bytes,
             max_live_tokens_per_request=max(
                 (
@@ -16009,6 +16573,7 @@ class _OnlineRuntime:
             scheduler_metrics,
             makespan,
             runtime_origin_ns=self._runtime_origin_ns,
+            agent_lifecycle_metrics=dict(self._agent_metrics),
             prompt_cache_metrics=self.prompt_cache.metrics(),
             owner_residency_metrics=owner_residency_metrics,
             schedule_trace=tuple(self._schedule_trace),
@@ -16021,6 +16586,9 @@ class _OnlineRuntime:
                     if self.ledger.paged_pool is not None
                     else None
                 ),
+                "paged_kv_transfers": ({"events": tuple(self._paged_pool_transfer_executor.events),
+                    "counters": dict(self._paged_pool_transfer_executor.counters)}
+                    if self._paged_pool_transfer_executor is not None else {}),
             },
         )
 

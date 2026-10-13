@@ -43,7 +43,7 @@ class WriteBufferSemanticsTests(unittest.TestCase):
         self.assertEqual(core.buffered_page_count, 1)
         self.assertEqual(core.pending_write_buffer_bytes, 8192)
 
-        staged_read = core.execute(AccessRequest("r0", Operation.READ, 0, PAGE))
+        staged_read = core.execute(AccessRequest("r0", Operation.READ, 0, 8192))
         self.assertEqual(staged_read.staging_read_hits, 1)
         self.assertEqual(staged_read.physical_read_bytes, 0)
         self.assertNotIn("PAGE_READ", {stage.name for stage in staged_read.stages})
@@ -53,6 +53,7 @@ class WriteBufferSemanticsTests(unittest.TestCase):
         self.assertEqual(drained["merge_bytes"], 4096)
         self.assertEqual(drained["physical_programs"], 1)
         self.assertEqual(drained["physical_write_bytes"], PAGE)
+        self.assertEqual(drained["physical_read_bytes"], PAGE)
         self.assertGreater(drained["media_drain_completion_ns"], second.host_ack_completion_ns)
         self.assertEqual(core.pending_write_buffer_bytes, 0)
 
@@ -78,6 +79,48 @@ class WriteBufferSemanticsTests(unittest.TestCase):
         self.assertEqual(result.physical_programs, 1)
         self.assertEqual(core.buffered_page_count, 0)
         self.assertEqual(core.flush_write_buffer()["buffered_write_mode"], False)
+
+    def test_partial_staging_cannot_supply_unwritten_bytes(self):
+        core = NandCore(_config())
+        core.execute(AccessRequest("w", Operation.WRITE, 0, 4096))
+        untouched = core.execute(AccessRequest("r", Operation.READ, 8192, 4096))
+        self.assertEqual(untouched.staging_read_hits, 0)
+        self.assertEqual(untouched.physical_read_bytes, PAGE)
+
+    def test_explicit_early_drain_waits_for_host_payload(self):
+        core = NandCore(_config(front_ns=0.0, host_bandwidth_gb_s=0.1))
+        write = core.execute(AccessRequest("w", Operation.WRITE, 0, PAGE))
+        drained = core.flush(now_ns=0.0)
+        self.assertGreaterEqual(drained["media_drain_start_ns"], write.completion_ns)
+
+    def test_distinct_channels_drain_in_parallel(self):
+        core = NandCore(_config(channels=2, write_buffer_bytes=2 * PAGE))
+        write = core.execute(AccessRequest("w", Operation.WRITE, 0, 2 * PAGE))
+        drained = core.flush(now_ns=write.completion_ns)
+        self.assertAlmostEqual(drained["media_drain_completion_ns"] - write.completion_ns,
+                               PAGE / core.config.internal_bandwidth_gb_s + core.config.page_program_ns)
+        self.assertEqual(drained["pages_read"], 0)
+
+    def test_auto_drain_includes_physical_work_in_triggering_request(self):
+        core = NandCore(_config(write_buffer_bytes=4096))
+        core.execute(AccessRequest("w0", Operation.WRITE, 0, 4096))
+        second = core.execute(AccessRequest("w1", Operation.WRITE, PAGE, 4096))
+        self.assertEqual(second.physical_programs, 1)
+        self.assertEqual(second.physical_read_bytes, PAGE)
+        self.assertEqual(second.internal_transfer_bytes, 2 * PAGE)
+        self.assertGreater(second.counters["resource_busy_ns"]["nand:array:0"], 0)
+
+    def test_summary_large_read_matches_staged_detailed_read(self):
+        config = _config(pages_per_block=256)
+        detailed = NandCore(config)
+        summary = NandCore(config, capture_details=False)
+        for core in (detailed, summary):
+            core.execute(AccessRequest("w", Operation.WRITE, 0, PAGE))
+        request = AccessRequest("r", Operation.READ, 0, 128 * PAGE)
+        left, right = detailed.execute(request), summary.execute(request)
+        self.assertEqual(right.staging_read_hits, 1)
+        self.assertEqual(left.physical_read_bytes, right.physical_read_bytes)
+        self.assertEqual(left.completion_ns, right.completion_ns)
 
 
 if __name__ == "__main__":

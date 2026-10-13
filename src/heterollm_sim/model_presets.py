@@ -34,8 +34,8 @@ EXACT = "exact"
 APPROXIMATION = "analytical_approximation"
 OUT_OF_DOMAIN = "out_of_domain"
 SUPPORT_LEVELS = frozenset({EXACT, APPROXIMATION, OUT_OF_DOMAIN})
-CATALOG_VERSION = "0.7"
-CATALOG_CUTOFF_AT = "2026-10-08T00:00:00Z"
+CATALOG_VERSION = "0.8"
+CATALOG_CUTOFF_AT = "2026-10-13T00:00:00Z"
 
 DIAGRAM_VERIFIED = "diagram_verified"
 CONFIG_VERIFIED_NO_OFFICIAL_DIAGRAM = "config_verified_no_official_diagram"
@@ -445,6 +445,18 @@ _PRESETS: Tuple[PresetDefinition, ...] = (
         tie_word_embeddings=False,
         notes="官方 config.json 的 MoE 几何；当前 IR 保留专家数量和 Top-K，专家路由字节数按分析模型估算。",
     ),
+    _moe(
+        "qwen3-coder-30b-a3b", "Qwen3-Coder-30B-A3B-Instruct", "Qwen3", "30B/A3B",
+        "Qwen/Qwen3-Coder-30B-A3B-Instruct", 48, 2048, 768, 32, 4, 128, 8,
+        151936, 262144, policy="apache", support=APPROXIMATION,
+        attention_head_dim=128, architecture="qwen3", tie_word_embeddings=False,
+        notes="官方公开config.json（2026-10-13读取）：48层、128专家Top-8、128 head_dim；仅结构与解析路由，不推断代码质量或实测GPU速度。",
+        architecture_evidence=ArchitectureEvidence(
+            status=CONFIG_VERIFIED_NO_OFFICIAL_DIAGRAM, source_type="official_config",
+            source_url="https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct/blob/main/config.json",
+            config_url="https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct/resolve/main/config.json",
+            notes="Public official config dimensions; no weights downloaded."),
+    ),
 
     # Meta Llama official text-only models.  The official repositories are
     # gated and use the Llama Community License; dimensions remain usable for
@@ -542,6 +554,88 @@ _PRESETS += (
     ),
 )
 
+# Research-only shape. This is deliberately not named after a released model.
+_PRESETS += (
+    PresetDefinition(
+        preset_id="synthetic-1t-gqa-moe", name="Synthetic 1T GQA MoE",
+        family="Synthetic", parameter_scale="~1.04T", source_repo="",
+        source_revision="local-design-v1", license="not_applicable", openness="synthetic",
+        support_level=APPROXIMATION, source="synthetic", vocabulary_size=128256,
+        max_sequence_length=131072,
+        patterns=(_pattern(40, "moe", 8192, 2048, 64, 8, 512, 8, attention_head_dim=128),),
+        notes="人为设计的 40 层、512 专家 top-8 GQA MoE，BF16 约 1.04T 参数；不是已发布或训练模型。",
+        limitations=("参数、路由与质量均为合成假设；只用于完整算子硬件容量与供给实验。",),
+        architecture_evidence=ArchitectureEvidence(status=UNPINNED_SOURCE,
+            source_type="explicit_synthetic_design", source_url="",
+            notes="All geometry is an explicit local research assumption, with no upstream checkpoint."),
+    ),
+)
+
+# Unsupported native graphs remain metadata-only. The separate research runner
+# consumes the real structural fields; it never materializes MLA as GQA.
+EXTENDED_MODEL_SPECS: Mapping[str, Mapping[str, Any]] = {
+    "deepseek-v3": dict(name="DeepSeek-V3", family="DeepSeek", parameter_scale="671B",
+        repo="deepseek-ai/DeepSeek-V3", architecture="mla", layers=61, hidden=7168,
+        vocabulary=129280, max_context=163840, heads=128, q_rank=1536, kv_rank=512,
+        nope_dim=128, rope_dim=64, value_dim=128, dense_layers=3, dense_ffn=18432,
+        expert_ffn=2048, experts=256, top_k=8, shared_experts=1,
+        native_precision="FP8 block-scaled checkpoint; probe explicitly expands matrices to BF16",
+        facts="Dimensions from official checkpoint config; absorbed MLA contractions from vendor inference code.",
+        sources=("https://huggingface.co/deepseek-ai/DeepSeek-V3/raw/main/config.json",
+                 "https://raw.githubusercontent.com/deepseek-ai/DeepSeek-V3/main/inference/model.py"),
+        assumptions=(), unsupported=("native MLA attention graph", "MTP branch")),
+    "deepseek-v4-flash-0731": dict(name="DeepSeek-V4-Flash-0731", family="DeepSeek", parameter_scale="Flash",
+        repo="deepseek-ai/DeepSeek-V4-Flash-0731", architecture="compressed_shared_kv", layers=43,
+        hidden=4096, vocabulary=129280, max_context=1048576, heads=64, head_dim=512,
+        q_rank=1024, o_rank=1024, o_groups=8, rope_dim=64, window=128,
+        index_heads=64, index_dim=128, index_top_k=512, expert_ffn=2048,
+        experts=256, top_k=6, shared_experts=1, hash_layers=3, hc_mult=4, hc_sinkhorn_iters=20,
+        compress_ratios=(0, 0) + (4, 128) * 20 + (4,),
+        auxiliary_compress_ratios=(0, 0, 0),
+        native_precision="FP4 expert / FP8 projection checkpoint; probe explicitly expands matrices to BF16",
+        facts="Official 0731 config: first 43 compression entries are backbone; remaining 3 belong to auxiliary branches.",
+        sources=("https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/raw/main/config.json",
+                 "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/deepseek_v4/modeling_deepseek_v4.py"),
+        assumptions=("Memory probe uses selected CSA entries as one packed contiguous range; it does not claim random gather locality.",),
+        unsupported=("native compressed sparse/heavily compressed attention", "mHC nonlinear kernels", "MTP/dspark")),
+    "llama4-scout": dict(name="Llama 4 Scout", family="Llama4", parameter_scale="109B/17B active",
+        repo="meta-llama/Llama-4-Scout-17B-16E-Instruct", architecture="chunked_full_gqa_moe",
+        layers=48, hidden=5120, vocabulary=202048, max_context=10000000,
+        heads=40, kv_heads=8, head_dim=128, expert_ffn=8192, dense_ffn=16384,
+        experts=16, top_k=1, shared_experts=1, moe_step=1, full_attention_interval=4, chunk=8192,
+        native_precision="BF16 text geometry; multimodal checkpoint is outside this text probe",
+        facts="16 experts and 10M context from Meta model card; detailed text dimensions are public Transformers Scout defaults, not gated checkpoint revalidation.",
+        sources=("https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct",
+                 "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/llama4/configuration_llama4.py",
+                 "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/llama4/modeling_llama4.py"),
+        assumptions=("Probe uses public Scout text-config defaults and evicts completed 8192-token chunks.",),
+        unsupported=("native chunked/full interleaved attention", "vision and multimodal fusion")),
+    "llama4-maverick": dict(name="Llama 4 Maverick", family="Llama4", parameter_scale="400B/17B active",
+        repo="meta-llama/Llama-4-Maverick-17B-128E-Instruct", architecture="chunked_full_gqa_moe",
+        layers=48, hidden=5120, vocabulary=202048, max_context=1000000,
+        heads=40, kv_heads=8, head_dim=128, expert_ffn=8192, dense_ffn=16384,
+        experts=128, top_k=1, shared_experts=1, moe_step=2, full_attention_interval=4, chunk=8192,
+        native_precision="BF16-expanded text geometry scenario; not a checkpoint precision claim",
+        facts="128 experts and 1M context from Meta card; Transformers implementation documents alternating dense/MoE for 128E.",
+        sources=("https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct",
+                 "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/llama4/modeling_llama4.py",
+                 "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/llama4/configuration_llama4.py"),
+        assumptions=("Unavailable gated checkpoint dimensions are replaced by the stated Scout-default text geometry; this is a Maverick structure scenario, not an exact checkpoint reconstruction.",
+                     "Dense/MoE alternate every two layers; 3:1 chunked/full attention uses the declared config-default scenario."),
+        unsupported=("native chunked/full interleaved attention", "gated checkpoint geometry verification", "vision and multimodal fusion")),
+}
+
+_PRESETS += tuple(PresetDefinition(
+    preset_id=key, name=spec["name"], family=spec["family"], parameter_scale=spec["parameter_scale"],
+    source_repo=spec["repo"], source_revision="main", license="Llama 4 Community License" if spec["family"]=="Llama4" else "MIT/model-specific",
+    openness="open_weight", commercial_use="conditional" if spec["family"]=="Llama4" else "unspecified",
+    support_level=OUT_OF_DOMAIN, notes=spec["facts"] + " Separate structural/physical research probes are available in scripts/hbf_hbm_extended_models.py; no native full-serving graph is claimed.", vocabulary_size=spec["vocabulary"],
+    max_sequence_length=spec["max_context"], patterns=(), architecture=spec["architecture"],
+    layer_count_override=spec["layers"], model_kind_override="moe", coverage="metadata_only",
+    access="gated" if spec["family"]=="Llama4" else "public", limitations=spec["assumptions"],
+    unsupported_subgraphs=spec["unsupported"],
+) for key, spec in EXTENDED_MODEL_SPECS.items())
+
 _BY_ID: Mapping[str, PresetDefinition] = {item.preset_id: item for item in _PRESETS}
 if len(_BY_ID) != len(_PRESETS):  # import-time invariant, never user input
     raise RuntimeError("duplicate model preset id")
@@ -556,6 +650,8 @@ def _bundled_model_resource(definition: PresetDefinition) -> Optional[str]:
 
 
 def _architecture_config_url(definition: PresetDefinition) -> str:
+    if definition.source == "synthetic":
+        return ""
     ref = definition.source_sha or definition.source_revision or "main"
     return "https://huggingface.co/{}/blob/{}/config.json".format(
         definition.source_repo,
@@ -580,6 +676,8 @@ def _resolved_architecture_evidence(
 
 
 def _architecture_evidence(definition: PresetDefinition) -> ArchitectureEvidence:
+    if definition.source == "synthetic" and definition.architecture_evidence is not None:
+        return definition.architecture_evidence
     if _bundled_model_resource(definition) and definition.architecture_evidence:
         return definition.architecture_evidence
     config_url = _architecture_config_url(definition)
@@ -708,6 +806,8 @@ def model_preset_metadata(definition: PresetDefinition) -> Dict[str, Any]:
 
 
 def _provenance_status(definition: PresetDefinition) -> str:
+    if definition.source == "synthetic":
+        return "explicit_synthetic_design"
     if _bundled_model_resource(definition):
         return GGUF_TENSOR_METADATA
     if definition.source_sha and definition.config_hash:

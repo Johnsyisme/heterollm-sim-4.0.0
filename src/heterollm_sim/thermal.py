@@ -1,7 +1,7 @@
-"""Opt-in static thermal operating-point derating, never a temperature solver.
+"""Opt-in static operating points and explicitly assumed dynamic NAND RC state.
 
 Factors are supplied by the caller (measurement or labeled sensitivity input).
-No power threshold, temperature rise, cooldown, or calibration is inferred.
+No calibration is inferred. Dynamic NAND parameters are authored separately.
 Always apply to a baseline scenario: capacities, placement and ownership stay
 fixed while cloned profiles and link/endpoint rates change together.
 """
@@ -16,6 +16,60 @@ from .config import ScenarioConfig
 from .cost_models import (
     CPUProfile, DigitalSramCimProfile, GPUProfile, HBMProfile, HostMemoryProfile,
 )
+
+
+def advance_nand_thermal(state, config, start_ns: float, work_ns: float):
+    """Integrate one serial physical-plane operation, including threshold events.
+
+    ``work_ns`` is unthrottled media work; thermal service-rate changes alter
+    its actual completion time. Idle gaps cool the same persistent plane.
+    Different planes are explicitly uncoupled; this is an RC sensitivity model.
+    """
+    previous = state or {"end_ns": 0., "temperature_c": config.initial_c, "throttled": False}
+    if start_ns < previous["end_ns"]-1e-6:
+        raise ValueError("dynamic thermal operations must be ordered within their physical plane")
+    tau_ns = config.resistance_k_per_w*config.capacitance_j_per_k*1e9
+    def evolve(temperature, power, duration):
+        equilibrium = config.ambient_c + power*config.resistance_k_per_w
+        return equilibrium + (temperature-equilibrium)*math.exp(-duration/tau_ns)
+    temperature = evolve(previous["temperature_c"], config.idle_power_w,
+                         max(0., start_ns-previous["end_ns"]))
+    throttled = previous["throttled"]
+    release = config.throttle_threshold_c-config.hysteresis_c
+    idle_recovery = int(throttled and temperature <= release)
+    if idle_recovery:
+        throttled = False
+    if temperature >= config.throttle_threshold_c:
+        throttled = True
+    initial = temperature
+    peak = max(temperature, previous["temperature_c"])
+    remaining, elapsed, throttle_ns, switches = float(work_ns), 0., 0., 0
+    while remaining > 1e-12:
+        rate = config.throttled_service_rate if throttled else 1.
+        power = config.active_power_w*(config.throttled_power_fraction if throttled else 1.)
+        equilibrium = config.ambient_c+power*config.resistance_k_per_w
+        finish_time = remaining/rate
+        target = release if throttled else config.throttle_threshold_c
+        crossing = math.inf
+        if (throttled and equilibrium < target < temperature) or (not throttled and temperature < target < equilibrium):
+            crossing = -tau_ns*math.log((target-equilibrium)/(temperature-equilibrium))
+        duration = min(finish_time, crossing)
+        temperature = evolve(temperature, power, duration)
+        peak = max(peak, temperature)
+        elapsed += duration
+        throttle_ns += duration if throttled else 0.
+        remaining = max(0., remaining-duration*rate)
+        if crossing < finish_time:
+            throttled = not throttled
+            switches += 1
+        if switches > 100000:
+            raise ValueError("thermal RC assumptions cause over 100000 threshold crossings in one page operation")
+    return {"end_ns": start_ns+elapsed, "temperature_c": temperature, "throttled": throttled}, {
+        "duration_ns": elapsed, "temperature_start_c": initial, "temperature_end_c": temperature,
+        "peak_temperature_c": peak, "thermal_throttle_ns": throttle_ns,
+        "thermal_extra_ns": max(0., elapsed-work_ns), "thermal_switches": switches,
+        "idle_recoveries": idle_recovery,
+    }
 
 
 @dataclass(frozen=True)

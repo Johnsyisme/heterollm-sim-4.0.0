@@ -1399,41 +1399,55 @@ def run_acceptance() -> dict[str, Any]:
         {
             "stage": "0_baseline",
             "status": "passed",
+            "scope": "analytical KV byte-count and capacity/lifecycle mechanism checks, not GPU timing calibration",
             "evidence": ["standard_kv_bytes", "capacity_only_and_lifecycle"],
         },
         {
             "stage": "1_parameters_and_timing",
             "status": "passed",
+            "scope": "directional bandwidth, legacy configuration compatibility and shared resource timing",
             "evidence": ["directional_bandwidth", "legacy_configs", "shared_physical_contention"],
         },
         {
             "stage": "2_simplified_hardware_execution",
             "status": "passed",
+            "scope": "simplified DRAM/NAND execution, transfer accounting and policy sensitivity",
             "evidence": ["shared_physical_contention", "physical_kv_migration", "core_invariants", "backend_policy_sensitivity"],
         },
         {
             "stage": "3_capacity_lifecycle_and_write_buffer",
             "status": "passed",
+            "scope": "finite capacity, page lifetime and explicit host-ack/media-drain buffer behavior",
             "evidence": ["capacity_only_and_lifecycle", "finite_write_buffer"],
         },
         {
             "stage": "4_tiering_migration_and_prefetch",
             "status": "passed",
+            "scope": "synthetic lifecycle, page transfers, fixed lookahead and SLO classification; no predictor-accuracy claim",
             "evidence": ["serving_paged_swap", "prefetch_distance", "session_lifecycle", "slo_semantics"],
         },
         {
             "stage": "5_metrics_and_experiment_entry",
-            "status": "passed",
+            "status": "partial",
+            "scope": "memory-service scans and experiment entry points; does not certify all attachment section 6.3 metrics",
             "evidence": ["fixed_workload_scan", "hbm_hbf_ratio", "package_budget_sweep"],
+            "remaining": ["completion_assessment_by_research_runner"],
+            "not_assessed_here": ["complete_section_6_3_metric_coverage", "representative_tail_latency_and_stable_goodput", "serving_session_capacity", "predictor_and_speculative_acceptance_metrics", "declared_assumption_energy_cost_area_lifetime_studies"],
         },
         {
             "stage": "6_acceptance_and_question_matrix",
             "status": "partial",
+            "scope": "backend checks only; the full research workload and architecture matrix is assessed by separate runners",
             "evidence": [item["id"] for item in checks],
-            "remaining": ["external_named_GPU_HBM_validation", "paper_trace_level_comparison"],
+            "remaining": ["completion_assessment_by_research_runner", "external_named_GPU_HBM_validation", "paper_trace_level_comparison"],
+            "not_assessed_here": ["named_model_workload_matrix", "matched_ABCD_and_host_SSD_CXL_serving_comparison", "multi_GPU_and_common_budget_comparison", "full_requested_parameter_scans"],
             "external_validation": "pending_external_measurements",
         },
     ]
+    # A failed prerequisite must never leave a stage labelled "passed".
+    for stage in plan_completion:
+        if not all(passed.get(key, False) for key in stage["evidence"]):
+            stage["status"] = "failed"
     return {"schema_version": 2, "passed": all(item["passed"] for item in checks + experiments),
             "scope": "single-device synthetic HBM/HBF physical and serving acceptance",
             "assumptions": {"page_bytes": PAGE, "hbm_interface_gb_s": 488.0,
@@ -1450,8 +1464,15 @@ def run_acceptance() -> dict[str, Any]:
             },
             "checks": checks, "experiments": experiments, "capabilities": capabilities,
             "validation_matrix": validation_matrix,
+            "plan_completion_scope": "Backend work packages only. A passed stage certifies its explicit scope and evidence, not the full research proposal or commercial hardware accuracy.",
             "plan_completion": plan_completion,
             "plan_complete": all(item["status"] == "passed" for item in plan_completion),
+            "research_followups": {
+                "assessed_by_research_runner": ["full model/workload/architecture comparison matrix", "complete metrics and parameter sensitivity outputs with explicit assumptions"],
+                "external_evidence": ["independent named-GPU/HBM measurements", "real HBF silicon calibration", "paper-specific route and workload traces when obtainable"],
+                "long_term_research": ["stateful FTL/GC, wear leveling and retention", "RAS, security and ECC", "controller QoS and base-die PIM"],
+                "priority_semantics": "Long-term research is disclosed separately; it is not a prerequisite for passing the current simplified-backend checks or completing a clearly scoped simulation study.",
+            },
             "external_validation": "pending_external_measurements",
             "limitations": ["Serving coverage uses a tiny synthetic scheduler workload; it does not claim calibrated LLM token throughput.",
                             "Prefetch is modeled as fixed token lookahead rounded to pages in paged-pool serving; no predictive policy is included.",

@@ -559,9 +559,13 @@ def _sum_batch_storage_traffic(
     optional = {key: 0 for key in (
         "logical_read_bytes", "logical_write_bytes", "internal_transfer_bytes",
         "pages_read", "pages_programmed", "pages_touched", "media_waves",
-        "read_operations", "program_operations", "rmw_read_operations")}
+        "read_operations", "program_operations", "rmw_read_operations",
+        "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples")}
     optional.update(host_queue_wait_ns=0.0, media_queue_wait_ns=0.0)
     observed = {key: 0 for key in optional}
+    peaks = {key: 0 for key in ("host_outstanding_at_admission_peak",
+             "host_read_outstanding_at_admission_peak", "host_write_outstanding_at_admission_peak")}
+    peak_observed = {key: 0 for key in peaks}
     physical_batches = 0
     organization_batches = 0
     operations: Dict[str, int] = {}
@@ -569,11 +573,18 @@ def _sum_batch_storage_traffic(
     profiles: List[str] = []
     backgrounds: List[Any] = []
     organizations: List[Any] = []
+    page_observations = []
+    complete_page_batches = 0
     for batch in result.serving.batches:
         ledger = batch.cost.metadata.get("storage_traffic", {})
         if not isinstance(ledger, Mapping) or not ledger.get("task_count"):
             continue
         physical_batches += 1
+        if ledger.get("nand_observations") is not None:
+            page_observations.append(ledger["nand_observations"])
+            complete_page_batches += int(all(
+                ledger.get("metric_availability", {}).get(key, {}).get("status") == "recorded"
+                for key in ("nand_read_queue_depth", "nand_program_queue_depth")))
         for key in numeric:
             value = ledger.get(key, 0)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -583,6 +594,11 @@ def _sum_batch_storage_traffic(
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 optional[key] += value
                 observed[key] += 1
+        for key in peaks:
+            value = ledger.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                peaks[key] = max(peaks[key], int(value))
+                peak_observed[key] += 1
         for operation, count in (ledger.get("operation_counts", {}) or {}).items():
             if isinstance(count, int) and not isinstance(count, bool):
                 operations[str(operation)] = operations.get(str(operation), 0) + count
@@ -613,17 +629,32 @@ def _sum_batch_storage_traffic(
                 organizations.append(value)
     if not numeric["task_count"]:
         return {"schema_version": "heterollm.nand-traffic/v1", "task_count": 0}
+    from .nand_core import summarize_nand_observations
+    observed_pages = summarize_nand_observations(page_observations)
     return {
         "schema_version": "heterollm.nand-traffic/v1",
         **{key: (int(value) if key not in {"service_ns", "energy_pj", "queue_wait_ns", "host_queue_wait_ns", "media_queue_wait_ns"} else value)
            for key, value in numeric.items()},
         **{key: value if observed[key] == physical_batches else None for key, value in optional.items()},
+        **{key: value if peak_observed[key] == physical_batches else None for key, value in peaks.items()},
+        "page_access_payload_utilization": (
+            optional["page_access_payload_bytes"] / optional["page_access_capacity_bytes"]
+            if observed["page_access_payload_bytes"] == physical_batches
+            and observed["page_access_capacity_bytes"] == physical_batches
+            and optional["page_access_capacity_bytes"] else None),
+        "nand_observations": observed_pages,
+        "nand_read_queue_depth": observed_pages["read_queue_depth"] if observed_pages else None,
+        "nand_program_queue_depth": observed_pages["program_queue_depth"] if observed_pages else None,
+        "queue_depth_scope": "max per-device outstanding host requests sampled at admission, including the new request; buffered writes end at host acknowledgement; not NAND page/program queues",
+        "page_utilization_scope": "logical payload / sum of per-access page-rounded spans; repeated accesses count again; not unique resident capacity utilization",
         "metric_availability": {
-            key: {
+            "nand_read_queue_depth": {"status": "recorded" if complete_page_batches==physical_batches else "partial" if page_observations else "not_recorded", "reason": "page-level observation is opt-in; host requests are separate"},
+            "nand_program_queue_depth": {"status": "recorded" if complete_page_batches==physical_batches else "partial" if page_observations else "not_recorded", "reason": "page-level observation is opt-in; host writes are separate"},
+            **{key: {
                 "status": ("recorded" if count == physical_batches else "partial" if count else "not_recorded"),
                 "recorded_batch_count": count, "physical_batch_count": physical_batches,
             }
-            for key, count in {**observed, "organization_profiles": organization_batches}.items()
+            for key, count in {**observed, **peak_observed, "organization_profiles": organization_batches}.items()},
         },
         "operation_counts": dict(sorted(operations.items())),
         "resource_totals": dict(sorted(resources.items())),
@@ -5785,6 +5816,8 @@ def _online_report_core(
 def _online_report_dict(
     result: OnlineScenarioResult,
     options: VisualizationTraceOptions,
+    *,
+    include_visualization: bool = True,
 ) -> Dict[str, Any]:
     core = _online_report_core(result)
     serving = result.serving
@@ -5810,8 +5843,10 @@ def _online_report_dict(
     result_semantics = _online_result_semantics(
         result, windows_ns=core.measurement_windows_ns
     )
-    visualization = _visualization_payload(result, options)
-    component_timeseries = _component_timeseries(result)
+    visualization = (_visualization_payload(result, options) if include_visualization
+                     else {"status": "not_requested"})
+    component_timeseries = (_component_timeseries(result) if include_visualization
+                           else {"status": "not_requested"})
     return {
         "scenario": result.scenario.name,
         "runtime_placement": _runtime_placement_payload(result.scenario),
@@ -5884,7 +5919,7 @@ def _online_report_dict(
         "linear_state": to_primitive(serving.linear_state_metrics),
         "analytical_coverage": analytical_coverage,
         "batch_history": batch_history,
-        "batch_trace_index": visualization["batch_trace_index"],
+        "batch_trace_index": visualization.get("batch_trace_index"),
         "scheduler_events": scheduler_events,
         "response_limits": {
             "request_details": {
@@ -6133,8 +6168,9 @@ def report_dict(
     visualization_offset: int = 0,
     visualization_limit: int = DEFAULT_VISUALIZATION_EVENT_LIMIT,
     visualization_memory_segment_limit: int = DEFAULT_VISUALIZATION_MEMORY_SEGMENT_LIMIT,
+    include_visualization: bool = True,
 ) -> Dict[str, Any]:
-    """Serialize a bounded report and replay-oriented visualization page."""
+    """Serialize metrics, optionally omitting the expensive UI trace payload."""
 
     with _compilation_scope(result.scenario):
         return _report_dict_in_context(
@@ -6142,6 +6178,7 @@ def report_dict(
             visualization_offset=visualization_offset,
             visualization_limit=visualization_limit,
             visualization_memory_segment_limit=visualization_memory_segment_limit,
+            include_visualization=include_visualization,
         )
 
 
@@ -6151,6 +6188,7 @@ def _report_dict_in_context(
     visualization_offset: int = 0,
     visualization_limit: int = DEFAULT_VISUALIZATION_EVENT_LIMIT,
     visualization_memory_segment_limit: int = DEFAULT_VISUALIZATION_MEMORY_SEGMENT_LIMIT,
+    include_visualization: bool = True,
 ) -> Dict[str, Any]:
     options = VisualizationTraceOptions(
         event_offset=visualization_offset,
@@ -6158,7 +6196,7 @@ def _report_dict_in_context(
         memory_segment_limit=visualization_memory_segment_limit,
     )
     if isinstance(result, OnlineScenarioResult):
-        return _online_report_dict(result, options)
+        return _online_report_dict(result, options, include_visualization=include_visualization)
     execution = result.execution
     request_rows: Dict[str, Any] = {}
     all_tbt: List[float] = []
@@ -6321,7 +6359,8 @@ def _report_dict_in_context(
         "analytical_coverage": analytical_coverage,
         "storage_traffic": to_primitive(execution.storage_traffic),
         "dram_traffic": to_primitive(execution.dram_traffic),
-        "visualization": _visualization_payload(result, options),
+        "visualization": (_visualization_payload(result, options) if include_visualization
+                          else {"status": "not_requested"}),
         "component_timeseries": _component_timeseries(result),
         "report_limits": {
             "requests": {

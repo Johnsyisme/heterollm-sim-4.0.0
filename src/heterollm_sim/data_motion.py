@@ -249,7 +249,18 @@ class PhysicalRuntimeContext:
                     # NAND readiness values are scalars, so a shallow dict
                     # copy is sufficient and avoids copying timeline history.
                     core_state[key] = dict(value)
-                elif key in {"_inflight", "_write_buffer_pending"} and isinstance(value, list):
+                elif key in {"_inflight", "_inflight_operations", "_write_buffer_pending"} and isinstance(value, list):
+                    core_state[key] = list(value)
+                elif key == "_staged_pages":
+                    # Buffered NAND pages are mutable admission state, not
+                    # immutable timeline history. Failed transfers must not
+                    # leak staged ranges or host acknowledgement timestamps.
+                    core_state[key] = copy.deepcopy(value)
+                elif key in {"_plane_thermal_state", "_block_wear_state"}:
+                    # Feedback dictionaries contain per-plane/block scalars.
+                    # A failed physical task must roll back temperature and P/E.
+                    core_state[key] = {name: dict(row) for name, row in value.items()}
+                elif key == "_observation_events":
                     core_state[key] = list(value)
                 else:
                     core_state[key] = value
@@ -821,6 +832,8 @@ def resolve_physical_task(
         row["physical_read_bytes"] += int(item.counters.get("physical_read_bytes", 0))
         row["physical_write_bytes"] += int(item.counters.get("physical_write_bytes", 0))
         row["completion_ns"] = max(row["completion_ns"], item.completion_ns)
+        if item.counters.get("nand_observations") is not None:
+            row.setdefault("_nand_observations", []).append(item.counters["nand_observations"])
         for resource_id, value in item.counters.get("resource_busy_ns", {}).items():
             row["resource_busy_ns"][resource_id] = (
                 row["resource_busy_ns"].get(resource_id, 0.0) + value
@@ -831,12 +844,22 @@ def resolve_physical_task(
             "read_write_switches", "queue_wait_ns", "refresh_wait_ns",
             "turnaround_wait_ns", "pages_read", "pages_programmed",
             "pages_touched", "media_waves", "erase_operations",
+            "read_operations", "program_operations", "rmw_read_operations",
+            "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
             "host_transfer_bytes", "internal_transfer_bytes",
         ):
             value = item.counters.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 row[key] = row.get(key, 0) + value
+        for key in ("host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
+                    "host_write_outstanding_at_admission_peak"):
+            value = item.counters.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                row[key] = max(row.get(key, 0), value)
     for owner, row in execution_by_owner.items():
+        if "_nand_observations" in row:
+            from .nand_core import summarize_nand_observations
+            row["nand_observations"] = summarize_nand_observations(row.pop("_nand_observations"))
         row["service_ns"] = row["completion_ns"] - float(arrival_ns)
         operations = operations_by_owner[owner]
         row["operation"] = next(iter(operations)) if len(operations) == 1 else "read_write"
@@ -844,6 +867,8 @@ def resolve_physical_task(
         "logical_bytes", "physical_bytes", "physical_read_bytes", "physical_write_bytes",
         "host_transfer_bytes", "internal_transfer_bytes", "pages_read", "pages_programmed",
         "pages_touched", "media_waves", "erase_operations", "burst_count",
+        "read_operations", "program_operations", "rmw_read_operations",
+        "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
         "row_hits", "row_misses", "row_conflicts", "read_write_switches",
         "queue_wait_ns", "refresh_wait_ns", "turnaround_wait_ns",
     ):
@@ -855,6 +880,11 @@ def resolve_physical_task(
             values = [item.counters.get(key) for item in results]
             if any(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
                 counters[key] = sum(float(value or 0) for value in values)
+    for key in ("host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
+                "host_write_outstanding_at_admission_peak"):
+        values = [item.counters[key] for item in results if key in item.counters]
+        if values:
+            counters[key] = max(values)
     # Timing comes from the physical core. An explicitly carried endpoint
     # coefficient prices resolved media bytes once. NAND records both host
     # and internal transfers, so charging the full coefficient to each hop
@@ -1380,7 +1410,10 @@ class PhysicalService:
                 "timing_model": "physical_transaction_v1",
                 "energy_pj": 0.0,
                 "pages_touched": result.counters.get("page_count", 0) if not is_dram else 0,
-                "write_completion": "media_program_complete" if operation is Operation.WRITE else "n/a",
+                "write_completion": (
+                    result.counters.get("write_completion", "media_program_complete")
+                    if operation is Operation.WRITE else "n/a"
+                ),
             })
             return counters
         raise ValueError("physical memory service requires physical_memory_config")

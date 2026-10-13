@@ -15,6 +15,12 @@ _SPEC.loader.exec_module(_sessions)
 
 
 class HbmHbfSessionTraceTests(unittest.TestCase):
+    def test_offload_capacity_failure_is_not_silently_treated_as_success(self):
+        with self.assertRaises(RuntimeError):
+            _sessions.SessionTrace(
+                mode="all_hbf", pause_duration_ns=0, resume_cycles=1, hbf_pages=1,
+            ).run()
+
     def test_matrix_has_real_lifecycle_and_physical_transfer_rows(self):
         report = _sessions.run_matrix()
         rows = report["experiments"]

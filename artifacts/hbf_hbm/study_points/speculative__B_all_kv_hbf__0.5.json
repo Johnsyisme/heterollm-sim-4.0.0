@@ -1,0 +1,2752 @@
+{
+  "id": "speculative/B_all_kv_hbf/0.5",
+  "mode": "full_operator_serving",
+  "model": "synthetic-small-dense-explicit-mtp",
+  "placement": "B_all_kv_hbf",
+  "resolved_placement": {
+    "tensor_to_component": {
+      "embedding_weights": "hbm0",
+      "dense0.attention_weights": "hbm0",
+      "dense0.mlp_weights": "hbm0",
+      "lm_head_weights": "hbm0",
+      "mtp.prediction_layer.000.weights": "hbm0",
+      "mtp.aux_head.weights": "hbm0",
+      "kv_cache": "hbf0"
+    },
+    "op_to_component": {
+      "embedding": "gpu0",
+      "dense0.attention": "gpu0",
+      "dense0.mlp": "gpu0",
+      "dense0.input_norm.reduce": "gpu0",
+      "dense0.input_norm.apply": "gpu0",
+      "dense0.post_attention_norm.reduce": "gpu0",
+      "dense0.post_attention_norm.apply": "gpu0",
+      "dense0.attention.rope": "gpu0",
+      "dense0.attention.qk": "gpu0",
+      "dense0.attention.pv": "gpu0",
+      "dense0.attention.softmax.reduce": "gpu0",
+      "dense0.attention.softmax.normalize": "gpu0",
+      "dense0.attention.residual": "gpu0",
+      "dense0.mlp.activation": "gpu0",
+      "dense0.mlp.residual": "gpu0",
+      "lm_head": "gpu0",
+      "mtp.prediction_layer.000": "gpu0",
+      "mtp.aux_head": "gpu0"
+    },
+    "kv_cache_component": "hbf0",
+    "kv_policy": {
+      "layout_mode": "legacy_single",
+      "allocation_policy": "eager",
+      "offload_component": null,
+      "prefetch_distance": 0
+    }
+  },
+  "prompt_tokens": 128,
+  "output_tokens_per_request": 32,
+  "requested_concurrency": 4,
+  "request_count": 4,
+  "completed_requests": 4,
+  "rejected_requests": 0,
+  "unfinished_requests": 0,
+  "rejection_reasons": [],
+  "rejection_rate": 0.0,
+  "node_tps": 43610.85015870676,
+  "per_gpu_tps": 43610.85015870676,
+  "gpu_count": 1,
+  "visible_output_tokens": 128,
+  "runtime_tps": 43709.38955880899,
+  "runtime_goodput_tps": 43709.38955880899,
+  "goodput_tps": 43610.85015870676,
+  "qualified_requests": 4,
+  "requests_per_s": 1362.8390674595862,
+  "makespan_ns": 2935049.409360006,
+  "measurement_window": "earliest request arrival through simulation end, including initialization wait",
+  "measurement_windows": {
+    "primary": "request_window",
+    "request_window": {
+      "start_ns": 0.0,
+      "end_ns": 2935049.409360006,
+      "duration_ns": 2935049.409360006
+    },
+    "runtime_window": {
+      "start_ns": 6616.839333333333,
+      "end_ns": 2935049.409360006,
+      "duration_ns": 2928432.5700266724
+    },
+    "initialization_ns": 6616.839333333333,
+    "initialization_wait_in_request_window_ns": 6616.839333333333,
+    "semantics": "primary rates span earliest request arrival through simulation end; TTFT/E2E start at each request arrival; runtime rates exclude initialization"
+  },
+  "ttft_ns": {
+    "count": 4,
+    "p50": 142579.1679166516,
+    "p95": 142579.1679166516,
+    "p99": 142579.1679166516,
+    "p999": 142579.1679166516
+  },
+  "tpot_ns": {
+    "count": 4,
+    "p50": 90079.68520785014,
+    "p95": 90079.68520785014,
+    "p99": 90079.68520785014,
+    "p999": 90079.68520785014
+  },
+  "tbt_ns": {
+    "count": 124,
+    "p50": 139456.98491833825,
+    "p95": 178169.10878583603,
+    "p99": 178169.10878583603,
+    "p999": 178169.10878583603
+  },
+  "e2e_ns": {
+    "count": 4,
+    "p50": 2935049.409360006,
+    "p95": 2935049.409360006,
+    "p99": 2935049.409360006,
+    "p999": 2935049.409360006
+  },
+  "phase_service_rates": {
+    "prefill": {
+      "scheduled_tokens": 512,
+      "useful_tokens": 512,
+      "batch_occupied_ns": 135962.32858331827,
+      "tokens_per_batch_busy_second": 3765748.9786683396,
+      "wall_clock_tokens_per_second": 174443.40063482703,
+      "wall_clock_denominator_ns": 2935049.409360006,
+      "semantics": "wall rate uses completed requests' input tokens once for prefill and committed non-prefill output tokens for decode; both use the primary request window. Busy rate includes scheduled/recomputed work; mixed batches overlap and busy rates are not additive"
+    },
+    "decode": {
+      "scheduled_tokens": 0,
+      "useful_tokens": 124,
+      "batch_occupied_ns": 0,
+      "tokens_per_batch_busy_second": null,
+      "wall_clock_tokens_per_second": 42248.01109124717,
+      "wall_clock_denominator_ns": 2935049.409360006,
+      "semantics": "wall rate uses completed requests' input tokens once for prefill and committed non-prefill output tokens for decode; both use the primary request window. Busy rate includes scheduled/recomputed work; mixed batches overlap and busy rates are not additive"
+    }
+  },
+  "speculative": {
+    "drafted_tokens": 240,
+    "accepted_draft_tokens": 60,
+    "rejected_draft_tokens": 180,
+    "acceptance_rate": 0.25,
+    "rounds": [
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 320748.2767024849,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 3,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 320748.2767024849,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 3,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 320748.2767024849,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 3,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 320748.2767024849,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 3,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 498917.38548831776,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 5,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 498917.38548831776,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 5,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 498917.38548831776,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 5,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 498917.38548831776,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 5,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 677086.4942741507,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 7,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 677086.4942741507,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 7,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 677086.4942741507,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 7,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 677086.4942741507,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 7,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 855255.6030599839,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 9,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 855255.6030599839,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 9,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 855255.6030599839,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 9,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 855255.6030599839,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 9,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1033424.7118458172,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 11,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1033424.7118458172,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 11,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1033424.7118458172,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 11,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1033424.7118458172,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 11,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1211593.8206316507,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 13,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1211593.8206316507,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 13,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1211593.8206316507,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 13,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1211593.8206316507,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 13,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1389762.9294174842,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 15,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1389762.9294174842,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 15,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1389762.9294174842,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 15,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1389762.9294174842,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 15,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1567932.0382033177,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 17,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1567932.0382033177,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 17,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1567932.0382033177,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 17,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1567932.0382033177,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 17,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1746101.1469891511,
+        "proposed": 5,
+        "accepted": 1,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 1,
+        "accepted_draft_tokens": 0,
+        "rejected_draft_tokens": 4,
+        "committed": 18,
+        "visible_tokens": 1,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 1,
+        "kv_temporary_tokens": 4
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1746101.1469891511,
+        "proposed": 5,
+        "accepted": 1,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 1,
+        "accepted_draft_tokens": 0,
+        "rejected_draft_tokens": 4,
+        "committed": 18,
+        "visible_tokens": 1,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 1,
+        "kv_temporary_tokens": 4
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1746101.1469891511,
+        "proposed": 5,
+        "accepted": 1,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 1,
+        "accepted_draft_tokens": 0,
+        "rejected_draft_tokens": 4,
+        "committed": 18,
+        "visible_tokens": 1,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 1,
+        "kv_temporary_tokens": 4
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1746101.1469891511,
+        "proposed": 5,
+        "accepted": 1,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 1,
+        "accepted_draft_tokens": 0,
+        "rejected_draft_tokens": 4,
+        "committed": 18,
+        "visible_tokens": 1,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 1,
+        "kv_temporary_tokens": 4
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 1924270.2557749846,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 20,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 1924270.2557749846,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 20,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 1924270.2557749846,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 20,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 1924270.2557749846,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 20,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 2102439.364560818,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 22,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 2102439.364560818,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 22,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 2102439.364560818,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 22,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 2102439.364560818,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 22,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 2280608.473346654,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 24,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 2280608.473346654,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 24,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 2280608.473346654,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 24,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 2280608.473346654,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 24,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 2458777.58213249,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 26,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 2458777.58213249,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 26,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 2458777.58213249,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 26,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 2458777.58213249,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 26,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 2636946.690918326,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 28,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 2636946.690918326,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 28,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 2636946.690918326,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 28,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 2636946.690918326,
+        "proposed": 5,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 4,
+        "verifier_tokens": 5,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 3,
+        "committed": 28,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 5,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 3
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 2795592.4244416677,
+        "proposed": 4,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 3,
+        "verifier_tokens": 4,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 2,
+        "committed": 30,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 4,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 2
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 2795592.4244416677,
+        "proposed": 4,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 3,
+        "verifier_tokens": 4,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 2,
+        "committed": 30,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 4,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 2
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 2795592.4244416677,
+        "proposed": 4,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 3,
+        "verifier_tokens": 4,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 2,
+        "committed": 30,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 4,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 2
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 2795592.4244416677,
+        "proposed": 4,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 3,
+        "verifier_tokens": 4,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 2,
+        "committed": 30,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 4,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 2
+      },
+      {
+        "request_id": "study-0",
+        "timestamp_ns": 2935049.409360006,
+        "proposed": 2,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 1,
+        "verifier_tokens": 2,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 0,
+        "committed": 32,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 2,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-1",
+        "timestamp_ns": 2935049.409360006,
+        "proposed": 2,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 1,
+        "verifier_tokens": 2,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 0,
+        "committed": 32,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 2,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-2",
+        "timestamp_ns": 2935049.409360006,
+        "proposed": 2,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 1,
+        "verifier_tokens": 2,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 0,
+        "committed": 32,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 2,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 0
+      },
+      {
+        "request_id": "study-3",
+        "timestamp_ns": 2935049.409360006,
+        "proposed": 2,
+        "accepted": 2,
+        "main_tokens": 1,
+        "draft_tokens": 1,
+        "verifier_tokens": 2,
+        "committed_tokens": 2,
+        "accepted_draft_tokens": 1,
+        "rejected_draft_tokens": 0,
+        "committed": 32,
+        "visible_tokens": 2,
+        "kv_materialized_tokens": 2,
+        "kv_persistent_append_tokens": 2,
+        "kv_temporary_tokens": 0
+      }
+    ],
+    "status": "observed"
+  },
+  "memory_metrics": {
+    "scope": "operator NAND traffic (HBF/SSD); separately reported KV migration traffic is not implicitly included",
+    "measurement_duration_ns": 2935049.409360006,
+    "directional_bandwidth": {
+      "read": {
+        "logical_bytes": 11246592,
+        "media_bytes": 21626880,
+        "effective_logical_gb_s": 3.8318237383446108,
+        "media_gb_s": 7.3684892428150945
+      },
+      "write": {
+        "logical_bytes": 208896,
+        "media_bytes": 2228224,
+        "effective_logical_gb_s": 0.07117290745900944,
+        "media_gb_s": 0.7591776795627673
+      }
+    },
+    "page_access_count": 1328,
+    "page_access_payload_utilization": 0.5264966114457831,
+    "host_admission_peak_depths": {
+      "host_outstanding_at_admission_peak": 32,
+      "host_read_outstanding_at_admission_peak": 32,
+      "host_write_outstanding_at_admission_peak": 8
+    },
+    "host_admission_scope": "max per-device outstanding host requests sampled at admission, including the new request; buffered writes end at host acknowledgement; not NAND page/program queues",
+    "pages_read": 1320,
+    "pages_programmed": 136,
+    "logical_to_media_byte_ratio": 0.48021119505494503,
+    "write_amplification": 10.666666666666666,
+    "channel_busy_fraction": {
+      "hbf0.memory:nand:channel:0": 2.721317049903307e-07,
+      "hbf0.memory:nand:channel:1": 3.6284227332044095e-07,
+      "hbf0.memory:nand:channel:10": 2.721317049903307e-07,
+      "hbf0.memory:nand:channel:11": 3.6284227332044095e-07,
+      "hbf0.memory:nand:channel:12": 2.721317049903307e-07,
+      "hbf0.memory:nand:channel:13": 3.6284227332044095e-07,
+      "hbf0.memory:nand:channel:14": 2.721317049903307e-07,
+      "hbf0.memory:nand:channel:15": 3.6284227332044095e-07,
+      "hbf0.memory:nand:channel:2": 2.721317049903307e-07,
+      "hbf0.memory:nand:channel:3": 3.6284227332044095e-07,
+      "hbf0.memory:nand:channel:4": 2.721317049903307e-07,
+      "hbf0.memory:nand:channel:5": 3.6284227332044095e-07,
+      "hbf0.memory:nand:channel:6": 2.721317049903307e-07,
+      "hbf0.memory:nand:channel:7": 3.6284227332044095e-07,
+      "hbf0.memory:nand:channel:8": 2.721317049903307e-07,
+      "hbf0.memory:nand:channel:9": 3.6284227332044095e-07
+    },
+    "active_service_lane_imbalance": {
+      "coefficient_of_variation": 0.6041343669250646,
+      "max_over_mean": 1.6041343669250645,
+      "observed_lanes": 16,
+      "semantics": "busy-time imbalance among observed effective service lanes; not a physical-plane measurement and not all configured idle lanes"
+    },
+    "physical_plane_imbalance": null,
+    "read_queue_depth": null,
+    "program_queue_depth": null,
+    "unavailable": {
+      "physical_plane_imbalance": "effective-lane mapping is not a calibrated plane geometry",
+      "read_queue_depth": "page-level queue occupancy timeline not recorded",
+      "program_queue_depth": "page-level queue occupancy timeline not recorded"
+    },
+    "semantics": "GB/s equals bytes/ns; logical/media ratios include RMW and merging and must not be called physical page fill fractions"
+  },
+  "migration_ledger": {
+    "events": [],
+    "bytes_by_kind": {},
+    "scope": "physical KV pool transfers, separate from operator NAND traffic; explicit endpoints and completion times"
+  },
+  "prefetch": {
+    "submitted_bytes": 0,
+    "completed_bytes": 0,
+    "useful_bytes": 0,
+    "unused_bytes": 0,
+    "inflight_bytes": 0,
+    "useful_byte_fraction": null,
+    "semantics": "fraction of completed lookahead bytes consumed by resumed requests; not learned-router prediction accuracy"
+  },
+  "prefetch_overlap": {
+    "copies": [],
+    "operator_overlap_ns": 0.0,
+    "decode_operator_overlap_ns": 0.0,
+    "premature_consumer_overlap_ns": 0,
+    "scope": "intersection with realized GPU operator stages of other requests; host setup and GPU frontend/controller stages excluded; operator envelopes may include memory stalls, not tensor-core busy time"
+  },
+  "energy": {
+    "analytical_dynamic_joules": 0.0006814864987999999,
+    "analytical_dynamic_joules_per_token": 5.324113271874999e-06,
+    "analytical_average_dynamic_watts": 0.2321891061277226,
+    "scope": "sum of configured batch task energies; excludes unpriced components, initialization, idle/board/cooling; not calibrated node energy"
+  },
+  "request_metrics": [
+    {
+      "id": "study-0",
+      "arrival_ns": 0.0,
+      "finish_ns": 2935049.409360006,
+      "first_token_ns": 142579.1679166516,
+      "status": "finished",
+      "output_tokens": 32,
+      "ttft_ns": 142579.1679166516,
+      "tpot_ns": 90079.68520785014,
+      "qualified": true
+    },
+    {
+      "id": "study-1",
+      "arrival_ns": 0.0,
+      "finish_ns": 2935049.409360006,
+      "first_token_ns": 142579.1679166516,
+      "status": "finished",
+      "output_tokens": 32,
+      "ttft_ns": 142579.1679166516,
+      "tpot_ns": 90079.68520785014,
+      "qualified": true
+    },
+    {
+      "id": "study-2",
+      "arrival_ns": 0.0,
+      "finish_ns": 2935049.409360006,
+      "first_token_ns": 142579.1679166516,
+      "status": "finished",
+      "output_tokens": 32,
+      "ttft_ns": 142579.1679166516,
+      "tpot_ns": 90079.68520785014,
+      "qualified": true
+    },
+    {
+      "id": "study-3",
+      "arrival_ns": 0.0,
+      "finish_ns": 2935049.409360006,
+      "first_token_ns": 142579.1679166516,
+      "status": "finished",
+      "output_tokens": 32,
+      "ttft_ns": 142579.1679166516,
+      "tpot_ns": 90079.68520785014,
+      "qualified": true
+    }
+  ],
+  "quantile_scope": "empirical interpolation over reported sample count; no population tail-latency guarantee",
+  "address_assumptions": {
+    "embedding": "No token-ID trace is supplied. Analytical remote embedding row traffic uses a bounded cyclic address model when reads exceed the resident table; repeated traffic is retained and the allocation is not enlarged. This is not a measured token locality trace."
+  },
+  "max_observed_batch_requests": 4,
+  "kv": {
+    "tokens_per_page": 16,
+    "bytes_per_page": 4096,
+    "capacity_pages": 268435456,
+    "capacity_bytes": 1099511627776,
+    "peak_used_pages": 40,
+    "peak_used_bytes": 163840,
+    "allocation_events": 8,
+    "release_events": 8,
+    "swap_events": 0,
+    "swap_bytes": 0,
+    "recompute_events": 0,
+    "recompute_tokens": 0,
+    "offload_peak_bytes": 0,
+    "rejected_requests": 0,
+    "swap_in_bytes": 0,
+    "swap_transfer_time_ns": 0.0,
+    "swap_transfer_energy_pj": 0.0,
+    "logical_prefill_read_bytes": 0,
+    "logical_prefill_write_bytes": 131072,
+    "logical_decode_read_bytes": 11037696,
+    "logical_decode_write_bytes": 31744,
+    "logical_decode_append_bytes": 31744,
+    "physical_prefill_read_bytes": 0,
+    "physical_prefill_write_bytes": 131072,
+    "physical_decode_read_bytes": 11037696,
+    "physical_decode_write_bytes": 31744,
+    "physical_decode_append_bytes": 31744,
+    "prefetch_events": 0,
+    "prefetch_bytes": 0,
+    "prefetch_transfer_time_ns": 0.0,
+    "prefetch_distance_tokens": 0,
+    "prefetch_lookahead_pages": 0,
+    "prefetch_completed_bytes": 0,
+    "prefetch_useful_bytes": 0,
+    "prefetch_unused_bytes": 0,
+    "prefetch_inflight_bytes": 0,
+    "prefetch_reclaim_bytes": 0,
+    "prefetch_execution_mode": "disabled",
+    "prefetch_cancelled_bytes": null,
+    "prefetch_metric_semantics": "useful bytes are completed copies exposed to a successful consumer cohort; unused bytes include reclaimed copies and completed copies not consumed; transfer time sums per-page latency and is not GPU stall time; in-flight cancellation is not modeled",
+    "offload_events": 0,
+    "offload_bytes": 0,
+    "migration_events": 0,
+    "migration_bytes": 0,
+    "swap_out_bytes": 0,
+    "physical_swap_bytes": 0,
+    "logical_bytes_per_token": 256,
+    "logical_swap_out_bytes": 0,
+    "logical_swap_in_bytes": 0,
+    "logical_migration_bytes": 0,
+    "physical_offload_bytes": 0,
+    "max_live_tokens_per_request": 159,
+    "peak_semantics": "realized_persistent_plus_mtp_temporary_reservation",
+    "prefetch_distance_modeled": false,
+    "traffic_semantics": "persistent_kv_traffic_separate_from_mtp_temporary_verification_and_resource_accounting",
+    "persistent_peak_used_pages": 40,
+    "persistent_peak_used_bytes": 163840,
+    "mtp_materialized_tokens": 304,
+    "mtp_temporary_tokens": 180,
+    "mtp_temporary_peak_pages": 4,
+    "mtp_temporary_peak_bytes": 16384,
+    "mtp_temporary_allocation_events": 12,
+    "mtp_temporary_release_events": 12,
+    "logical_mtp_materialized_write_bytes": 77824,
+    "physical_mtp_materialized_write_bytes": 77824,
+    "logical_mtp_temporary_write_bytes": 46080,
+    "physical_mtp_temporary_write_bytes": 46080,
+    "logical_mtp_verification_read_bytes": 228352,
+    "physical_mtp_verification_read_bytes": 228352,
+    "layout_mode": "legacy_single",
+    "split_mode": "None",
+    "kv_unified": true,
+    "logical_context_tokens": 262144,
+    "n_seq_max": 4,
+    "capacity_bytes_by_component": {
+      "hbf0": 1099511627776
+    },
+    "used_bytes_by_component": {
+      "hbf0": 0
+    },
+    "peak_bytes_by_component": {
+      "hbf0": 163840
+    },
+    "layer_owner": {},
+    "layer_bytes_per_token": {},
+    "layer_bytes_per_page": {},
+    "layer_component_shards": {},
+    "component_owner_layers": {
+      "hbf0": []
+    },
+    "bottleneck_component": null,
+    "effective_physical_capacity_bytes": 1099511627776,
+    "batch_retry_count": 0,
+    "batch_reduced": false,
+    "idle_slots_cleared": 0,
+    "context_shift_count": 0,
+    "capacity_failure_count": 0,
+    "capacity_failure_reason": null,
+    "requested_allocation_policy": "eager",
+    "effective_allocation_policy": "eager",
+    "allocation_policy_reason": null,
+    "kv_layout_mode": "legacy_single",
+    "kv_capacity_bytes_by_component": {
+      "hbf0": 1099511627776
+    },
+    "kv_used_bytes_by_component": {
+      "hbf0": 0
+    },
+    "kv_peak_bytes_by_component": {
+      "hbf0": 163840
+    },
+    "kv_layer_owner": {},
+    "kv_layer_components": {},
+    "kv_layer_bytes_per_token": {},
+    "kv_layer_bytes_per_page": {},
+    "kv_layer_component_shards": {},
+    "kv_component_owner_layers": {
+      "hbf0": []
+    },
+    "kv_bottleneck_component": null,
+    "effective_physical_capacity": 1099511627776,
+    "kv_idle_slots_cleared": 0,
+    "prefetch_distance_semantics": {
+      "value": 0,
+      "unit": "tokens",
+      "lookahead_pages": 0,
+      "modeled": false,
+      "mode": "disabled",
+      "contract": "fixed_token_lookahead",
+      "description": "prefetch disabled when prefetch_distance=0"
+    },
+    "modeling_limits": [
+      "offload_ratio bounds pressure-triggered migratable capacity; it is not a per-token mirror ratio",
+      "prefetch disabled when prefetch_distance=0",
+      "logical KV traffic counters are not added to resource-accounted bytes when attention kernels already include local memory traffic",
+      "KV read means external persisted-cache access only; prefill/recompute historical-prompt attention remains modeled as causal compute and ordinary attention/activation traffic"
+    ]
+  },
+  "resources": {
+    "dram_traffic": {
+      "schema_version": "heterollm.dram-traffic/v1",
+      "task_count": 51,
+      "logical_read_bytes": 19584,
+      "logical_write_bytes": 10304,
+      "physical_read_bytes": 20992,
+      "physical_write_bytes": 11584,
+      "physical_bytes": 32576,
+      "logical_bytes": 29888,
+      "burst_count": 509,
+      "row_hits": 433,
+      "row_misses": 76,
+      "row_conflicts": 0,
+      "queue_wait_ns": 0.0,
+      "service_ns": 2409.0,
+      "read_write_switches": null,
+      "refresh_wait_ns": null,
+      "turnaround_wait_ns": null,
+      "metric_availability": {
+        "read_write_switches": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 17
+        },
+        "refresh_wait_ns": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 17
+        },
+        "turnaround_wait_ns": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 17
+        },
+        "organization_profiles": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 17
+        }
+      },
+      "resource_totals": {
+        "cpu0.memory:dram:bank:0:0:0:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:0:0:2:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:1:0:2:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:2:0:2:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:3:0:2:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:4:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:5:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:6:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:0:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:0:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:0:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:0:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:1:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:1:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:1:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:1:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:bank:0:0:7:0:2:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 14.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 100.0,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 78.75,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 78.75,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 78.75,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:4": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 77.5,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:5": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 77.5,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:6": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 73.75,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:command:7": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 0,
+          "service_ns": 71.25,
+          "energy_pj": 0.0
+        },
+        "cpu0.memory:dram:data:0": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 5120,
+          "service_ns": 100.0,
+          "energy_pj": 61440.0
+        },
+        "cpu0.memory:dram:data:1": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 4032,
+          "service_ns": 78.75,
+          "energy_pj": 48384.0
+        },
+        "cpu0.memory:dram:data:2": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 4032,
+          "service_ns": 78.75,
+          "energy_pj": 48384.0
+        },
+        "cpu0.memory:dram:data:3": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 4032,
+          "service_ns": 78.75,
+          "energy_pj": 48384.0
+        },
+        "cpu0.memory:dram:data:4": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 3968,
+          "service_ns": 77.5,
+          "energy_pj": 47616.0
+        },
+        "cpu0.memory:dram:data:5": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 3968,
+          "service_ns": 77.5,
+          "energy_pj": 47616.0
+        },
+        "cpu0.memory:dram:data:6": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 3776,
+          "service_ns": 73.75,
+          "energy_pj": 45312.0
+        },
+        "cpu0.memory:dram:data:7": {
+          "owner": "cpu0.memory",
+          "bytes_moved": 3648,
+          "service_ns": 71.25,
+          "energy_pj": 43776.0
+        }
+      },
+      "owner_ids": [
+        "cpu0.memory"
+      ],
+      "organization_profiles": [],
+      "organization_profile_limit": 32,
+      "accounting_semantics": "resolved analytical burst bytes and controller waits; null means not fully recorded; empty organization_profiles is not evidence of complete geometry reporting; no device accuracy claim"
+    },
+    "storage_traffic": {
+      "schema_version": "heterollm.nand-traffic/v1",
+      "task_count": 51,
+      "logical_bytes": 11455488,
+      "host_transfer_bytes": 13107200,
+      "physical_bytes": 23855104,
+      "physical_read_bytes": 21626880,
+      "physical_write_bytes": 2228224,
+      "queue_wait_ns": 1682487.5008000275,
+      "erase_operations": 0,
+      "service_ns": 3222293.557760022,
+      "energy_pj": 0.0,
+      "logical_read_bytes": 11246592,
+      "logical_write_bytes": 208896,
+      "internal_transfer_bytes": 23855104,
+      "pages_read": 1320,
+      "pages_programmed": 136,
+      "pages_touched": 1328,
+      "media_waves": null,
+      "read_operations": 1320,
+      "program_operations": 136,
+      "rmw_read_operations": 128,
+      "page_access_payload_bytes": 11455488,
+      "page_access_capacity_bytes": 21757952,
+      "host_admission_samples": 752,
+      "host_queue_wait_ns": null,
+      "media_queue_wait_ns": null,
+      "host_outstanding_at_admission_peak": 32,
+      "host_read_outstanding_at_admission_peak": 32,
+      "host_write_outstanding_at_admission_peak": 8,
+      "page_access_payload_utilization": 0.5264966114457831,
+      "nand_read_queue_depth": null,
+      "nand_program_queue_depth": null,
+      "queue_depth_scope": "max per-device outstanding host requests sampled at admission, including the new request; buffered writes end at host acknowledgement; not NAND page/program queues",
+      "page_utilization_scope": "logical payload / sum of per-access page-rounded spans; repeated accesses count again; not unique resident capacity utilization",
+      "metric_availability": {
+        "nand_read_queue_depth": {
+          "status": "not_recorded",
+          "reason": "no per-page queue event population is retained"
+        },
+        "nand_program_queue_depth": {
+          "status": "not_recorded",
+          "reason": "host write requests are not physical program operations"
+        },
+        "logical_read_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "logical_write_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "internal_transfer_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "pages_read": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "pages_programmed": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "pages_touched": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "media_waves": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 17
+        },
+        "read_operations": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "program_operations": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "rmw_read_operations": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "page_access_payload_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "page_access_capacity_bytes": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "host_admission_samples": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "host_queue_wait_ns": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 17
+        },
+        "media_queue_wait_ns": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 17
+        },
+        "host_outstanding_at_admission_peak": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "host_read_outstanding_at_admission_peak": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "host_write_outstanding_at_admission_peak": {
+          "status": "recorded",
+          "recorded_batch_count": 17,
+          "physical_batch_count": 17
+        },
+        "organization_profiles": {
+          "status": "not_recorded",
+          "recorded_batch_count": 0,
+          "physical_batch_count": 17
+        }
+      },
+      "operation_counts": {
+        "read": 17,
+        "write": 34
+      },
+      "resource_totals": {
+        "hbf0.memory:nand:channel:0": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1277952,
+          "service_ns": 0.7987200000000014,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:1": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1703936,
+          "service_ns": 1.0649600000000021,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:10": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1277952,
+          "service_ns": 0.7987200000000014,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:11": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1703936,
+          "service_ns": 1.0649600000000021,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:12": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1277952,
+          "service_ns": 0.7987200000000014,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:13": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1703936,
+          "service_ns": 1.0649600000000021,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:14": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1277952,
+          "service_ns": 0.7987200000000014,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:15": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1703936,
+          "service_ns": 1.0649600000000021,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:2": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1277952,
+          "service_ns": 0.7987200000000014,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:3": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1703936,
+          "service_ns": 1.0649600000000021,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:4": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1277952,
+          "service_ns": 0.7987200000000014,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:5": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1703936,
+          "service_ns": 1.0649600000000021,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:6": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1277952,
+          "service_ns": 0.7987200000000014,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:7": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1703936,
+          "service_ns": 1.0649600000000021,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:8": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1277952,
+          "service_ns": 0.7987200000000014,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:channel:9": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 1703936,
+          "service_ns": 1.0649600000000021,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:host": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 13107200,
+          "service_ns": 48742.39999999954,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:0": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 383000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:1": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 1552000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:10": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 383000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:11": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 1552000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:12": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 383000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:13": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 1552000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:14": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 383000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:15": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 1552000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:2": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 383000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:3": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 1552000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:4": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 383000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:5": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 1552000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:6": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 383000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:7": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 1552000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:8": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 383000.0,
+          "energy_pj": 0.0
+        },
+        "hbf0.memory:nand:parallel:9": {
+          "owner": "hbf0.memory",
+          "bytes_moved": 0,
+          "service_ns": 1552000.0,
+          "energy_pj": 0.0
+        }
+      },
+      "owner_ids": [
+        "hbf0.memory"
+      ],
+      "profile_evidence": [],
+      "background_work": [],
+      "organization_profiles": [],
+      "organization_profile_limit": 32,
+      "accounting_semantics": "host_transfer_bytes is logical host payload; physical_* and pages_read/pages_programmed are NAND media accounting; null means not fully recorded; operation_counts classifies task-owner ledgers, not media operations; service_ns/energy_pj are analytical"
+    },
+    "resource_utilization": {
+      "cpu0.control_cache": 6.966183960935182e-05,
+      "cpu0.h2d_dma": 0.002503472360961081,
+      "cpu0.iommu": 0.0014512883251948296,
+      "cpu0.l1d": 1.1822479263375356e-05,
+      "cpu0.l2": 4.6441226406234545e-05,
+      "cpu0.l3": 0.00020898551882805546,
+      "cpu0.memory:dram:bank:0:0:0:0:0:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:0:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:0:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:0:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:1:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:1:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:1:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:1:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:2:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:0:0:2:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:0:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:0:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:0:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:0:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:1:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:1:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:1:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:1:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:2:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:1:0:2:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:0:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:0:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:0:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:0:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:1:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:1:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:1:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:1:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:2:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:2:0:2:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:0:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:0:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:0:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:0:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:1:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:1:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:1:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:1:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:2:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:3:0:2:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:0:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:0:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:0:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:0:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:1:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:1:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:1:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:1:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:4:0:2:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:0:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:0:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:0:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:0:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:1:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:1:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:1:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:1:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:5:0:2:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:0:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:0:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:0:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:0:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:1:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:1:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:1:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:1:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:6:0:2:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:0:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:0:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:0:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:0:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:1:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:1:1": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:1:2": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:1:3": 4.780714482994733e-06,
+      "cpu0.memory:dram:bank:0:0:7:0:2:0": 4.780714482994733e-06,
+      "cpu0.memory:dram:command:0": 3.414796059281952e-05,
+      "cpu0.memory:dram:command:1": 2.6891518966845372e-05,
+      "cpu0.memory:dram:command:2": 2.6891518966845372e-05,
+      "cpu0.memory:dram:command:3": 2.6891518966845372e-05,
+      "cpu0.memory:dram:command:4": 2.646466945943513e-05,
+      "cpu0.memory:dram:command:5": 2.646466945943513e-05,
+      "cpu0.memory:dram:command:6": 2.5184120937204395e-05,
+      "cpu0.memory:dram:command:7": 2.4330421922383908e-05,
+      "cpu0.memory:dram:data:0": 3.414796059281952e-05,
+      "cpu0.memory:dram:data:1": 2.6891518966845372e-05,
+      "cpu0.memory:dram:data:2": 2.6891518966845372e-05,
+      "cpu0.memory:dram:data:3": 2.6891518966845372e-05,
+      "cpu0.memory:dram:data:4": 2.646466945943513e-05,
+      "cpu0.memory:dram:data:5": 2.646466945943513e-05,
+      "cpu0.memory:dram:data:6": 2.5184120937204395e-05,
+      "cpu0.memory:dram:data:7": 2.4330421922383908e-05,
+      "cpu0.pack": 0.0033437683012488874,
+      "cpu0.pipeline": 0.004275112427160372,
+      "cpu0.scheduler": 0.00041775227728356343,
+      "gpu0.command_processor": 0.0853699014820488,
+      "gpu0.command_queue": 0.008024770739312587,
+      "gpu0.frontend": 0.13386000552385252,
+      "gpu0.l1_shared": 0.0027398138110200443,
+      "gpu0.l2": 0.016063200662862303,
+      "gpu0.mmu_tlb": 0.005122194088922928,
+      "gpu0.scalar": 0.000297990229499098,
+      "gpu0.sfu": 0.00015643251138037402,
+      "gpu0.tensor_core": 0.01187886981485741,
+      "gpu0.vram_controller": 0.01055171982318123,
+      "hbf0.memory:nand:channel:0": 2.7274659084696854e-07,
+      "hbf0.memory:nand:channel:1": 3.636621211292915e-07,
+      "hbf0.memory:nand:channel:10": 2.7274659084696854e-07,
+      "hbf0.memory:nand:channel:11": 3.636621211292915e-07,
+      "hbf0.memory:nand:channel:12": 2.7274659084696854e-07,
+      "hbf0.memory:nand:channel:13": 3.636621211292915e-07,
+      "hbf0.memory:nand:channel:14": 2.7274659084696854e-07,
+      "hbf0.memory:nand:channel:15": 3.636621211292915e-07,
+      "hbf0.memory:nand:channel:2": 2.7274659084696854e-07,
+      "hbf0.memory:nand:channel:3": 3.636621211292915e-07,
+      "hbf0.memory:nand:channel:4": 2.7274659084696854e-07,
+      "hbf0.memory:nand:channel:5": 3.636621211292915e-07,
+      "hbf0.memory:nand:channel:6": 2.7274659084696854e-07,
+      "hbf0.memory:nand:channel:7": 3.636621211292915e-07,
+      "hbf0.memory:nand:channel:8": 2.7274659084696854e-07,
+      "hbf0.memory:nand:channel:9": 3.636621211292915e-07,
+      "hbf0.memory:nand:host": 0.016644535543994306,
+      "hbf0.memory:nand:parallel:0": 0.13078668907049876,
+      "hbf0.memory:nand:parallel:1": 0.529976348400559,
+      "hbf0.memory:nand:parallel:10": 0.13078668907049876,
+      "hbf0.memory:nand:parallel:11": 0.529976348400559,
+      "hbf0.memory:nand:parallel:12": 0.13078668907049876,
+      "hbf0.memory:nand:parallel:13": 0.529976348400559,
+      "hbf0.memory:nand:parallel:14": 0.13078668907049876,
+      "hbf0.memory:nand:parallel:15": 0.529976348400559,
+      "hbf0.memory:nand:parallel:2": 0.13078668907049876,
+      "hbf0.memory:nand:parallel:3": 0.529976348400559,
+      "hbf0.memory:nand:parallel:4": 0.13078668907049876,
+      "hbf0.memory:nand:parallel:5": 0.529976348400559,
+      "hbf0.memory:nand:parallel:6": 0.13078668907049876,
+      "hbf0.memory:nand:parallel:7": 0.529976348400559,
+      "hbf0.memory:nand:parallel:8": 0.13078668907049876,
+      "hbf0.memory:nand:parallel:9": 0.529976348400559,
+      "hbm0.hbm_fabric": 0.09607757504125744,
+      "interrupt": 0.0,
+      "link.cpu-gpu-pcie.cpu0->gpu0": 5.2246379707013865e-05,
+      "link.cpu-gpu-pcie.cpu0->gpu0.inflight": 0.004696369020330469,
+      "link.cpu-hostmem-ddr.hostmem0->cpu0": 8.163496829220916e-06,
+      "link.cpu-hostmem-ddr.hostmem0->cpu0.inflight": 0.00047257576089156637,
+      "link.gpu-hbf-ucie.gpu0->hbf0": 4.458357734998517e-05,
+      "link.gpu-hbf-ucie.gpu0->hbf0.inflight": 0.0012056142375058486,
+      "link.gpu-hbf-ucie.hbf0->gpu0": 0.0024003011276219955,
+      "link.gpu-hbf-ucie.hbf0->gpu0.inflight": 0.0029808164576999277,
+      "link.gpu-hbm0.gpu0->hbm0": 2.089855188280555e-06,
+      "link.gpu-hbm0.gpu0->hbm0.inflight": 0.0002342959872194533
+    }
+  },
+  "scheduler": {
+    "scheduling_rounds": 17,
+    "total_batches": 17,
+    "prefill_batches": 1,
+    "decode_batches": 0,
+    "mtp_batches": 16,
+    "preemptions": 0,
+    "priority_preemptions": 0,
+    "memory_preemptions": 0,
+    "max_batch_sequences": 4,
+    "max_batch_tokens": 512,
+    "idle_time_ns": 6616.839333333333,
+    "kv_transfer_batches": 0,
+    "linear_state_transfer_batches": 0
+  },
+  "owner_residency": {
+    "enabled": false,
+    "component_id": null,
+    "capacity_bytes": 0,
+    "committed_bytes": 0,
+    "resident_bytes": 0,
+    "peak_resident_bytes": 0,
+    "available_bytes": 0,
+    "allocation_count": 0,
+    "view_count": 0,
+    "access_count": 0,
+    "weight_access_count": 0,
+    "kv_access_count": 0,
+    "state_access_count": 0,
+    "temporary_allocation_count": 0,
+    "temporary_release_count": 0,
+    "migration_event_count": 0,
+    "fault_batch_count": 0,
+    "clean_eviction_batch_count": 0,
+    "page_in_bytes": 0,
+    "page_out_bytes": 0,
+    "clean_discard_bytes": 0,
+    "dirty_writeback_bytes": 0,
+    "clean_discard_time_ns": 0.0,
+    "clean_discard_energy_pj": 0.0,
+    "transfer_time_ns": 0.0,
+    "transfer_energy_pj": 0.0,
+    "initialization_migration_event_count": 0,
+    "initialization_page_in_bytes": 0,
+    "initialization_page_out_bytes": 0,
+    "initialization_clean_discard_bytes": 0,
+    "initialization_dirty_writeback_bytes": 0,
+    "timing_completeness": "complete",
+    "submission_latency_known": true,
+    "unmodeled_timing_terms": [],
+    "interval_baseline_resident_bytes": 0,
+    "interval_peak_resident_bytes": 0,
+    "interval_resident_delta_bytes": 0
+  },
+  "applied_hardware": {
+    "hbf_read_gb_s": 1600.0,
+    "memory_kinds": {
+      "hostmem0": "host_memory",
+      "hbm0": "hbm",
+      "hbf0": "hbf"
+    },
+    "hbf_write_gb_s": 16.0,
+    "hbf_parallel_units": 64,
+    "hbf_page_bytes": 16384,
+    "hbf_read_ns": 4000.0,
+    "hbf_program_ns": 75000.0,
+    "hbm_peak_read_gb_s": 1600.0,
+    "hbm_efficiency": 0.75,
+    "links": [
+      {
+        "id": "gpu-hbf-ucie",
+        "bandwidth_gbps": 12800.0,
+        "latency_ns": 100.0
+      }
+    ],
+    "kv_allocation_policy": "eager"
+  },
+  "slo": {
+    "ttft_ns": 10000000000.0,
+    "tbt_ns": 100000000.0
+  },
+  "wall_seconds": 0.6384212999837473,
+  "unavailable": {
+    "calibrated_node_energy": "no independent energy measurements",
+    "lifetime": "not a stateful wear experiment"
+  },
+  "parameters": {
+    "prompt": 128,
+    "batch": 4,
+    "output": 32,
+    "mtp_branch": true,
+    "speculative_acceptance": 0.5
+  },
+  "executed_serving": true,
+  "model_structure": {
+    "model_id": "small",
+    "layers": 1,
+    "weight_bytes": 1507328,
+    "context_extrapolation": null,
+    "mtp_branch": {
+      "kind": "synthetic_prediction_layer_and_auxiliary_head",
+      "trained_draft_model": false,
+      "accuracy_claim": false
+    },
+    "mtp_descriptor_count": 2
+  },
+  "fixed_inventory": {
+    "hostmem0": {
+      "kind": "host_memory",
+      "capacity_bytes": 274877906944
+    },
+    "hbm0": {
+      "kind": "hbm",
+      "capacity_bytes": 549755813888
+    },
+    "hbf0": {
+      "kind": "hbf",
+      "capacity_bytes": 1099511627776
+    }
+  },
+  "placement_contract": {
+    "weights": "hbm0",
+    "kv": "hbf0",
+    "layout": "legacy_single",
+    "cold": null
+  },
+  "placement_verification": {
+    "all_resolved_weights_on_requested_tier": true,
+    "resolved_kv_on_requested_tier": true,
+    "resolved_weight_tensor_count": 6,
+    "all_resolved_model_ops_on_gpu": true
+  },
+  "point_result_version": 2
+}

@@ -168,6 +168,55 @@ class CalibratedHbfProfileTests(unittest.TestCase):
             aggregate["resources"]["dram_traffic"]["task_count"],
         )
 
+    def test_micro_and_serving_share_memory_parameters(self):
+        for profile in profiles._profile_specs():
+            _, hbf, _ = profiles._profile_hardware(profile)
+            scenario = profiles._full_backend_scenario(profile)
+            physical = scenario.hardware.get_component("hbf0").metadata["physical_memory_config"]
+            self.assertEqual(physical, hbf.config)
+            hbm_link = next(link for link in scenario.hardware.links
+                            if {link.source_component, link.target_component} == {"gpu0", "hbm0"})
+            self.assertEqual(hbm_link.bandwidth_gbps,
+                             scenario.hardware.get_component("hbm0").bandwidth_gbps)
+        self.assertEqual(profiles._profile_by_id("hbf_sucks_hbf2_b200").bandwidth["hbm_read_gb_s"], 4000)
+
+    def test_micro_alternatives_do_not_inherit_baseline_queues(self):
+        profile = profiles._profile_by_id("son_hbf")
+        result = profiles.run_profile(profile)
+        hbm, hbf, _ = profiles._profile_hardware(profile)
+        independent = profiles._stream(
+            hbm, hbf, kv_pages=8, steps=4,
+            kv_read_tier="hbf", kv_write_tier="hbf", weight_tier="hbm",
+            traffic_page_bytes=hbf.config.page_bytes,
+        )
+        self.assertEqual(result["all_hbf"]["service_ns"], independent["service_ns"])
+
+    def test_memory_slo_applies_to_each_step_not_entire_experiment(self):
+        profile = profiles._profile_by_id("son_hbf")
+        observed = profiles.run_profile(profile)["all_hbf"]
+        threshold = observed["max_step_service_ns"] * 1.1
+        profile = profiles.replace(profile, slo={"threshold_s": threshold / 1e9})
+        result = profiles.run_profile(profile)["all_hbf"]
+        self.assertGreater(result["service_ns"], threshold)
+        self.assertTrue(result["memory_service_slo_met"])
+
+    def test_resume_points_start_with_independent_resource_queues(self):
+        row = next(item for item in self.report["results"] if item.get("experiment") == "resume_block_fetch")
+        point = next(item for item in row["block_fetch"] if item["blocks"] == 48)
+        _, hbf, _ = profiles._profile_hardware(profiles._profile_by_id("hot_cold_b200"))
+        requests = [profiles._request(
+            hbf, operation=profiles.Operation.READ,
+            address=index * hbf.config.page_bytes, bytes_=hbf.config.page_bytes,
+            arrival_ns=0.0, label=f"independent-{index}",
+        ) for index in range(48)]
+        self.assertEqual(point["resume_service_ns"], max(item.completion_ns for item in requests))
+
+    def test_unconfigured_slo_is_not_reported_as_measured_goodput(self):
+        row = next(item for item in self.report["results"]
+                   if item.get("profile_id") == "hbf_sucks_hbf2_b200" and "full_backend" in item)
+        self.assertFalse(row["full_backend"]["summary"]["slo_configured"])
+        self.assertIsNone(row["full_backend"]["summary"]["goodput_visible_output_tokens_per_s"])
+
 
 if __name__ == "__main__":
     unittest.main()

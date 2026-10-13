@@ -3,6 +3,8 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from contextlib import ExitStack
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "accept_hbf_hbm.py"
 SPEC = importlib.util.spec_from_file_location("accept_hbf_hbm", SCRIPT)
@@ -11,6 +13,22 @@ SPEC.loader.exec_module(acceptance)
 
 
 class HbfHbmAcceptanceTests(unittest.TestCase):
+    def test_failed_dependency_cannot_leave_stage_marked_passed(self):
+        with ExitStack() as mocks:
+            for name in dir(acceptance):
+                if name.startswith("check_"):
+                    mocks.enter_context(patch.object(acceptance, name, return_value={}))
+            mocks.enter_context(patch.object(acceptance, "check_directional_bandwidth",
+                                            side_effect=AssertionError("injected bandwidth failure")))
+            mocks.enter_context(patch.object(acceptance, "placement_experiment",
+                                            side_effect=lambda name, **kwargs: {"id": name}))
+            report = acceptance.run_acceptance()
+        stages = {item["stage"]: item["status"] for item in report["plan_completion"]}
+        self.assertFalse(report["passed"])
+        self.assertEqual(stages["1_parameters_and_timing"], "failed")
+        self.assertEqual(stages["6_acceptance_and_question_matrix"], "failed")
+        self.assertEqual(stages["0_baseline"], "passed")
+
     def test_physical_invariants_and_placement_matrix(self):
         report = acceptance.run_acceptance()
         failures = [item for item in report["checks"] + report["experiments"] if not item["passed"]]
@@ -32,10 +50,13 @@ class HbfHbmAcceptanceTests(unittest.TestCase):
         self.assertEqual(plan_status["1_parameters_and_timing"], "passed")
         self.assertEqual(plan_status["2_simplified_hardware_execution"], "passed")
         self.assertEqual(plan_status["4_tiering_migration_and_prefetch"], "passed")
-        self.assertEqual(plan_status["5_metrics_and_experiment_entry"], "passed")
+        self.assertEqual(plan_status["5_metrics_and_experiment_entry"], "partial")
         self.assertEqual(plan_status["3_capacity_lifecycle_and_write_buffer"], "passed")
         self.assertEqual(plan_status["6_acceptance_and_question_matrix"], "partial")
         self.assertFalse(report["plan_complete"])
+        metric_stage = next(item for item in report["plan_completion"] if item["stage"] == "5_metrics_and_experiment_entry")
+        self.assertIn("completion_assessment_by_research_runner", metric_stage["remaining"])
+        self.assertIn("long_term_research", report["research_followups"])
         self.assertEqual(report["baseline_validation"]["status"], "not_available")
         self.assertIsNone(report["baseline_validation"]["relative_error"])
         self.assertEqual(len(report["validation_matrix"]), len(report["capabilities"]))

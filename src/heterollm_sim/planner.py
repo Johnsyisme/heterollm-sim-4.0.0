@@ -4159,6 +4159,27 @@ def _direct_backing_descriptors(task, scenario, component, direct):
         rows = ([{"operation": "read", "byte_count": reads,
                   "buffer_id": _gddr_stable_identity(task, metadata, "weight"),
                   "offset_bytes": metadata.get("weight_offset_bytes", 0)}] if reads else [])
+        # An analytical indexed embedding lookup counts row traffic, not a
+        # contiguous allocation of all selected rows. A long prompt can read
+        # more bytes than the resident table contains. In the absence of token
+        # indices, use an explicit cyclic address model without enlarging that
+        # table or dropping repeated reads. Authored RHS ranges remain strict.
+        if rows and metadata.get("event_kind") == "embedding" and metadata.get(
+                "embedding_traffic_semantics") == "analytical_indexed_row_lookup":
+            first = rows[0]
+            offset = _gddr_non_negative_int(first["offset_bytes"], "weight_offset_bytes")
+            extent = _gddr_allocation_size(scenario, metadata, "weight",
+                first["buffer_id"], offset, reads, None)
+            if extent is not None and extent > 0 and 0 <= offset < extent and offset + reads > extent:
+                rows = []
+                remaining = reads
+                while remaining:
+                    count = min(remaining, extent - offset)
+                    rows.append({**first, "byte_count":count, "offset_bytes":offset,
+                        "buffer_size_bytes":extent,
+                        "indexed_lookup_address_model":"cyclic_without_token_indices"})
+                    remaining -= count
+                    offset = 0
     output = direct.get("output_buffer_accesses", metadata.get("output_buffer_accesses"))
     if output is not None:
         if not isinstance(output, (tuple, list)) or not all(isinstance(row, Mapping) for row in output):
@@ -4210,6 +4231,8 @@ def _direct_backing_descriptors(task, scenario, component, direct):
             "physical_memory_component_id": component.component_id}
         if extent is not None:
             descriptor["allocation_size_bytes"] = extent
+        if row.get("indexed_lookup_address_model") is not None:
+            descriptor["indexed_lookup_address_model"] = row["indexed_lookup_address_model"]
         alias, alias_generation, alias_offset = _gddr_access_alias(metadata, side)
         if alias is not None:
             descriptor.update(alias_of=alias,
@@ -4441,7 +4464,10 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
         if component.component_id in aggregate_components or not component.is_storage:
             continue
         service = component.metadata.get("memory_service", {})
-        profile = _resolve_component_profile(scenario, component.component_id)
+        # Remote NAND endpoints own physical resources without a typed DRAM
+        # profile. Keep those resources in the physical set nonetheless.
+        profile = (_resolve_component_profile(scenario, component.component_id)
+                   if scenario.component_profile_kind(component) is not None else None)
         nonaggregate_resources.update({
             str(service.get("resource_id") or ""),
             str(service.get("physical_owner") or ""),
@@ -6121,7 +6147,14 @@ def _task_segment_clone_metadata_plan_node(
     and tuple construction at every child.
     """
 
-    kind, object_id, children = plan  # type: ignore[misc]
+    kind, _captured_object_id, children = plan  # type: ignore[misc]
+    # Capture clones the source metadata, so its original object ids can be
+    # reused before this template is replayed.  In particular deepcopy puts
+    # its keep-alive list at memo[id(memo)]; using a freed source binding's id
+    # here can then replace that binding with an unrelated list.  Key by the
+    # live template value instead, exactly as deepcopy does, preserving actual
+    # aliases without mixing capture identities with replay object identities.
+    object_id = id(value)
     if object_id in memo:
         return memo[object_id]
     if kind == "namespace":
@@ -7837,8 +7870,13 @@ def _direct_device_memory(scenario: ScenarioConfig, storage: Optional[str], devi
     """Only explicitly exposed backend buffers are directly GPU-addressable."""
     exposure = scenario.placement.metadata.get("llama_backend_memory", {})
     entry = exposure.get(storage, {}) if isinstance(exposure, Mapping) else {}
-    return bool(isinstance(entry, Mapping) and entry.get("access") == "direct"
-                and entry.get("device_id") == device)
+    if not isinstance(entry, Mapping) or entry.get("access") != "direct":
+        return False
+    # Shared addressable pools can be exposed to multiple explicit devices.
+    # An attachment/link alone still does not grant direct access.
+    devices = entry.get("device_ids", ())
+    return bool(entry.get("device_id") == device or
+                isinstance(devices, (tuple, list)) and device in devices)
 
 
 def _direct_memory_address(
@@ -8861,12 +8899,13 @@ def _add_transfer_tasks(
                 continue
             if not authored or sum(int(row["size_bytes"]) for row in authored) != byte_count:
                 raise ValueError("explicit transfer ranges must cover its bytes exactly")
-            from .memory_types import parse_physical_memory_config
+            from .memory_types import DramConfig, parse_physical_memory_config
             config = parse_physical_memory_config(_component(scenario, component_id).metadata["physical_memory_config"])
+            granularity = config.burst_bytes if isinstance(config, DramConfig) else config.page_bytes
             rows = []
             for row in authored:
                 address = _gddr_stable_address(row["buffer_id"], row.get("offset_bytes", 0), row["size_bytes"],
-                    config.capacity_bytes, config.burst_bytes, row.get("buffer_size_bytes"))
+                    config.capacity_bytes, granularity, row.get("buffer_size_bytes"))
                 rows.append({**row, "address": address, "byte_count": row["size_bytes"],
                     "address_source": "stable_buffer_tensor_offset",
                     "generation": row.get("allocation_generation", 0),
@@ -15757,9 +15796,15 @@ def _generic_kv_contract(builder, scenario, plan, rank, layer, *,
     capacity = (int(scenario.llama_cpp_config.context) if scenario.llama_cpp_config is not None
                 else int(_execution_view(scenario).max_sequence_length))
     extra = int(getattr(scenario.workload.mtp, "candidate_tokens", 0) or 0)
-    capacities = {key: max(capacity, int(request.prompt_tokens) + int(request.output_tokens) + extra)
+    # A generic request owns its declared live token budget, not the model's
+    # maximum supported context. Reserving max_sequence_length per request
+    # made small, otherwise admissible KV-only devices fail address binding
+    # (e.g. a 136-token request allocated a 262K-token physical buffer).
+    # An explicit llama.cpp context retains its native reserved-buffer rule.
+    minimum_capacity = capacity if scenario.llama_cpp_config is not None else 1
+    capacities = {key: max(minimum_capacity, int(request.prompt_tokens) + max(0, int(request.output_tokens) - 1) + extra)
                   for key, request in requests.items()}
-    total_capacity = max(capacity, sum(capacities.values()), 1)
+    total_capacity = max(sum(capacities.values()), 1) if capacities else max(capacity, 1)
     result = {"schema": "analytical-token-major-kv/v1", "row_bytes": row_bytes,
               "layout": "separate_token_major_k_and_v", "read_tokens": 0,
               "materialized_tokens": 0, "owners": []}
@@ -16062,6 +16107,11 @@ def _add_kv_read(
     # path below performs the corresponding page-accurate move.
     if (
         prefetch_distance > 0
+        # Online paged serving owns physical page identities and schedules
+        # these copies itself. A second coarse transfer would both duplicate
+        # traffic and invent an unaddressed NAND read during every attention.
+        and not (scenario.placement.kv_policy.layout_mode == "paged_pool"
+                 and getattr(scenario.workload.scheduler, "mode", "static") == "continuous")
         and offload
         and offload_ratio > 0
         and offload != access_component
@@ -23828,6 +23878,13 @@ def _compile_parallel_lm_head(
             configured_component = _component(scenario, configured_id)
             if _is_cim(configured_component):
                 target = rank.cim_component_id or configured_id
+            elif _kind(configured_component) == "gpu" and plan.world_size > 1:
+                # The control plane records one representative GPU and a
+                # rank-local execution ledger for TP. Honor the same expansion
+                # used by decoder GEMMs and primitives; otherwise all output
+                # shards run on the representative and their physical rank
+                # bindings disagree with the target GPU.
+                target = rank.component_id
             elif _kind(configured_component) in {"cpu", "gpu"}:
                 target = configured_id
             else:
@@ -27265,6 +27322,15 @@ def _record_compute_components(
     record: TaskExecutionRecord,
     compute_component_ids: Set[str],
 ) -> Set[str]:
+    # A memory owner can share a CPU resource namespace without executing the
+    # layer on that CPU (for example GPU KV reads from cpu0.memory:dram:*).
+    # Keep these demands in the stage for replay and contention, but do not
+    # let a pure memory read/write create a second compute owner.
+    if (
+        record.category is TaskCategory.COMMUNICATION
+        and record.metadata.get("memory_direction") in {"read", "write"}
+    ):
+        return set()
     dma_engine_resource_id = (
         str(record.metadata.get("dma_engine_resource_id", ""))
         if record.metadata.get("transfer_execution") == "coherent_dma"
@@ -27275,6 +27341,7 @@ def _record_compute_components(
         for demand in record.demands
         for component_id in compute_component_ids
         if demand.resource_id != dma_engine_resource_id
+        if ":dram:" not in demand.resource_id and ":nand:" not in demand.resource_id
         if demand.resource_id == component_id
         or demand.resource_id.startswith(component_id + ".")
     }
@@ -28434,6 +28501,18 @@ def _compact_execution_stages(
                     )
                 else:
                     segments[-1][1].append(layer_id)
+        elif _parallel_plan(scenario).world_size > 1 and all(
+            _kind(_component(scenario, owner)) == "gpu"
+            for owners in layer_owner_sets.values() for owner in owners
+        ):
+            # A TP invocation is a parallel DAG, not a sequence of one-owner
+            # layer stages. Keep its complete task DAG in one envelope. The
+            # online kernel still schedules every rank, collective and shared
+            # resource independently; the representative component labels the
+            # envelope only and must not be used to serialize its task facts.
+            representative = min(owner for owners in layer_owner_sets.values() for owner in owners)
+            segments.append((representative, list(layer_order)))
+            segment_starts.append(0.0)
         else:
             mixed_records = tuple(
                 record
@@ -28593,6 +28672,9 @@ def _compact_execution_stages(
                 "layer_ids": tuple(layer_ids),
                 "service_ns": end_ns - start_ns,
                 "observed_span_ns": observed_end - observed_start,
+                "compute_component_ids": tuple(sorted({owner for layer_id in layer_ids
+                    for owner in layer_owner_sets.get(layer_id, ())})),
+                "parallel_task_envelope": _parallel_plan(scenario).world_size > 1,
             }
             stages.append(stage_row)
             stage_records_by_stage_id[stage_id] = ordered_stage_records
@@ -29212,14 +29294,26 @@ def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
     fields = ("logical_bytes", "logical_read_bytes", "logical_write_bytes",
               "host_transfer_bytes", "internal_transfer_bytes", "physical_bytes",
               "physical_read_bytes", "physical_write_bytes", "pages_read", "pages_programmed",
+              "pages_touched", "read_operations", "program_operations", "rmw_read_operations",
+              "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
               "erase_operations", "queue_wait_ns", "service_ns", "energy_pj")
     totals = {key: 0.0 for key in fields}
+    peaks = {key: 0 for key in ("host_outstanding_at_admission_peak",
+             "host_read_outstanding_at_admission_peak", "host_write_outstanding_at_admission_peak")}
+    peak_observed = {key: 0 for key in peaks}
+    measured_observed = {key: 0 for key in ("page_access_payload_bytes",
+                         "page_access_capacity_bytes", "host_admission_samples")}
+    physical_rows = 0
     operations: Dict[str, int] = {}
     resources: Dict[str, Dict[str, object]] = {}
     task_ids = set()
+    page_observations = []
     for task, raw, kind in _physical_execution_rows(tasks):
         if kind not in {"SSD", "HBF", "MEMORYKIND.SSD", "MEMORYKIND.HBF"}:
             continue
+        physical_rows += 1
+        if raw.get("nand_observations") is not None:
+            page_observations.append(raw["nand_observations"])
         task_ids.add(task.task_id)
         operation = str(raw.get("operation", "unknown"))
         operations[operation] = operations.get(operation, 0) + 1
@@ -29227,6 +29321,13 @@ def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
             value = raw.get(key, 0)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 totals[key] += float(value)
+                if key in measured_observed and key in raw:
+                    measured_observed[key] += 1
+        for key in peaks:
+            value = raw.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                peaks[key] = max(peaks[key], int(value))
+                peak_observed[key] += 1
         physical_resources = raw.get("resource_busy_ns", {})
         resolved_owners = raw.get("resource_owners", {})
         for demand in task.demands:
@@ -29240,10 +29341,31 @@ def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
             row["energy_pj"] += float(demand.energy_pj)
     if not task_ids:
         return {"schema_version": "heterollm.nand-traffic/v2", "task_count": 0}
+    from .nand_core import summarize_nand_observations
+    observed_pages = summarize_nand_observations(page_observations)
     return {
         "schema_version": "heterollm.nand-traffic/v2", "task_count": len(task_ids),
         **{key: int(round(value)) for key, value in totals.items() if key not in {"queue_wait_ns", "service_ns", "energy_pj"}},
         "queue_wait_ns": totals["queue_wait_ns"], "service_ns": totals["service_ns"], "energy_pj": totals["energy_pj"],
+        **{key: value if peak_observed[key] == physical_rows else None for key, value in peaks.items()},
+        **{key: int(totals[key]) if count == physical_rows else None
+           for key, count in measured_observed.items()},
+        "page_access_payload_utilization": (totals["page_access_payload_bytes"] / totals["page_access_capacity_bytes"]
+                                            if totals["page_access_capacity_bytes"]
+                                            and measured_observed["page_access_payload_bytes"] == physical_rows
+                                            and measured_observed["page_access_capacity_bytes"] == physical_rows else None),
+        "nand_observations": observed_pages,
+        "nand_read_queue_depth": observed_pages["read_queue_depth"] if observed_pages else None,
+        "nand_program_queue_depth": observed_pages["program_queue_depth"] if observed_pages else None,
+        "queue_depth_scope": "max per-device outstanding host requests sampled at admission, including the new request; buffered writes end at host acknowledgement; not NAND page/program queues",
+        "page_utilization_scope": "logical payload / sum of per-access page-rounded spans; repeated accesses count again; not unique resident capacity utilization",
+        "metric_availability": {
+            "nand_read_queue_depth": {"status": "recorded" if len(page_observations)==physical_rows else "partial" if page_observations else "not_recorded", "reason": "page-level observation is opt-in; host requests are separate"},
+            "nand_program_queue_depth": {"status": "recorded" if len(page_observations)==physical_rows else "partial" if page_observations else "not_recorded", "reason": "page-level observation is opt-in; host writes are separate"},
+            **{key: {"status": "recorded" if count == physical_rows else "partial" if count else "not_recorded",
+                     "recorded_owner_rows": count, "physical_owner_rows": physical_rows}
+               for key, count in {**measured_observed, **peak_observed}.items()},
+        },
         "operation_counts": dict(sorted(operations.items())), "resource_totals": dict(sorted(resources.items())),
         "accounting_semantics": "logical, host, internal and array traffic from physical transaction results",
     }
