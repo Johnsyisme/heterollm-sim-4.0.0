@@ -158,7 +158,8 @@ def small_batch_figure(groups, output):
 
 def named_context_figure(groups, output):
     rows = [r for r in groups.get("09_serving_study", {}).get("rows", ())
-            if full_row(r) and str(r.get("id", "")).startswith("model/") and r.get("placement") in (A, B)]
+            if full_row(r) and str(r.get("id", "")).startswith(("model/","model-capacity/"))
+            and r.get("inventory_role")!='capacity_control_512gib' and r.get("placement") in (A, B)]
     model_order = {"llama3_1-8b": 0, "llama3_1-70b": 1}
     model_ids = sorted({r.get("parameters", {}).get("model_id", r.get("model", "unknown")) for r in rows},
                        key=lambda name: (model_order.get(name, 2), name))
@@ -219,9 +220,9 @@ def named_context_figure(groups, output):
         left.legend(frameon=False, fontsize=9)
         right.axhline(1., color="#667281", linestyle=":", linewidth=1.)
         right.set_title(title + " · B/A", pad=10); right.set_ylabel(tr("输出 TPS 比值（对数坐标）", "Output TPS ratio (log scale)"))
-    caption = "仅使用完整命名模型 A/B 配对；不是内存微基准。2K 点为 32 输出，长上下文点仅 4 输出，不能把折线斜率解释为纯上下文效应。128K 提示词加 4 输出也略超原生 131072-token 上限；1M 属大幅架构外推，二者均用星号及空心菱形标记，不包含语义准确率保证。比值仅匹配相同输出长度和硬件清单。"
-    fig.text(.055, .045, tr("2K 点：32 输出；128K / 1M 点：仅 4 输出，吞吐受 prefill 主导。折线仅连接已测点。\n* 空心菱形：提示词加输出超出原生上限；128K+4 已略超上限，1M 属大幅架构外推。\n外推不作语义准确率或生产吞吐结论。",
-        "2K: 32 output tokens; 128K/1M: only 4 output tokens, dominated by prefill. Lines join observations only.\n* Hollow diamonds: prompt plus output exceeds native context; 128K+4 slightly exceeds it, while 1M is a large extrapolation.\nExtrapolations make no semantic-quality or production-throughput claim."), fontsize=9)
+    caption = "仅使用完整命名模型 A/B 配对；不是内存微基准。2K 点为 32 输出，长上下文点仅 4 输出，不能把折线斜率解释为纯上下文效应。70B/1M共同扩为1TiB HBM，原512GiB容量对照不参与配对。128K加输出与1M超出原生上下文，采用星号及空心菱形标记。比值仅匹配相同输出长度和硬件清单。"
+    fig.text(.055, .045, tr("2K 点：32 输出；128K / 1M 点：仅 4 输出，吞吐受 prefill 主导。折线仅连接已测点。\n* 空心菱形：提示词加输出超出原生上限；128K+4 已略超上限，1M 属大幅架构外推。\n70B/1M的A/B共同扩为1TiB HBM；原512GiB容量对照不参与配对。",
+        "2K: 32 output tokens; 128K/1M: only 4 output tokens, dominated by prefill. Lines join observations only.\n* Hollow diamonds: prompt plus output exceeds native context; 128K+4 slightly exceeds it, while 1M is a large extrapolation.\n70B/1M uses 1 TiB HBM for BOTH A/B; original 512 GiB capacity controls excluded."), fontsize=9)
     complete = all(any(o["model_id"] == model and o["context_tokens"] == context
                       for o in observations) for model in ("llama3_1-8b", "llama3_1-70b")
                    for context in (2048, 131072, 1048576))
@@ -481,6 +482,53 @@ def bandwidth_figure(groups,output):
     result['row_scope']='physical sequential-read and link microbenchmark; no LLM TPS';return result
 
 
+def decode_figure(groups,output):
+    from hbf_hbm_experiments import decode_matrix_complete
+    group=groups.get('19_decode_physical',{})
+    rows=[r for r in group.get('rows',[]) if full_row(r) and 'decode_measurement' in r]
+    output_tokens=group.get('output_tokens',64)
+    measured_tokens=output_tokens-1
+    contexts=[2048,32768,131072,1048576]
+    labels=['2K','32K','128K*','1M*']
+    fig,axes=plt.subplots(2,3,figsize=(16,9))
+    fig.subplots_adjust(top=.85,bottom=.19,left=.075,right=.98,hspace=.42,wspace=.3)
+    fig.suptitle(tr('生成阶段的真实影响：独立Decode窗口','Decode impact measured after prefill'),y=.98,fontsize=17)
+    fig.text(.5,.905,tr(f'HBM → DRAM Core · HBF → NAND Core · GPU计算/启动保留简化模型\n相同配置与工作量 · batch=1 · {output_tokens}输出 · 每点{measured_tokens}个Decode token',
+        f'HBM: DRAM Core · HBF: NAND Core · GPU compute/launch approximation retained\nIdentical paired inventory/workload · batch=1 · {output_tokens} outputs · {measured_tokens} measured decode tokens'),ha='center',fontsize=10)
+    for i,(model,label) in enumerate((('llama3_1-8b','Llama 3.1 8B'),('llama3_1-70b','Llama 3.1 70B'))):
+        selected=[r for r in rows if r.get('parameters',{}).get('model_id')==model]
+        pairs=sorted([p for p in group.get('comparisons',[]) if p['model_id']==model],key=lambda p:p['prompt_tokens'])
+        for j,(key,heading) in enumerate((('node_decode_tps','Decode TPS'),('tpot_ns','TPOT (ms)'))):
+            ax=axes[i,j]
+            if not selected: missing(ax);continue
+            for arch in (A,B):
+                series=sorted([r for r in selected if r['placement']==arch],key=lambda r:r['prompt_tokens'])
+                values=[r['decode_measurement']['node_decode_tps'] if key=='node_decode_tps' else r['tpot_ns']['p50']/1e6 for r in series]
+                ax.plot([contexts.index(r['prompt_tokens']) for r in series],values,marker=MARKERS[arch],
+                    color=COLORS[arch],label=LABELS[arch],markersize=6)
+            ax.set_yscale('log');ax.set_ylabel(heading+tr('（对数轴）',' (log)'));ax.set_title(label+' · '+heading)
+            ax.legend(frameon=False,fontsize=8)
+        ax=axes[i,2]
+        if pairs:
+            xs=[contexts.index(p['prompt_tokens']) for p in pairs]
+            ratios=[p['B_over_A_decode_tps'] for p in pairs]
+            ax.plot(xs,ratios,'o-',color='#6D52A4',label=tr('独立Decode TPS','Decode TPS'))
+            ax.plot(xs,[p['B_over_A_total_tps'] for p in pairs],'s--',color='#8C9BAB',label=tr('全请求TPS','Whole-request TPS'))
+            ax.axhline(1,color='#64748B',linestyle=':',lw=1)
+            for x,value in zip(xs,ratios):ax.annotate(f'{value:.3f}',(x,value),xytext=(0,-16),textcoords='offset points',ha='center',fontsize=9,color='#6D52A4')
+            ax.set_ylim(0,max(1.12,max(ratios)*1.15));ax.set_ylabel('B / A');ax.legend(frameon=False,fontsize=8,loc='lower left')
+        else:missing(ax)
+        ax.set_title(label+tr(' · 两种窗口的倍率',' · ratios by measurement window'))
+        for ax in axes[i]:
+            if ax.axison:
+                ax.set_xticks(range(len(contexts)),labels);ax.set_xlabel(tr('输入上下文','Prompt context'));style(ax)
+    fig.text(.07,.045,tr(f'先真实执行全部prefill，再统计首token之后的{measured_tokens}个token。Decode TPS={measured_tokens}/生成窗口秒数；TPOT=该窗口/{measured_tokens}。\n右列低于1表示HBF KV的吞吐低于HBM KV；全请求窗口含prefill，可能掩盖生成阶段差异。\n70B/1M的A/B共同使用1TiB HBM，其余512GiB；带宽/时序不变，原配置连续地址分配失败另存为负对照。\n* 128K加输出略超原生上下文；1M为架构压力外推。数值来自仿真假设，不是实测设备性能。',
+        f'Real prefill executes first. Decode TPS={measured_tokens} / post-first-token window; TPOT=window / {measured_tokens}.\nRight: below 1 means lower throughput with HBF KV; prefill in the whole-request window can obscure decode impact.\n70B/1M uses 1 TiB HBM for BOTH A/B; other points use 512 GiB. Bandwidth/timing unchanged; original capacity failure retained.\n* 128K plus outputs exceeds native context slightly; 1M is an architecture stress case. Simulation, not hardware measurements.'),fontsize=9)
+    return save(fig,output,'09_decode_physical',title='固定输出下的独立Decode TPS、TPOT及A/B倍率',
+        caption=f'统一{output_tokens}输出，真实prefill后测量{measured_tokens}个Decode token。HBM与HBF均执行对应物理Core；GPU计算和启动继续采用原有简化模型。',
+        rows=rows,status='complete' if decode_matrix_complete([group] if group else []) else 'partial_data',observations=group.get('comparisons',[]))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=ROOT / "artifacts/hbf_hbm/results.json")
@@ -495,7 +543,7 @@ def main():
     font = setup_font()
     figures = [make(groups, args.output) for make in
                (small_batch_figure, named_context_figure, slo_figure, prefetch_figure,
-                system_figure,internal_feedback_figure,sustained_figure,bandwidth_figure)]
+                system_figure,internal_feedback_figure,sustained_figure,bandwidth_figure,decode_figure)]
     def report_path(path):
         try:
             return Path(os.path.relpath(Path(path).resolve(), args.input.resolve().parent)).as_posix()

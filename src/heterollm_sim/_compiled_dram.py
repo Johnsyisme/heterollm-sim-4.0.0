@@ -270,7 +270,13 @@ def execute_compiled_many(core, requests):
     reads = np.array([r.operation is Operation.READ for r in requests], dtype=np.bool_)
     inflight = np.empty(len(core._inflight) + len(requests), dtype=np.float64)
     inflight[:len(core._inflight)] = core._inflight
-    from ._dram_numeric import run_numeric_many
+    try:
+        from ._dram_numeric import run_numeric_many
+    except (ImportError, OSError):
+        # Match execute_compiled: packing is still local, so submit_many can
+        # safely fall back to the ordered Python submissions without losing
+        # admission, bank, calendar or accounting state.
+        return None
     output = run_numeric_many(firsts, stops, arrivals, reads, config.max_outstanding_requests,
         float(core._acceptance_ns), inflight, len(core._inflight), geometry, duration_pairs, bool(shared),
         bankrows, bankready, banktouched, calendar, busy, moved, directions, last_start, last_end, touched)

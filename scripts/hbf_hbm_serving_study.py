@@ -12,6 +12,7 @@ import json
 import math
 import multiprocessing
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -19,14 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-# Invalidate interrupted-run points produced before the metadata replay fix.
-POINT_RESULT_VERSION = 2
+# Do not reuse historical points produced with the removed HBM aggregate path.
+POINT_RESULT_VERSION = 3
 
 from heterollm_sim.config import model_from_dict
 from heterollm_sim.control_plane_planner import _derive_requirements
 from heterollm_sim.ir import (KVCachePolicy, RequestSpec, LinkSpec, PortSpec,
     MTPPolicy, MTPBranchSpec, build_model_graph_from_layer_specs, model_graph_execution_layers)
 from heterollm_sim.memory_types import parse_physical_memory_config, make_ssd_config
+from heterollm_sim.memory_allocator import AllocationError
 from heterollm_sim.model_presets import materialize_model_payload, list_model_presets, get_model_preset
 from heterollm_sim.planner import ScenarioValidationError
 
@@ -196,15 +198,83 @@ agent-session API or a static hot-hit probability.
     return scenario
 
 
-def run_case(architecture: str, *, row_id: str, **parameters) -> dict[str, Any]:
+def physical_capacity_failure(error):
+    """Describe only a real first-fit capacity failure; other allocator bugs raise.
+
+    The failed request size is not the node's peak requirement. When the local
+    traceback is available, retain occupancy and fragmentation at that failure
+    without changing allocator or Core state.
+    """
+    if not isinstance(error, AllocationError):
+        return None
+    match = re.fullmatch(r"unable to allocate (\d+) bytes in capacity (\d+)(?: \(.* arena \[\d+, \d+\)\))?", str(error))
+    if match is None:
+        return None
+    detail = {"exception_type": "AllocationError", "message": str(error),
+              "requested_allocation_bytes": int(match[1]), "capacity_bytes": int(match[2]),
+              "classification": "physical_allocator_no_contiguous_extent",
+              "failure_stage": "physical_allocation", "physical_owner": None,
+              "occupied_bytes_at_failure": None, "largest_free_extent_bytes": None,
+              "same_layout_minimum_capacity_bytes": None,
+              "scope": "Physical allocator feasibility failure, not token throughput. The failing request size alone is not total peak demand; fragmentation may contribute. The same-layout bound only extends the current non-moving layout and is not a minimum hardware capacity."}
+    trace = error.__traceback__
+    while trace is not None:
+        frame = trace.tb_frame
+        local = frame.f_locals
+        if frame.f_code.co_name == "execute_cost_schedule":
+            detail["failure_stage"] = "physical_planning_preview"
+        if frame.f_code.co_name == "_register_physical_allocation":
+            detail["physical_owner"] = local.get("owner")
+            declaration = local.get("declaration", {})
+            detail["allocation"] = {k: declaration[k] for k in
+                ("buffer_id", "size_bytes", "allocation_size_bytes", "generation", "allocation_generation")
+                if k in declaration}
+        if frame.f_code.co_name == "_find_first_fit":
+            candidates = [a for a in local.get("candidates", ()) if a.alias_of is None]
+            lower, upper = local["lower"], local["upper"]
+            extent = [(max(lower,a.base_address), min(upper,a.base_address+a.size_bytes))
+                      for a in candidates if a.base_address < upper and a.base_address+a.size_bytes > lower]
+            used = sum(end-start for start,end in extent)
+            cursor, largest = lower, 0
+            alignment = local["self"].alignment_bytes
+            for start,end in sorted(extent):
+                cursor = ((cursor+alignment-1)//alignment)*alignment
+                largest = max(largest,start-cursor)
+                cursor = max(cursor,end)
+            cursor = ((cursor+alignment-1)//alignment)*alignment
+            largest = max(largest,upper-cursor)
+            detail.update(occupied_bytes_at_failure=used, free_bytes_at_failure=upper-lower-used,
+                largest_free_extent_bytes=largest, arena_start_bytes=lower, arena_end_bytes=upper,
+                same_layout_minimum_capacity_bytes=int(local["cursor"])+int(local["size"]),
+                compacted_occupancy_plus_request_bytes=used+int(local["size"]),
+                occupancy_observation="non-alias extents in the failed allocator arena, captured before transaction rollback; not a measured hardware peak")
+        trace = trace.tb_next
+    return detail
+
+
+def run_case(architecture: str, *, row_id: str, result_observer=None, **parameters) -> dict[str, Any]:
     import hbf_hbm_experiments as experiments
     s = build_study_scenario(architecture, **parameters)
     try:
-        row = experiments.serving_row(s, row_id, placement=architecture)
+        row = experiments.serving_row(s, row_id, placement=architecture,
+                                      result_observer=result_observer)
     except ScenarioValidationError as error:
         return {"id":row_id, "placement":architecture, "mode":"configuration_rejected",
                 "parameters":parameters, "reason":str(error), "node_tps":None,
                 "goodput_tps":None, "executed_serving":False}
+    except AllocationError as error:
+        failure = physical_capacity_failure(error)
+        if failure is None:
+            raise
+        return {"id":row_id,"placement":architecture,"mode":"physical_capacity_rejected",
+                "model":s.model.name,"parameters":parameters,"reason":str(error),
+                "node_tps":None,"goodput_tps":None,"executed_serving":False,
+                "attempted_serving":True,"capacity_failure":failure,
+                "fixed_inventory":{c.component_id:{"kind":c.kind,"capacity_bytes":c.capacity_bytes}
+                    for c in s.hardware.components if c.is_storage},
+                "model_structure":{"model_id":parameters.get("model_id","small"),
+                    "layers":s.model.num_layers,"weight_bytes":s.model.total_declared_weight_bytes,
+                    "context_extrapolation":s.model.metadata.get("study_context_extrapolation")}}
     row["parameters"] = parameters
     row["executed_serving"] = True
     row["model_structure"] = {"model_id":parameters.get("model_id", "small"),
@@ -281,7 +351,8 @@ def study_cases(cases, *, workers=1, progress=True, point_cache_dir=None, resume
                 cached = None
         if (isinstance(cached, dict) and cached.get('point_result_version') == POINT_RESULT_VERSION
                 and cached.get('id') == row_id and cached.get('placement') == architecture
-                and cached.get('parameters') == parameters and cached.get('executed_serving')):
+                and cached.get('parameters') == parameters and (cached.get('executed_serving')
+                    or cached.get('mode') == 'physical_capacity_rejected' and cached.get('capacity_failure'))):
             results[index] = cached
             if progress:
                 print('[09_serving_study] resume ' + row_id, flush=True)
@@ -383,6 +454,14 @@ def run_serving_study(*, sections=DEFAULT_SECTIONS, progress=True,
             for architecture in ("A_hbm_only","D_hbf_weights"):
                 named_cases.append((architecture, f"named-extended/{model}/{architecture}",
                     dict(model_id=model,prompt=2048,batch=1,output=4,hbm_capacity_bytes=hbm_capacity)))
+    if "long_context" in sections:
+        # The physical allocator exposes the 512 GiB long-context limit.
+        # Keep all three original-inventory observations above, and give all
+        # A/B/D comparison points the same explicitly larger inventory.
+        for architecture in ("A_hbm_only", "B_all_kv_hbf", "D_hbf_weights"):
+            named_cases.append((architecture,f"model-capacity/llama3_1-70b/1048576/1tib/{architecture}",
+                dict(model_id="llama3_1-70b",prompt=1048576,batch=1,output=4,
+                     hbm_capacity_bytes=1024*GIB)))
     for row in study_cases(named_cases, workers=workers, progress=progress,
                            point_cache_dir=point_cache_dir, resume=resume):
         if row['id'].startswith('named-extended/'):
@@ -392,6 +471,16 @@ def run_serving_study(*, sections=DEFAULT_SECTIONS, progress=True,
                     "hbm_capacity_bytes":hbm_capacity,"hbf_capacity_bytes":1024*GIB,
                     "capacity_expansion_reason":"405B BF16 weights exceed the base 512 GiB HBM; both paired architectures receive 1 TiB HBM" if model=="llama3_1-405b" else None,
                     "scope":"same physical capacity within each model pair; not equal package area or a production single-GPU topology"}
+        if row['id'].startswith('model/llama3_1-70b/1048576/'):
+            row["inventory_role"] = "capacity_control_512gib"
+            row["inventory_comparison_scope"] = {"hbm_capacity_bytes":512*GIB,
+                "hbf_capacity_bytes":1024*GIB,
+                "scope":"Original inventory capacity control. Failed A/D have no throughput; the completed B is not paired against expanded-inventory A/D."}
+        if row['id'].startswith('model-capacity/llama3_1-70b/1048576/1tib/'):
+            row["inventory_role"] = "capacity_expanded_comparison_1tib"
+            row["inventory_comparison_scope"] = {"paired_architectures":["A_hbm_only","B_all_kv_hbf","D_hbf_weights"],
+                "hbm_capacity_bytes":1024*GIB,"hbf_capacity_bytes":1024*GIB,
+                "capacity_expansion_reason":"The original 512 GiB physical allocator cannot admit a 56 GiB long-context buffer for A/D. Every compared architecture receives the same 1 TiB HBM inventory; the original failure remains a separate capacity control."}
         rows.append(row)
     if "speculative" in sections:
         for architecture in ("A_hbm_only","B_all_kv_hbf"):
@@ -438,6 +527,22 @@ def run_serving_study(*, sections=DEFAULT_SECTIONS, progress=True,
                     rows.append(row); samples.append(row)
                     if _qualified(row): upper=interval
                     else: lower=interval
+            # Keep the original bounded study's B refinement inputs when a
+            # changed physical backend produces a different adaptive bracket.
+            # These remain individual finite observations, not a fitted curve.
+            reference_intervals = (55_000.,77_500.,88_750.,94_375.) if architecture=="B_all_kv_hbf" else ()
+            observed_intervals = {r["parameters"]["interval_ns"] for r in samples}
+            for interval in reference_intervals:
+                if interval in observed_intervals:
+                    continue
+                row=study_case(architecture,row_id=f"slo-refine/{architecture}/{interval}",
+                    prompt=128,batch=4,output=8,request_count=32,interval_ns=interval,
+                    slo_ttft_ns=5e6,slo_tbt_ns=1e6)
+                row["all_requests_meet_slo"]=bool(_qualified(row))
+                rows.append(row); samples.append(row)
+            upper=min((r["parameters"]["interval_ns"] for r in samples if _qualified(r)),default=None)
+            lower=max((r["parameters"]["interval_ns"] for r in samples if not _qualified(r)
+                       and upper is not None and r["parameters"]["interval_ns"]<upper),default=None)
             boundaries.append({"architecture":architecture,
                 "kind":"arrival_interval",
                 "tested_arrival_intervals_ns":[r["parameters"]["interval_ns"] for r in samples],
@@ -464,13 +569,31 @@ def run_serving_study(*, sections=DEFAULT_SECTIONS, progress=True,
     prefetch_rows = [r for r in rows if r["id"].startswith(("prefetch/","prefetch-stress/"))]
     speculative_rows=[r for r in rows if r["id"].startswith("speculative/")]
     extended_rows=[r for r in rows if r["id"].startswith("named-extended/")]
+    capacity_controls=[r for r in rows if r.get("inventory_role")=="capacity_control_512gib"]
+    expanded=[r for r in rows if r.get("inventory_role")=="capacity_expanded_comparison_1tib"]
     checks = {"at_least_one_full_operator_run":any(r["executed_serving"] for r in rows),
-        "all_requested_points_executed":all(r["executed_serving"] for r in rows),
+        "all_requested_points_accounted_for":all(r["executed_serving"] or
+            r in capacity_controls and r.get("mode")=="physical_capacity_rejected"
+            and r.get("capacity_failure",{}).get("capacity_bytes")==512*GIB for r in rows),
+        "all_performance_points_executed":all(r["executed_serving"] for r in rows if r not in capacity_controls),
+        "all_completed_points_have_live_hbm_core_evidence":all(
+            r.get("core_execution_audit",{}).get("valid_for_committed_byte_totals") and
+            any(o.get("core")=="DramCore" and o.get("memory_kind")=="HBM" and o.get("transactions",0)>0
+                for o in r["core_execution_audit"].get("owners",())) for r in rows if r["executed_serving"]),
         "all_executed_requests_terminal": all(r.get("unfinished_requests",0)==0 for r in rows),
         "all_executed_requests_complete":all(r.get("completed_requests")==r.get("request_count") for r in rows if r["executed_serving"]),
         "every_rejection_has_reason": all(r.get("reason") for r in rows if not r["executed_serving"]),
         "resolved_placement_matches_contract":all(r["placement_verification"]["all_resolved_weights_on_requested_tier"] and r["placement_verification"]["resolved_kv_on_requested_tier"] and r["placement_verification"]["all_resolved_model_ops_on_gpu"] for r in rows if r["executed_serving"]),
         "serving_rows_have_positive_tps": all(r["node_tps"]>0 for r in rows if r["executed_serving"])}
+    if "long_context" in sections:
+        checks.update(original_512gib_capacity_controls_retained=len(capacity_controls)==3,
+            expanded_1tib_comparison_all_execute=len(expanded)==3 and all(r["executed_serving"] for r in expanded),
+            expanded_1tib_comparison_same_inventory=len(expanded)==3 and all(
+                r.get("fixed_inventory")==expanded[0].get("fixed_inventory") for r in expanded),
+            capacity_failures_have_physical_allocator_evidence=all(
+                r.get("capacity_failure",{}).get("exception_type")=="AllocationError" and
+                r["capacity_failure"].get("requested_allocation_bytes",0)>0 and r["node_tps"] is None
+                for r in capacity_controls if not r["executed_serving"]))
     if baseline_rows:
         checks["all_baselines_execute"] = all(r["executed_serving"] for r in baseline_rows)
         checks["host_and_cxl_really_place_kv_in_dram"] = all(r["kv"]["peak_bytes_by_component"].get("hostmem0",0)>0
@@ -532,7 +655,8 @@ def run_serving_study(*, sections=DEFAULT_SECTIONS, progress=True,
     materializable_ids={p["id"] for p in catalog if p["coverage"]!="metadata_only"}
     coverage={"scope":"group09_only; group17 reports additional full serving and structural probes",
         "sections":list(sections),"full_operator_runs":sum(r["executed_serving"] for r in rows),
-        "configuration_rejections":sum(not r["executed_serving"] for r in rows),
+        "configuration_rejections":sum(r.get("mode")=="configuration_rejected" for r in rows),
+        "physical_capacity_rejections":sum(r.get("mode")=="physical_capacity_rejected" for r in rows),
         "executed_model_names":sorted(x for x in executed_names if x),
         "unexecuted_requested_model_families":[m for m in target_models if m not in executed_names],
         "available_model_presets":[{"name":p["name"],"preset_id":p["id"],"support_level":p["support_level"]} for p in catalog],
@@ -548,6 +672,7 @@ def run_serving_study(*, sections=DEFAULT_SECTIONS, progress=True,
         "capability":{"supported":["完整GPU/算子/服务调度时间线", "显式权重与KV放置", "有限轨迹SLO可行点"] if passed else [],
             "unsupported":["真实器件校准", "稳态最大到达率证明", "等物理封装面积/功耗/成本", "1M语义准确率"]},
         "limitations":["Hardware is hypothetical: the base inventory is one GPU, 512 GiB HBM and 1 TiB HBF; 405B pairs explicitly expand HBM to 1 TiB. Unused capacity is retained in each comparison budget.",
+            "70B/1M retains its original 512 GiB HBM capacity controls including physical contiguous-allocation failures, and adds a separate A/B/D comparison with 1 TiB HBM for every architecture. The non-moving first-fit allocator may reject an extent despite enough total free bytes because free space is fragmented. This is not proof that the model's theoretical aggregate demand exceeds 512 GiB, nor that 1 TiB is the minimum hardware capacity. Rejections have no TPS and must not be paired against a successful run with different capacity.",
             "C uses priority preemption, physical KV swap and resume, not an agent pause/resume API.",
             "Named model architecture presets retain their true layers/weights; GPU compute remains an uncalibrated analytical model.",
             "Contexts beyond each preset native limit are architecture extrapolation stress tests, without model quality claims.",

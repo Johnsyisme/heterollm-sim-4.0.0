@@ -2,6 +2,484 @@
   "id": "slo-batch/A_hbm_only/1",
   "mode": "full_operator_serving",
   "model": "synthetic-small-dense",
+  "core_execution_audit": {
+    "schema_version": "heterollm.live-core-audit/v1",
+    "scope": "successful Core submissions on the persistent online-serving kernel; excludes planner previews, isolated replay and pre-serving initialization",
+    "method": "instrumented DramCore/NandCore submit and submit_many, selected by live PhysicalRuntimeContext identity",
+    "run_count": 1,
+    "finished_run_count": 1,
+    "live_runtime_restores": 0,
+    "failed_entrypoint_calls": 0,
+    "valid_for_committed_byte_totals": true,
+    "owners": [
+      {
+        "physical_owner": "cpu0.memory",
+        "core": "DramCore",
+        "memory_kind": "DDR",
+        "entrypoint_calls": {
+          "submit": 32
+        },
+        "transactions": 32,
+        "logical_read_bytes": 17976,
+        "logical_write_bytes": 9020,
+        "physical_read_bytes": 18432,
+        "physical_write_bytes": 9728,
+        "transfer_bytes": 28160,
+        "burst_count": 440,
+        "pages_read": 0,
+        "pages_programmed": 0,
+        "erase_operations": 0,
+        "first_arrival_ns": 8063.305333333333,
+        "last_completion_ns": 310682.08538207016
+      },
+      {
+        "physical_owner": "hbm0.hbm_fabric",
+        "core": "DramCore",
+        "memory_kind": "HBM",
+        "entrypoint_calls": {
+          "submit": 304
+        },
+        "transactions": 304,
+        "logical_read_bytes": 17333760,
+        "logical_write_bytes": 8440634,
+        "physical_read_bytes": 17333760,
+        "physical_write_bytes": 8441792,
+        "transfer_bytes": 25775552,
+        "burst_count": 402743,
+        "pages_read": 0,
+        "pages_programmed": 0,
+        "erase_operations": 0,
+        "first_arrival_ns": 35182.96970833334,
+        "last_completion_ns": 310550.83538207016
+      }
+    ],
+    "cohorts": [
+      {
+        "cohort_id": "cohort-000000",
+        "phase": "prefill",
+        "phase_token_counts": {
+          "prefill": 2048
+        },
+        "request_ids": [
+          "study-0"
+        ],
+        "owners": [
+          {
+            "physical_owner": "cpu0.memory",
+            "core": "DramCore",
+            "memory_kind": "DDR",
+            "entrypoint_calls": {
+              "submit": 4
+            },
+            "transactions": 4,
+            "logical_read_bytes": 16576,
+            "logical_write_bytes": 8292,
+            "physical_read_bytes": 16640,
+            "physical_write_bytes": 8384,
+            "transfer_bytes": 25024,
+            "burst_count": 391,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 8063.305333333333,
+            "last_completion_ns": 129114.53550772689
+          },
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 38
+            },
+            "transactions": 38,
+            "logical_read_bytes": 7668160,
+            "logical_write_bytes": 8402274,
+            "physical_read_bytes": 7668160,
+            "physical_write_bytes": 8402368,
+            "transfer_bytes": 16070528,
+            "burst_count": 251102,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 35182.96970833334,
+            "last_completion_ns": 128983.28550772689
+          }
+        ]
+      },
+      {
+        "cohort_id": "cohort-000001",
+        "phase": "decode",
+        "phase_token_counts": {
+          "decode": 1
+        },
+        "request_ids": [
+          "study-0"
+        ],
+        "owners": [
+          {
+            "physical_owner": "cpu0.memory",
+            "core": "DramCore",
+            "memory_kind": "DDR",
+            "entrypoint_calls": {
+              "submit": 4
+            },
+            "transactions": 4,
+            "logical_read_bytes": 200,
+            "logical_write_bytes": 104,
+            "physical_read_bytes": 256,
+            "physical_write_bytes": 192,
+            "transfer_bytes": 448,
+            "burst_count": 7,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 129749.45217439356,
+            "last_completion_ns": 155052.75691834738
+          },
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 38
+            },
+            "transactions": 38,
+            "logical_read_bytes": 1380032,
+            "logical_write_bytes": 5480,
+            "physical_read_bytes": 1380032,
+            "physical_write_bytes": 5632,
+            "transfer_bytes": 1385664,
+            "burst_count": 21651,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 132171.32131501858,
+            "last_completion_ns": 154921.50691834738
+          }
+        ]
+      },
+      {
+        "cohort_id": "cohort-000002",
+        "phase": "decode",
+        "phase_token_counts": {
+          "decode": 1
+        },
+        "request_ids": [
+          "study-0"
+        ],
+        "owners": [
+          {
+            "physical_owner": "cpu0.memory",
+            "core": "DramCore",
+            "memory_kind": "DDR",
+            "entrypoint_calls": {
+              "submit": 4
+            },
+            "transactions": 4,
+            "logical_read_bytes": 200,
+            "logical_write_bytes": 104,
+            "physical_read_bytes": 256,
+            "physical_write_bytes": 192,
+            "transfer_bytes": 448,
+            "burst_count": 7,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 155687.67358501404,
+            "last_completion_ns": 180990.97832896785
+          },
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 38
+            },
+            "transactions": 38,
+            "logical_read_bytes": 1380288,
+            "logical_write_bytes": 5480,
+            "physical_read_bytes": 1380288,
+            "physical_write_bytes": 5632,
+            "transfer_bytes": 1385920,
+            "burst_count": 21655,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 158109.54272563904,
+            "last_completion_ns": 180859.72832896785
+          }
+        ]
+      },
+      {
+        "cohort_id": "cohort-000003",
+        "phase": "decode",
+        "phase_token_counts": {
+          "decode": 1
+        },
+        "request_ids": [
+          "study-0"
+        ],
+        "owners": [
+          {
+            "physical_owner": "cpu0.memory",
+            "core": "DramCore",
+            "memory_kind": "DDR",
+            "entrypoint_calls": {
+              "submit": 4
+            },
+            "transactions": 4,
+            "logical_read_bytes": 200,
+            "logical_write_bytes": 104,
+            "physical_read_bytes": 256,
+            "physical_write_bytes": 192,
+            "transfer_bytes": 448,
+            "burst_count": 7,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 181625.8949956345,
+            "last_completion_ns": 206929.1997395883
+          },
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 38
+            },
+            "transactions": 38,
+            "logical_read_bytes": 1380544,
+            "logical_write_bytes": 5480,
+            "physical_read_bytes": 1380544,
+            "physical_write_bytes": 5632,
+            "transfer_bytes": 1386176,
+            "burst_count": 21659,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 184047.7641362595,
+            "last_completion_ns": 206797.9497395883
+          }
+        ]
+      },
+      {
+        "cohort_id": "cohort-000004",
+        "phase": "decode",
+        "phase_token_counts": {
+          "decode": 1
+        },
+        "request_ids": [
+          "study-0"
+        ],
+        "owners": [
+          {
+            "physical_owner": "cpu0.memory",
+            "core": "DramCore",
+            "memory_kind": "DDR",
+            "entrypoint_calls": {
+              "submit": 4
+            },
+            "transactions": 4,
+            "logical_read_bytes": 200,
+            "logical_write_bytes": 104,
+            "physical_read_bytes": 256,
+            "physical_write_bytes": 192,
+            "transfer_bytes": 448,
+            "burst_count": 7,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 207564.11640625497,
+            "last_completion_ns": 232867.42115020877
+          },
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 38
+            },
+            "transactions": 38,
+            "logical_read_bytes": 1380800,
+            "logical_write_bytes": 5480,
+            "physical_read_bytes": 1380800,
+            "physical_write_bytes": 5632,
+            "transfer_bytes": 1386432,
+            "burst_count": 21663,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 209985.98554687997,
+            "last_completion_ns": 232736.17115020877
+          }
+        ]
+      },
+      {
+        "cohort_id": "cohort-000005",
+        "phase": "decode",
+        "phase_token_counts": {
+          "decode": 1
+        },
+        "request_ids": [
+          "study-0"
+        ],
+        "owners": [
+          {
+            "physical_owner": "cpu0.memory",
+            "core": "DramCore",
+            "memory_kind": "DDR",
+            "entrypoint_calls": {
+              "submit": 4
+            },
+            "transactions": 4,
+            "logical_read_bytes": 200,
+            "logical_write_bytes": 104,
+            "physical_read_bytes": 256,
+            "physical_write_bytes": 192,
+            "transfer_bytes": 448,
+            "burst_count": 7,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 233502.33781687543,
+            "last_completion_ns": 258805.64256082923
+          },
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 38
+            },
+            "transactions": 38,
+            "logical_read_bytes": 1381056,
+            "logical_write_bytes": 5480,
+            "physical_read_bytes": 1381056,
+            "physical_write_bytes": 5632,
+            "transfer_bytes": 1386688,
+            "burst_count": 21667,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 235924.20695750043,
+            "last_completion_ns": 258674.39256082923
+          }
+        ]
+      },
+      {
+        "cohort_id": "cohort-000006",
+        "phase": "decode",
+        "phase_token_counts": {
+          "decode": 1
+        },
+        "request_ids": [
+          "study-0"
+        ],
+        "owners": [
+          {
+            "physical_owner": "cpu0.memory",
+            "core": "DramCore",
+            "memory_kind": "DDR",
+            "entrypoint_calls": {
+              "submit": 4
+            },
+            "transactions": 4,
+            "logical_read_bytes": 200,
+            "logical_write_bytes": 104,
+            "physical_read_bytes": 256,
+            "physical_write_bytes": 192,
+            "transfer_bytes": 448,
+            "burst_count": 7,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 259440.5592274959,
+            "last_completion_ns": 284743.86397144967
+          },
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 38
+            },
+            "transactions": 38,
+            "logical_read_bytes": 1381312,
+            "logical_write_bytes": 5480,
+            "physical_read_bytes": 1381312,
+            "physical_write_bytes": 5632,
+            "transfer_bytes": 1386944,
+            "burst_count": 21671,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 261862.4283681209,
+            "last_completion_ns": 284612.61397144967
+          }
+        ]
+      },
+      {
+        "cohort_id": "cohort-000007",
+        "phase": "decode",
+        "phase_token_counts": {
+          "decode": 1
+        },
+        "request_ids": [
+          "study-0"
+        ],
+        "owners": [
+          {
+            "physical_owner": "cpu0.memory",
+            "core": "DramCore",
+            "memory_kind": "DDR",
+            "entrypoint_calls": {
+              "submit": 4
+            },
+            "transactions": 4,
+            "logical_read_bytes": 200,
+            "logical_write_bytes": 104,
+            "physical_read_bytes": 256,
+            "physical_write_bytes": 192,
+            "transfer_bytes": 448,
+            "burst_count": 7,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 285378.78063811635,
+            "last_completion_ns": 310682.08538207016
+          },
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 38
+            },
+            "transactions": 38,
+            "logical_read_bytes": 1381568,
+            "logical_write_bytes": 5480,
+            "physical_read_bytes": 1381568,
+            "physical_write_bytes": 5632,
+            "transfer_bytes": 1387200,
+            "burst_count": 21675,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 287800.64977874135,
+            "last_completion_ns": 310550.83538207016
+          }
+        ]
+      }
+    ],
+    "call_records": [],
+    "call_records_dropped": 0,
+    "call_records_enabled": false,
+    "limitations": [
+      "Cohort phase attribution follows actual execution; mixed cohorts are not split artificially.",
+      "Physical bytes are Core result counters; NAND internal/host transfer bytes are separate from media read/program bytes.",
+      "Instrumenting these process-global entry points requires one simulation thread per process."
+    ]
+  },
   "placement": "A_hbm_only",
   "resolved_placement": {
     "tensor_to_component": {
@@ -46,28 +524,28 @@
   "unfinished_requests": 0,
   "rejection_reasons": [],
   "rejection_rate": 0.0,
-  "node_tps": 21855.762244615737,
-  "per_gpu_tps": 21855.762244615737,
+  "node_tps": 25749.794971801388,
+  "per_gpu_tps": 25749.794971801388,
   "gpu_count": 1,
   "visible_output_tokens": 8,
-  "runtime_tps": 22255.56101096995,
-  "runtime_goodput_tps": 22255.56101096995,
-  "goodput_tps": 21855.762244615737,
+  "runtime_tps": 26306.56371142132,
+  "runtime_goodput_tps": 26306.56371142132,
+  "goodput_tps": 25749.794971801388,
   "qualified_requests": 1,
-  "requests_per_s": 2731.970280576967,
-  "makespan_ns": 366036.192673666,
+  "requests_per_s": 3218.7243714751735,
+  "makespan_ns": 310682.08538207016,
   "measurement_window": "earliest request arrival through simulation end, including initialization wait",
   "measurement_windows": {
     "primary": "request_window",
     "request_window": {
       "start_ns": 0.0,
-      "end_ns": 366036.192673666,
-      "duration_ns": 366036.192673666
+      "end_ns": 310682.08538207016,
+      "duration_ns": 310682.08538207016
     },
     "runtime_window": {
       "start_ns": 6575.472,
-      "end_ns": 366036.192673666,
-      "duration_ns": 359460.720673666
+      "end_ns": 310682.08538207016,
+      "duration_ns": 304106.61338207015
     },
     "initialization_ns": 6575.472,
     "initialization_wait_in_request_window_ns": 6575.472,
@@ -75,49 +553,49 @@
   },
   "ttft_ns": {
     "count": 1,
-    "p50": 132718.17946606333,
-    "p95": 132718.17946606333,
-    "p99": 132718.17946606333,
-    "p999": 132718.17946606333
+    "p50": 129114.53550772689,
+    "p95": 129114.53550772689,
+    "p99": 129114.53550772689,
+    "p999": 129114.53550772689
   },
   "tpot_ns": {
     "count": 1,
-    "p50": 33331.14474394324,
-    "p95": 33331.14474394324,
-    "p99": 33331.14474394324,
-    "p999": 33331.14474394324
+    "p50": 25938.221410620466,
+    "p95": 25938.221410620466,
+    "p99": 25938.221410620466,
+    "p999": 25938.221410620466
   },
   "tbt_ns": {
     "count": 7,
-    "p50": 33331.14474394324,
-    "p95": 33331.14474394324,
-    "p99": 33331.14474394324,
-    "p999": 33331.14474394324
+    "p50": 25938.221410620463,
+    "p95": 25938.221410620492,
+    "p99": 25938.221410620492,
+    "p999": 25938.221410620492
   },
   "e2e_ns": {
     "count": 1,
-    "p50": 366036.192673666,
-    "p95": 366036.192673666,
-    "p99": 366036.192673666,
-    "p999": 366036.192673666
+    "p50": 310682.08538207016,
+    "p95": 310682.08538207016,
+    "p99": 310682.08538207016,
+    "p999": 310682.08538207016
   },
   "phase_service_rates": {
     "prefill": {
       "scheduled_tokens": 2048,
       "useful_tokens": 2048,
-      "batch_occupied_ns": 126142.70746606334,
-      "tokens_per_batch_busy_second": 16235579.853484446,
-      "wall_clock_tokens_per_second": 5595075.134621629,
-      "wall_clock_denominator_ns": 366036.192673666,
+      "batch_occupied_ns": 122539.0635077269,
+      "tokens_per_batch_busy_second": 16713037.796888826,
+      "wall_clock_tokens_per_second": 6591947.512781155,
+      "wall_clock_denominator_ns": 310682.08538207016,
       "semantics": "wall rate uses completed requests' input tokens once for prefill and committed non-prefill output tokens for decode; both use the primary request window. Busy rate includes scheduled/recomputed work; mixed batches overlap and busy rates are not additive"
     },
     "decode": {
       "scheduled_tokens": 7,
       "useful_tokens": 7,
-      "batch_occupied_ns": 233318.01320760266,
-      "tokens_per_batch_busy_second": 30001.969859787514,
-      "wall_clock_tokens_per_second": 19123.79196403877,
-      "wall_clock_denominator_ns": 366036.192673666,
+      "batch_occupied_ns": 181567.54987434327,
+      "tokens_per_batch_busy_second": 38553.14457260927,
+      "wall_clock_tokens_per_second": 22531.070600326217,
+      "wall_clock_denominator_ns": 310682.08538207016,
       "semantics": "wall rate uses completed requests' input tokens once for prefill and committed non-prefill output tokens for decode; both use the primary request window. Busy rate includes scheduled/recomputed work; mixed batches overlap and busy rates are not additive"
     }
   },
@@ -131,7 +609,7 @@
   },
   "memory_metrics": {
     "scope": "operator NAND traffic (HBF/SSD); separately reported KV migration traffic is not implicitly included",
-    "measurement_duration_ns": 366036.192673666,
+    "measurement_duration_ns": 310682.08538207016,
     "directional_bandwidth": {
       "read": {
         "logical_bytes": null,
@@ -166,10 +644,25 @@
       "semantics": "busy-time imbalance among observed effective service lanes; not a physical-plane measurement and not all configured idle lanes"
     },
     "physical_plane_imbalance": null,
+    "physical_plane_loads": null,
+    "dynamic_thermal_wear": {
+      "thermal_enabled": null,
+      "wear_enabled": null,
+      "thermal_extra_ns": null,
+      "thermal_throttle_plane_ns": null,
+      "peak_temperature_c": null,
+      "idle_recoveries": null,
+      "wear_blocks": null,
+      "wear_extra_ns": null
+    },
     "read_queue_depth": null,
     "program_queue_depth": null,
+    "page_observation_coverage": {
+      "nand_read_queue_depth": null,
+      "nand_program_queue_depth": null
+    },
     "unavailable": {
-      "physical_plane_imbalance": "effective-lane mapping is not a calibrated plane geometry",
+      "physical_plane_imbalance": "detailed physical-plane observations not enabled; effective lanes are distinct",
       "read_queue_depth": "page-level queue occupancy timeline not recorded",
       "program_queue_depth": "page-level queue occupancy timeline not recorded"
     },
@@ -186,6 +679,7 @@
     "useful_bytes": 0,
     "unused_bytes": 0,
     "inflight_bytes": 0,
+    "cancelled_bytes": 0,
     "useful_byte_fraction": null,
     "semantics": "fraction of completed lookahead bytes consumed by resumed requests; not learned-router prediction accuracy"
   },
@@ -197,21 +691,21 @@
     "scope": "intersection with realized GPU operator stages of other requests; host setup and GPU frontend/controller stages excluded; operator envelopes may include memory stalls, not tensor-core busy time"
   },
   "energy": {
-    "analytical_dynamic_joules": 0.0011650212440999998,
-    "analytical_dynamic_joules_per_token": 0.00014562765551249997,
-    "analytical_average_dynamic_watts": 3.1828034151220033,
+    "analytical_dynamic_joules": 0.0011650618280999998,
+    "analytical_dynamic_joules_per_token": 0.00014563272851249998,
+    "analytical_average_dynamic_watts": 3.750012900380889,
     "scope": "sum of configured batch task energies; excludes unpriced components, initialization, idle/board/cooling; not calibrated node energy"
   },
   "request_metrics": [
     {
       "id": "study-0",
       "arrival_ns": 0.0,
-      "finish_ns": 366036.192673666,
-      "first_token_ns": 132718.17946606333,
+      "finish_ns": 310682.08538207016,
+      "first_token_ns": 129114.53550772689,
       "status": "finished",
       "output_tokens": 8,
-      "ttft_ns": 132718.17946606333,
-      "tpot_ns": 33331.14474394324,
+      "ttft_ns": 129114.53550772689,
+      "tpot_ns": 25938.221410620466,
       "qualified": true
     }
   ],
@@ -260,7 +754,7 @@
     "prefetch_reclaim_bytes": 0,
     "prefetch_execution_mode": "disabled",
     "prefetch_cancelled_bytes": null,
-    "prefetch_metric_semantics": "useful bytes are completed copies exposed to a successful consumer cohort; unused bytes include reclaimed copies and completed copies not consumed; transfer time sums per-page latency and is not GPU stall time; in-flight cancellation is not modeled",
+    "prefetch_metric_semantics": "useful bytes are completed copies exposed to a successful consumer cohort; unused bytes include reclaimed copies and completed copies not consumed; transfer time sums per-page latency and is not GPU stall time; opt-in lifecycle cancellation drains submitted physical phases, preserves their cost, then frees the destination; cancelled bytes are separate from completed/unused bytes",
     "offload_events": 0,
     "offload_bytes": 0,
     "migration_events": 0,
@@ -362,19 +856,19 @@
   "resources": {
     "dram_traffic": {
       "schema_version": "heterollm.dram-traffic/v1",
-      "task_count": 24,
-      "logical_read_bytes": 17976,
-      "logical_write_bytes": 9020,
-      "physical_read_bytes": 18432,
-      "physical_write_bytes": 9728,
-      "physical_bytes": 28160,
-      "logical_bytes": 26996,
-      "burst_count": 440,
-      "row_hits": 312,
-      "row_misses": 128,
-      "row_conflicts": 0,
+      "task_count": 152,
+      "logical_read_bytes": 17351736,
+      "logical_write_bytes": 8449654,
+      "physical_read_bytes": 17352192,
+      "physical_write_bytes": 8451520,
+      "physical_bytes": 25803712,
+      "logical_bytes": 25801390,
+      "burst_count": 403183,
+      "row_hits": 395551,
+      "row_misses": 256,
+      "row_conflicts": 7376,
       "queue_wait_ns": 0.0,
-      "service_ns": 1184.0,
+      "service_ns": 24499.600000121543,
       "read_write_switches": null,
       "refresh_wait_ns": null,
       "turnaround_wait_ns": null,
@@ -1264,10 +1758,875 @@
           "bytes_moved": 3072,
           "service_ns": 60.0,
           "energy_pj": 36864.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1946.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 2338.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 2338.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1946.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1946.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1946.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1946.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1946.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1946.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1946.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 2338.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 2338.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 2338.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 2338.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 2338.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 2338.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 0,
+          "service_ns": 1554.0,
+          "energy_pj": 0.0
+        },
+        "hbm0.hbm_fabric:dram:data:0": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1612928,
+          "service_ns": 16129.27999999461,
+          "energy_pj": 6451712.0
+        },
+        "hbm0.hbm_fabric:dram:data:1": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1612032,
+          "service_ns": 16120.319999994617,
+          "energy_pj": 6448128.0
+        },
+        "hbm0.hbm_fabric:dram:data:10": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1609024,
+          "service_ns": 16090.239999994645,
+          "energy_pj": 6436096.0
+        },
+        "hbm0.hbm_fabric:dram:data:11": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1609024,
+          "service_ns": 16090.239999994645,
+          "energy_pj": 6436096.0
+        },
+        "hbm0.hbm_fabric:dram:data:12": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1613440,
+          "service_ns": 16134.399999994605,
+          "energy_pj": 6453760.0
+        },
+        "hbm0.hbm_fabric:dram:data:13": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1613056,
+          "service_ns": 16130.559999994608,
+          "energy_pj": 6452224.0
+        },
+        "hbm0.hbm_fabric:dram:data:14": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1611584,
+          "service_ns": 16115.839999994621,
+          "energy_pj": 6446336.0
+        },
+        "hbm0.hbm_fabric:dram:data:15": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1611584,
+          "service_ns": 16115.839999994621,
+          "energy_pj": 6446336.0
+        },
+        "hbm0.hbm_fabric:dram:data:2": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1611840,
+          "service_ns": 16118.399999994619,
+          "energy_pj": 6447360.0
+        },
+        "hbm0.hbm_fabric:dram:data:3": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1611776,
+          "service_ns": 16117.75999999462,
+          "energy_pj": 6447104.0
+        },
+        "hbm0.hbm_fabric:dram:data:4": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1610304,
+          "service_ns": 16103.039999994633,
+          "energy_pj": 6441216.0
+        },
+        "hbm0.hbm_fabric:dram:data:5": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1610304,
+          "service_ns": 16103.039999994633,
+          "energy_pj": 6441216.0
+        },
+        "hbm0.hbm_fabric:dram:data:6": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1610176,
+          "service_ns": 16101.759999994634,
+          "energy_pj": 6440704.0
+        },
+        "hbm0.hbm_fabric:dram:data:7": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1610176,
+          "service_ns": 16101.759999994634,
+          "energy_pj": 6440704.0
+        },
+        "hbm0.hbm_fabric:dram:data:8": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1609152,
+          "service_ns": 16091.519999994644,
+          "energy_pj": 6436608.0
+        },
+        "hbm0.hbm_fabric:dram:data:9": {
+          "owner": "hbm0.hbm_fabric",
+          "bytes_moved": 1609152,
+          "service_ns": 16091.519999994644,
+          "energy_pj": 6436608.0
         }
       },
       "owner_ids": [
-        "cpu0.memory"
+        "cpu0.memory",
+        "hbm0.hbm_fabric"
       ],
       "organization_profiles": [],
       "organization_profile_limit": 32,
@@ -1278,177 +2637,319 @@
       "task_count": 0
     },
     "resource_utilization": {
-      "cpu0.control_cache": 0.0002670667321316394,
-      "cpu0.h2d_dma": 0.00959771068598079,
-      "cpu0.iommu": 0.005563890252742487,
-      "cpu0.l1d": 5.7100351033811894e-05,
-      "cpu0.l2": 0.00019765905585876112,
-      "cpu0.l3": 0.000808767087138648,
-      "cpu0.memory:dram:bank:0:0:0:0:0:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:0:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:0:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:0:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:1:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:1:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:1:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:1:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:2:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:2:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:2:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:2:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:3:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:3:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:3:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:0:0:3:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:0:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:0:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:0:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:0:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:1:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:1:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:1:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:1:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:2:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:2:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:2:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:2:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:3:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:3:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:3:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:1:0:3:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:0:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:0:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:0:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:0:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:1:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:1:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:1:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:1:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:2:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:2:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:2:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:2:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:3:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:3:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:3:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:2:0:3:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:0:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:0:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:0:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:0:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:1:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:1:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:1:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:1:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:2:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:2:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:2:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:2:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:3:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:3:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:3:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:3:0:3:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:0:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:0:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:0:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:0:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:1:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:1:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:1:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:1:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:2:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:2:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:2:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:2:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:3:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:3:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:3:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:4:0:3:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:0:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:0:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:0:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:0:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:1:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:1:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:1:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:1:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:2:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:2:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:2:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:2:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:3:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:3:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:3:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:5:0:3:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:0:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:0:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:0:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:0:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:1:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:1:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:1:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:1:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:2:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:2:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:2:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:2:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:3:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:3:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:3:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:6:0:3:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:0:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:0:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:0:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:0:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:1:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:1:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:1:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:1:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:2:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:2:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:2:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:2:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:3:0": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:3:1": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:3:2": 3.894723176919741e-05,
-      "cpu0.memory:dram:bank:0:0:7:0:3:3": 3.894723176919741e-05,
-      "cpu0.memory:dram:command:0": 0.00025037506137341194,
-      "cpu0.memory:dram:command:1": 0.00022255561010969948,
-      "cpu0.memory:dram:command:2": 0.00019473615884598705,
-      "cpu0.memory:dram:command:3": 0.00019473615884598705,
-      "cpu0.memory:dram:command:4": 0.00016691670758227462,
-      "cpu0.memory:dram:command:5": 0.00016691670758227462,
-      "cpu0.memory:dram:command:6": 0.00016691670758227462,
-      "cpu0.memory:dram:command:7": 0.00016691670758227462,
-      "cpu0.memory:dram:data:0": 0.00025037506137341194,
-      "cpu0.memory:dram:data:1": 0.00022255561010969948,
-      "cpu0.memory:dram:data:2": 0.00019473615884598705,
-      "cpu0.memory:dram:data:3": 0.00019473615884598705,
-      "cpu0.memory:dram:data:4": 0.00016691670758227462,
-      "cpu0.memory:dram:data:5": 0.00016691670758227462,
-      "cpu0.memory:dram:data:6": 0.00016691670758227462,
-      "cpu0.memory:dram:data:7": 0.00016691670758227462,
-      "cpu0.pack": 0.06860276681631487,
-      "cpu0.pipeline": 0.07217331610975884,
-      "cpu0.scheduler": 0.0009252140939814362,
-      "gpu0.command_processor": 0.11127780505484974,
-      "gpu0.command_queue": 0.005563890252742487,
-      "gpu0.frontend": 0.33383341516454923,
-      "gpu0.l1_shared": 0.008059747560838049,
-      "gpu0.l2": 0.04074619327683613,
-      "gpu0.mmu_tlb": 0.0066766683032909845,
-      "gpu0.scalar": 0.014645339618665517,
-      "gpu0.sfu": 0.01662756643444445,
-      "gpu0.tensor_core": 0.2111803773055819,
-      "gpu0.vram_controller": 0.0433983439713914,
-      "hbm0.hbm_fabric": 0.21544546375339255,
+      "cpu0.control_cache": 0.00031567876453705585,
+      "cpu0.h2d_dma": 0.011344705600550445,
+      "cpu0.iommu": 0.00657664092785533,
+      "cpu0.l1d": 6.749387362893663e-05,
+      "cpu0.l2": 0.00023363736117570325,
+      "cpu0.l3": 0.0009559805252730509,
+      "cpu0.memory:dram:bank:0:0:0:0:0:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:0:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:0:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:0:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:1:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:1:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:1:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:1:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:2:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:2:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:2:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:2:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:3:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:3:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:3:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:0:0:3:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:0:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:0:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:0:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:0:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:1:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:1:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:1:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:1:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:2:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:2:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:2:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:2:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:3:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:3:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:3:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:1:0:3:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:0:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:0:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:0:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:0:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:1:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:1:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:1:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:1:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:2:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:2:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:2:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:2:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:3:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:3:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:3:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:2:0:3:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:0:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:0:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:0:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:0:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:1:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:1:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:1:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:1:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:2:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:2:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:2:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:2:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:3:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:3:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:3:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:3:0:3:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:0:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:0:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:0:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:0:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:1:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:1:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:1:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:1:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:2:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:2:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:2:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:2:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:3:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:3:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:3:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:4:0:3:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:0:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:0:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:0:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:0:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:1:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:1:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:1:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:1:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:2:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:2:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:2:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:2:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:3:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:3:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:3:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:5:0:3:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:0:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:0:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:0:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:0:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:1:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:1:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:1:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:1:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:2:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:2:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:2:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:2:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:3:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:3:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:3:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:6:0:3:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:0:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:0:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:0:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:0:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:1:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:1:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:1:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:1:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:2:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:2:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:2:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:2:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:3:0": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:3:1": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:3:2": 4.603648649498731e-05,
+      "cpu0.memory:dram:bank:0:0:7:0:3:3": 4.603648649498731e-05,
+      "cpu0.memory:dram:command:0": 0.00029594884175348986,
+      "cpu0.memory:dram:command:1": 0.0002630656371142132,
+      "cpu0.memory:dram:command:2": 0.00023018243247493656,
+      "cpu0.memory:dram:command:3": 0.00023018243247493656,
+      "cpu0.memory:dram:command:4": 0.0001972992278356599,
+      "cpu0.memory:dram:command:5": 0.0001972992278356599,
+      "cpu0.memory:dram:command:6": 0.0001972992278356599,
+      "cpu0.memory:dram:command:7": 0.0001972992278356599,
+      "cpu0.memory:dram:data:0": 0.00029594884175348986,
+      "cpu0.memory:dram:data:1": 0.0002630656371142132,
+      "cpu0.memory:dram:data:2": 0.00023018243247493656,
+      "cpu0.memory:dram:data:3": 0.00023018243247493656,
+      "cpu0.memory:dram:data:4": 0.0001972992278356599,
+      "cpu0.memory:dram:data:5": 0.0001972992278356599,
+      "cpu0.memory:dram:data:6": 0.0001972992278356599,
+      "cpu0.memory:dram:data:7": 0.0001972992278356599,
+      "cpu0.pack": 0.08108998264045622,
+      "cpu0.pipeline": 0.08531045061367226,
+      "cpu0.scheduler": 0.001093623454292193,
+      "gpu0.command_processor": 0.1315328185571066,
+      "gpu0.command_queue": 0.00657664092785533,
+      "gpu0.frontend": 0.3945984556713198,
+      "gpu0.l1_shared": 0.009526799284127245,
+      "gpu0.l2": 0.04816289865290892,
+      "gpu0.mmu_tlb": 0.007891969113426395,
+      "gpu0.scalar": 0.01731111426775201,
+      "gpu0.sfu": 0.019654150059753538,
+      "gpu0.tensor_core": 0.24961986118673737,
+      "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:2": 0.006399071622803236,
+      "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:0:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:2": 0.007688093244662881,
+      "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:10:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:2": 0.007688093244662881,
+      "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:11:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:2": 0.006399071622803236,
+      "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:12:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:2": 0.006399071622803236,
+      "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:13:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:2": 0.006399071622803236,
+      "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:14:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:2": 0.006399071622803236,
+      "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:15:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:2": 0.006399071622803236,
+      "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:1:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:2": 0.006399071622803236,
+      "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:2:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:2": 0.006399071622803236,
+      "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:3:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:2": 0.007688093244662881,
+      "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:4:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:2": 0.007688093244662881,
+      "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:5:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:2": 0.007688093244662881,
+      "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:6:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:2": 0.007688093244662881,
+      "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:7:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:2": 0.007688093244662881,
+      "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:8:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:0": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:1": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:2": 0.007688093244662881,
+      "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:3": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:4": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:5": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:6": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:bank:0:0:9:0:0:7": 0.005110050000943591,
+      "hbm0.hbm_fabric:dram:data:0": 0.05303824149240148,
+      "hbm0.hbm_fabric:dram:data:1": 0.05300877814104472,
+      "hbm0.hbm_fabric:dram:data:10": 0.05290986546148986,
+      "hbm0.hbm_fabric:dram:data:11": 0.05290986546148986,
+      "hbm0.hbm_fabric:dram:data:12": 0.05305507769317678,
+      "hbm0.hbm_fabric:dram:data:13": 0.05304245054259531,
+      "hbm0.hbm_fabric:dram:data:14": 0.05299404646536634,
+      "hbm0.hbm_fabric:dram:data:15": 0.05299404646536634,
+      "hbm0.hbm_fabric:dram:data:2": 0.053002464565753984,
+      "hbm0.hbm_fabric:dram:data:3": 0.05300036004065707,
+      "hbm0.hbm_fabric:dram:data:4": 0.052951955963428096,
+      "hbm0.hbm_fabric:dram:data:5": 0.052951955963428096,
+      "hbm0.hbm_fabric:dram:data:6": 0.05294774691323428,
+      "hbm0.hbm_fabric:dram:data:7": 0.05294774691323428,
+      "hbm0.hbm_fabric:dram:data:8": 0.05291407451168369,
+      "hbm0.hbm_fabric:dram:data:9": 0.05291407451168369,
       "interrupt": 0.0,
-      "link.cpu-gpu-pcie.cpu0->gpu0": 0.0003906894186847615,
-      "link.cpu-gpu-pcie.cpu0->gpu0.inflight": 0.01819513822746072,
-      "link.cpu-hostmem-ddr.hostmem0->cpu0": 6.104522166949398e-05,
-      "link.cpu-hostmem-ddr.hostmem0->cpu0.inflight": 0.0018414901025470898,
-      "link.gpu-hbm0.gpu0->hbm0": 1.5627576747390458e-05,
-      "link.gpu-hbm0.gpu0->hbm0.inflight": 0.0009058500171861884
+      "link.cpu-gpu-pcie.cpu0->gpu0": 0.0004618035051528415,
+      "link.cpu-gpu-pcie.cpu0->gpu0.inflight": 0.021507054474289897,
+      "link.cpu-hostmem-ddr.hostmem0->cpu0": 7.215679768013148e-05,
+      "link.cpu-hostmem-ddr.hostmem0->cpu0.inflight": 0.002176681894593837,
+      "link.gpu-hbm0.gpu0->hbm0": 1.847214020611366e-05,
+      "link.gpu-hbm0.gpu0->hbm0.inflight": 0.0010707346886629665
     }
   },
   "scheduler": {
@@ -1532,7 +3033,7 @@
     "ttft_ns": 5000000.0,
     "tbt_ns": 1000000.0
   },
-  "wall_seconds": 0.261140999966301,
+  "wall_seconds": 0.6842514000600204,
   "unavailable": {
     "calibrated_node_energy": "no independent energy measurements",
     "lifetime": "not a stateful wear experiment"
@@ -1579,5 +3080,5 @@
     "resolved_weight_tensor_count": 4,
     "all_resolved_model_ops_on_gpu": true
   },
-  "point_result_version": 2
+  "point_result_version": 3
 }

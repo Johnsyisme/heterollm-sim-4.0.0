@@ -23,6 +23,7 @@ import accept_hbf_hbm as acceptance
 import calibrated_hbf_profiles as profiles
 import hbf_hbm_invariants as invariants
 import hbf_hbm_metrics as study_metrics
+from hbf_hbm_core_audit import CoreExecutionAudit
 from heterollm_sim.ir import LayerSpec, ModelSpec, RequestSpec, build_model_graph_from_layer_specs
 from heterollm_sim.memory_types import AccessRequest, Operation, make_hbf_config, parse_physical_memory_config
 from heterollm_sim.nand_core import NandCore
@@ -123,7 +124,9 @@ def scenario(*, hbf=False, prompt=128, count=4, output=8, slots=None,
 
 def serving_row(s, row_id, *, placement=None, result_observer=None):
     started = time.perf_counter()
-    result = run_scenario(s)
+    with CoreExecutionAudit() as core_audit:
+        result = run_scenario(s)
+    core_execution_audit = core_audit.summary()
     if result_observer is not None:
         result_observer(result)
     r = report_dict(result, visualization_limit=1, include_visualization=False)
@@ -167,6 +170,7 @@ def serving_row(s, row_id, *, placement=None, result_observer=None):
                   for e in events if e.event_type == "kv_pool_transfer_complete"]
     return {
         "id": row_id, "mode": "full_operator_serving", "model": s.model.name,
+        "core_execution_audit": core_execution_audit,
         "placement": placement or ("B_all_kv_hbf" if s.placement.kv_policy.cache_component == "hbf0" else "A_hbm_only"),
         "resolved_placement": {"tensor_to_component":dict(result.scenario.placement.tensor_to_component),
             "op_to_component":dict(result.scenario.placement.op_to_component),
@@ -366,7 +370,8 @@ TITLES={1:"① 理想隔离",2:"② 固定工作量",3:"③ 容量与SLO",4:"④
         11:"⑪ 预算约束下重新执行服务",12:"⑫ 完整服务消融与双路径QoS",
         13:"⑬ 多轮agent与取消",14:"⑭ 动态热、磨损与物理页队列",
         15:"⑮ 多GPU与共享内存池",16:"⑯ 持续负载SLO与会话边界",
-        17:"⑰ 扩展模型规格与工作负载",18:"⑱ 目标有效带宽与物理页扫描"}
+        17:"⑰ 扩展模型规格与工作负载",18:"⑱ 目标有效带宽与物理页扫描",
+        19:"⑲ DRAM/NAND Core下的独立Decode对照"}
 AUDIT_FIXES=[
     "修复迁移完成时刻重复累加、分块访问累加绝对时间、swap-in迁移漏计。",
     "修复写缓冲自动排空漏计、介质编程早于主机确认、独立通道被串行化，以及未写入区域误命中缓冲。",
@@ -390,6 +395,8 @@ AUDIT_FIXES=[
     "NAND动态热状态与显式擦除计数影响后续服务，记录真实物理页队列和包含空闲plane的负载失衡。",
     "修复多GPU输出层集中到单GPU和服务汇总拒绝多GPU的问题；加入明确的多GPU共享内存暴露和端点路由约束。",
     "预取提交字节按实际提交事件计数，取消操作不再错误地报告为零提交。",
+    "移除HBM按聚合带宽直接计时的旁路；算子访存和KV迁移均通过DRAM Core，GPU计算与启动仍保留原有简化模型。",
+    "完整服务逐点记录持久运行时实际DRAM/NAND提交；另跑固定64输出的独立Decode窗口，避免prefill稀释Decode影响。",
 ]
 
 
@@ -407,10 +414,47 @@ def completion_matrix(groups):
         ('目标有效带宽与物理页扫描',(18,), '实际内存与链路服务后计算有效值；固定负载比较物理页和读延迟，保留带宽受限负对照。'),
         ('预算与SLO下配置选择',(11,), '枚举明确的九个固定4槽候选，重跑完整服务、共同预算上限和SLO；无可行解也是有效结果。'),
         ('能量、成本、面积与3/5年TCO',(11,14), '参数作为内部假设；条件节点成本与实际候选栈数一致，均匀寿命推导与动态物理轨迹分别报告。'),
-        ('投机解码、热点、共享前缀和读写混合',(4,9,10,13), '分别保存真实接受/拒绝、精确物理访问比例和多轮生命周期；不伪造模型token或训练路由轨迹。')]
+        ('投机解码、热点、共享前缀和读写混合',(4,9,10,13), '分别保存真实接受/拒绝、精确物理访问比例和多轮生命周期；不伪造模型token或训练路由轨迹。'),
+        ('独立Decode与实际Core执行',(19,), '8B/70B、2K/32K/128K/1M、A/B共16点，统一64输出；实际执行prefill后单独统计63个Decode token。')]
     return [{'item':item,'status':'已完成所述实验' if all(n in present and present[n]['status']=='passed' for n in numbers)
-             and (17 not in numbers or extended_model_matrix_complete(groups)) else '本次未完成',
+             and (17 not in numbers or extended_model_matrix_complete(groups))
+             and (19 not in numbers or decode_matrix_complete(groups)) else '本次未完成',
         'groups':list(numbers),'reason':reason} for item,numbers,reason in specs]
+
+
+def decode_matrix_complete(groups):
+    decode=next((g for g in groups if g['id']=='19_decode_physical'),{})
+    rows=decode.get('rows',[])
+    expected={(m,c,a) for m in ('llama3_1-8b','llama3_1-70b')
+              for c in (2048,32768,131072,1048576) for a in ('A_hbm_only','B_all_kv_hbf')}
+    actual={(r.get('parameters',{}).get('model_id'),r.get('prompt_tokens'),r.get('placement')) for r in rows}
+    return (decode.get('status')=='passed' and len(rows)==len(expected) and actual==expected
+            and all(r.get('visible_output_tokens')==64 and r.get('decode_measurement',{}).get('decode_tokens')==63
+                    and r.get('decode_core_checks') and all(r['decode_core_checks'].values()) for r in rows))
+
+
+def memory_core_coverage(groups):
+    rows=[r for g in groups for r in g.get('rows',[]) if r.get('mode')=='full_operator_serving']
+    verified=[]; invalid=[]; nand_rows=[]; wrong_nand=[]
+    for row in rows:
+        audit=row.get('core_execution_audit',{})
+        owners=audit.get('owners',[])
+        hbm=[o for o in owners if o.get('memory_kind')=='HBM' and o.get('transactions',0)>0]
+        nand=[o for o in owners if o.get('memory_kind') in {'HBF','SSD'} and o.get('transactions',0)>0]
+        if nand and audit.get('valid_for_committed_byte_totals') and all(o.get('core')=='NandCore' for o in nand):
+            nand_rows.append(row['id'])
+        if any(o.get('core')!='NandCore' for o in nand):
+            wrong_nand.append(row['id'])
+        if (audit.get('valid_for_committed_byte_totals') and hbm
+                and all(o.get('core')=='DramCore' for o in hbm)):
+            verified.append(row['id'])
+        else:
+            invalid.append(row['id'])
+    return {'full_serving_rows':len(rows),'verified_hbm_dram_core_rows':len(verified),
+            'all_full_serving_hbm_verified':bool(rows) and not invalid,'unverified_row_ids':invalid,
+            'verified_nand_core_rows':len(nand_rows),'wrong_nand_core_row_ids':wrong_nand,
+            'execution_contract':'HBM memory timing uses DramCore; HBF memory timing uses NandCore; GPU compute and launch retain their analytical approximation.',
+            'evidence_scope':'Actual successful submissions on each persistent online-serving runtime; excludes planning previews and pre-serving initialization.'}
 
 
 def extended_model_matrix_complete(groups):
@@ -434,8 +478,10 @@ def model_execution_coverage(groups):
                   'qwen3-coder-30b-a3b','synthetic-1t-gqa-moe','deepseek-v3','deepseek-v4-flash-0731','llama4-scout','llama4-maverick'):
         matches=[r for r in rows if r.get('model_id',r.get('parameters',{}).get('model_id'))==model]
         modes=sorted({r['mode'] for r in matches})
-        result.append({'model_id':model,'modes':modes,'executed_points':len(matches),
-            'contexts':sorted({r.get('context',r.get('prompt_tokens')) for r in matches}),
+        result.append({'model_id':model,'modes':modes,'result_points':len(matches),
+            'executed_points':sum(r.get('executed_serving') is True or r['mode']=='structural_physical_probe' for r in matches),
+            'rejected_points':sum(r['mode'] in {'configuration_rejected','physical_capacity_rejected'} for r in matches),
+            'contexts':sorted({context for r in matches if (context:=r.get('context',r.get('prompt_tokens',r.get('parameters',{}).get('prompt')))) is not None}),
             'native_full_serving':any(r['mode']=='full_operator_serving' for r in matches),
             'support_boundary':next((r['support_boundary'] for r in matches if 'support_boundary' in r),None)})
     return result
@@ -474,7 +520,7 @@ def render(report):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir',type=Path,default=ROOT/'artifacts'/'hbf_hbm')
-    parser.add_argument('--groups',default=','.join(str(n) for n in range(1,19)),help='comma-separated group numbers')
+    parser.add_argument('--groups',default=','.join(str(n) for n in range(1,20)),help='comma-separated group numbers')
     parser.add_argument('--render-only',action='store_true',help='render already saved group results without rerunning simulations')
     parser.add_argument('--reuse-groups',default='',help='explicitly reuse these already saved groups; caller must ensure their code and assumptions remain applicable')
     parser.add_argument('--resume-study',action='store_true',help='reuse completed study points with matching parameters from this output directory; only use if their code remains applicable')
@@ -486,8 +532,8 @@ def main():
         (args.output_dir/'report.html').write_text(render(report),encoding='utf-8')
         return 0
     selected={int(x) for x in args.groups.split(',')}
-    if not selected or not selected <= set(range(1,19)):
-        parser.error('--groups must contain numbers from 1 through 18')
+    if not selected or not selected <= set(range(1,20)):
+        parser.error('--groups must contain numbers from 1 through 19')
     reused={int(x) for x in args.reuse_groups.split(',') if x.strip()}
     if not reused<=selected: parser.error('--reuse-groups must be selected in --groups')
     groups=[]
@@ -524,6 +570,9 @@ def main():
     if 11 in active:
         from hbf_hbm_provisioning import run_provisioning_study
         groups.append(run_provisioning_study())
+    if 19 in active:
+        from hbf_hbm_decode_study import run_decode_study
+        groups.append(run_decode_study(workers=args.workers,point_dir=args.output_dir/'decode_points',resume=args.resume_study))
     extensions={12:('hbf_hbm_ablation_paths','run_group'),13:('hbf_hbm_agent_study','run_agent_study'),
         14:('hbf_hbm_thermal_wear_study','run_thermal_wear_study'),15:('hbf_hbm_system_study','run_system_study'),
         16:('hbf_hbm_sustained_study','run_sustained_study'),17:('hbf_hbm_extended_models','run_extended_models_study'),
@@ -532,7 +581,9 @@ def main():
     for number,(module,function) in extensions.items():
         if number in active:
             print(f'Running group {number}',flush=True)
-            g=getattr(importlib.import_module(module),function)(); groups.append(g)
+            kwargs=({'workers':args.workers,'point_cache_dir':args.output_dir/'extended_model_points',
+                     'resume':args.resume_study} if number==17 else {})
+            g=getattr(importlib.import_module(module),function)(**kwargs); groups.append(g)
             (args.output_dir/(g['id']+'.json')).write_text(json.dumps(g,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
     groups.sort(key=lambda g:g['id'])
     for g in groups:g['title']=TITLES[int(g['id'][:2])]
@@ -541,7 +592,11 @@ def main():
         'external_prediction_accuracy_validated':False,'overall_research_program_complete':False,
         'external_calibration_required':False,
         'audit_fixes':AUDIT_FIXES,'audit_completion':completion_matrix(groups),'remaining_research_scope':EXCLUDED_SCOPE}
-    report['internal_experiment_matrix_complete']=(selected==set(range(1,19)) and
+    report['memory_core_coverage']=memory_core_coverage(groups)
+    if report['memory_core_coverage']['full_serving_rows']:
+        report['all_selected_checks_passed'] &= report['memory_core_coverage']['all_full_serving_hbm_verified']
+        report['all_selected_checks_passed'] &= not report['memory_core_coverage']['wrong_nand_core_row_ids']
+    report['internal_experiment_matrix_complete']=(selected==set(range(1,20)) and
         report['all_selected_checks_passed'] and all(r['status']=='已完成所述实验' for r in report['audit_completion']))
     report['model_execution_coverage']=model_execution_coverage(groups)
     from hbf_hbm_economics import run_economics_sensitivity
@@ -564,7 +619,9 @@ def main():
     report['internal_experiment_matrix_complete'] &= report['all_selected_checks_passed']
     for g in groups:
         (args.output_dir/(g['id']+'.json')).write_text(json.dumps(g,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
-    (args.output_dir/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
+    # Keep the combined machine-readable bundle compact; individual group
+    # files above retain indentation for inspection and review.
+    (args.output_dir/'results.json').write_text(json.dumps(report,ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n',encoding='utf-8')
     (args.output_dir/'report.html').write_text(render(report),encoding='utf-8')
     print(json.dumps({'passed':report['all_selected_checks_passed'],'groups':[(g['id'],g['status'],len(g.get('rows',[]))) for g in groups]}))
     return 0 if report['all_selected_checks_passed'] else 1

@@ -5549,7 +5549,6 @@ class _OnlineRuntime:
             and any(
                 (component := plan.scenario.hardware.get_component(component_id))
                 .metadata.get("physical_memory_config") is not None
-                and str(component.metadata.get("memory_execution_mode", "physical")).lower() != "aggregate"
                 for component_id in cache_components
             )
         )

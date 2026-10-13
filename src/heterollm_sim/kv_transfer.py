@@ -221,7 +221,9 @@ class PhysicalKVTransferExecutor:
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if key == "arrival_ns":
                     total[key] = min(total.get(key, value), value)
-                elif key in {"completion_ns", "host_ack_completion_ns", "media_drain_completion_ns", "write_buffer_peak_bytes"}:
+                elif key in {"completion_ns", "host_ack_completion_ns", "media_drain_completion_ns", "write_buffer_peak_bytes",
+                             "host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
+                             "host_write_outstanding_at_admission_peak"}:
                     total[key] = max(total.get(key, value), value)
                 elif key in {"write_buffer_occupancy_bytes", "bandwidth_ceiling_gb_s", "array_units", "actual_bandwidth_gb_s"}:
                     total[key] = value

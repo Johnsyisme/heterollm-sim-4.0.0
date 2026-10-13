@@ -40,6 +40,12 @@ class HbfHbmAcceptanceTests(unittest.TestCase):
         self.assertEqual(migration["metrics"]["storage"]["target_tier"], "storage")
         ratio = next(item for item in report["checks"] if item["id"] == "hbm_hbf_ratio")
         self.assertEqual(ratio["metrics"]["fixed_working_set_pages"], 12)
+        backend = next(item for item in report["checks"] if item["id"] == "backend_policy_sensitivity")
+        self.assertEqual(backend["metrics"]["hbm_backend"], "DramCore")
+        live_hbm = backend["metrics"]["live_hbm_core_observations"]
+        self.assertTrue(live_hbm)
+        self.assertGreater(sum(row["logical_read_bytes"] for row in live_hbm), 0)
+        self.assertGreater(sum(row["logical_write_bytes"] for row in live_hbm), 0)
         scan = next(item for item in report["checks"] if item["id"] == "fixed_workload_scan")
         self.assertEqual(
             [row["context_tokens"] for row in scan["metrics"]["contexts"]],

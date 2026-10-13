@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'));sys.path.insert(0,str(ROOT/'src'))
-from hbf_hbm_experiments import completion_matrix,extended_model_matrix_complete
+from hbf_hbm_experiments import completion_matrix,extended_model_matrix_complete,decode_matrix_complete,memory_core_coverage
 
 
 class DeliveryCoverageTests(unittest.TestCase):
@@ -34,6 +34,28 @@ class DeliveryCoverageTests(unittest.TestCase):
         self.assertFalse(extended_model_matrix_complete(groups))
         baseline=next(x for x in completion_matrix(groups) if x['groups']==list(range(1,9)))
         self.assertEqual(baseline['status'],'本次未完成')
+
+    def test_successful_decode_subset_cannot_close_full_matrix(self):
+        rows=[{'parameters':{'model_id':m},'prompt_tokens':c,'placement':a,
+               'visible_output_tokens':64,'decode_measurement':{'decode_tokens':63},'decode_core_checks':{'actual':True}}
+              for m in ('llama3_1-8b','llama3_1-70b') for c in (2048,32768,131072,1048576)
+              for a in ('A_hbm_only','B_all_kv_hbf')]
+        group={'id':'19_decode_physical','status':'passed','rows':rows}
+        self.assertTrue(decode_matrix_complete([group]))
+        rows.pop()
+        self.assertFalse(decode_matrix_complete([group]))
+        self.assertEqual(next(x for x in completion_matrix([group]) if x['groups']==[19])['status'],'本次未完成')
+
+    def test_host_dram_and_invalid_audit_do_not_prove_hbm_execution(self):
+        audit={'valid_for_committed_byte_totals':True,'owners':[
+            {'memory_kind':'DDR','core':'DramCore','transactions':12}]}
+        row={'id':'case','mode':'full_operator_serving','core_execution_audit':audit}
+        groups=[{'rows':[row]}]
+        self.assertFalse(memory_core_coverage(groups)['all_full_serving_hbm_verified'])
+        audit['owners'].append({'memory_kind':'HBM','core':'DramCore','transactions':12})
+        self.assertTrue(memory_core_coverage(groups)['all_full_serving_hbm_verified'])
+        audit['valid_for_committed_byte_totals']=False
+        self.assertFalse(memory_core_coverage(groups)['all_full_serving_hbm_verified'])
 
 
 if __name__=='__main__':unittest.main()

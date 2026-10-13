@@ -93,18 +93,36 @@ def extension_tables(group):
 def render_report(report):
     groups=report['groups']
     service=[r for g in groups for r in g.get('rows',[]) if r.get('mode')=='full_operator_serving']
-    rejected=[r for g in groups for r in g.get('rows',[]) if r.get('mode')=='configuration_rejected' or r.get('status')=='configuration_rejected']
+    rejected=[r for g in groups for r in g.get('rows',[]) if r.get('mode') in {'configuration_rejected','physical_capacity_rejected'} or r.get('status')=='configuration_rejected']
     parts=['<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HBF/HBM 内部仿真实验审计报告</title>',
            '<style>body{background:#f4f7fa;color:#193446;font:15px/1.7 system-ui,"Microsoft YaHei",sans-serif;margin:0}main{max-width:1420px;margin:auto;padding:32px 24px 80px}h1,h2{color:#123d59}h2{margin-top:36px;border-top:2px solid #d5e0e8;padding-top:22px}.lead{padding:20px;background:#dfedf5;border-left:5px solid #387da9}.scroll{overflow-x:auto}table{border-collapse:collapse;background:white;width:100%;margin:15px 0;font-size:13px}td,th{padding:9px;border:1px solid #cedbe4;text-align:left;vertical-align:top}th{background:#e7eff5;white-space:nowrap}a{color:#146eaf}pre{background:white;padding:15px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}details{margin:12px 0}code{font-size:12px}nav{display:flex;gap:15px;flex-wrap:wrap}.muted{color:#526b7b}.bad{background:#fff0db;padding:15px}</style></head><body><main>',
            '<h1>HBF/HBM：内部仿真实验与审计结果</h1>',
-           '<p class="lead">机制检查与研究覆盖分别报告。当前完整服务结果 '+str(len(service))+' 行，执行前配置拒绝 '+str(len(rejected))+' 行；其余为微基准或明确假设下的分析。所有数值均为仿真或条件估计，尚无独立硬件预测精度验证。</p>',
-           '<p><a href="results.json">完整结果 JSON</a> · <a href="acceptance.json">后端机制检查</a> · <a href="profiles.json">文献参数化探针</a> · <a href="gap_audit.html">修改前的审计清单（历史状态）</a></p>',
-           '<nav><a href="#coverage">审计完成清单</a><a href="#performance">完整服务性能</a><a href="#memory">内存与迁移指标</a><a href="#micro">各组实验</a><a href="#economics">能耗与成本</a><a href="#remaining">范围与限制</a></nav>',
+           '<p class="lead">机制检查与研究覆盖分别报告。当前完整服务结果 '+str(len(service))+' 行，配置或物理容量拒绝 '+str(len(rejected))+' 行；其余为微基准或明确假设下的分析。所有数值均为仿真或条件估计，尚无独立硬件预测精度验证。</p>',
+           '<p><a href="results.json">完整结果 JSON</a> · <a href="acceptance.json">后端机制检查</a> · <a href="profiles.json">文献参数化探针</a> · <a href="core_path_audit.md">旧结果的Core路径审计</a> · <a href="gap_audit.html">修改前的审计清单（历史状态）</a></p>',
+           '<nav><a href="#decode">独立Decode结果</a><a href="#core">Core执行口径</a><a href="#coverage">审计完成清单</a><a href="#performance">完整服务性能</a><a href="#memory">内存与迁移指标</a><a href="#micro">各组实验</a><a href="#economics">能耗与成本</a><a href="#remaining">范围与限制</a></nav>',
            '<p class="muted">完整复跑：<code>python -B scripts/hbf_hbm_experiments.py --output-dir artifacts/hbf_hbm --workers 4</code>；生成图表：<code>python -B scripts/plot_hbf_hbm_results.py --update-report</code>。使用项目虚拟环境。时间原始单位 ns，带宽十进制 GB/s，容量 bytes；表中延迟已转换为 ms/µs。</p>',
            '<h2 id="coverage">修改和覆盖范围</h2><ul>'+''.join('<li>'+esc(x)+'</li>' for x in report.get('audit_fixes',[]))+'</ul>',
            table(('实验组','检查状态','结果行数','检查支持的范围'),[(g.get('title',g['id']),g['status'],len(g.get('rows',[])),supported_scope(g)) for g in groups])]
     study=next((g for g in groups if g['id'].startswith('09')),None)
+    core=report.get('memory_core_coverage',{})
+    parts.append('<h2 id="core">计算、访存与迁移的职责边界</h2>'
+        '<p>GPU侧继续使用聚合简化模型估算计算和启动时间。上层算子与KV管理器生成实际读写请求；'
+        'HBM统一交给DRAM Core处理地址、行/Bank、命令和数据通道、排队与完成时间；HBF交给NAND Core处理页读取与编程。'
+        'KV迁移按源内存读取、链路传输、目标内存写入的依赖顺序执行。调度器组合这些依赖与重叠，不再额外叠加HBM聚合带宽耗时。</p>')
+    if core.get('all_full_serving_hbm_verified'):
+        parts.append('<p><strong>本报告 '+str(core['verified_hbm_dram_core_rows'])+' / '+str(core['full_serving_rows'])+
+            ' 个完整服务点均记录到实际HBM DRAM Core执行。</strong>证据来自持久在线服务运行时的实际提交，排除规划预演、隔离重放与服务启动前初始化。'
+            '其中 '+str(core.get('verified_nand_core_rows',0))+' 点还记录到实际HBF/SSD NAND Core执行。'
+            '逐点JSON中的 <code>core_execution_audit</code> 保存物理owner、Core类型、读写字节及prefill/decode分组。主机DDR与HBM分别计数。</p>')
+    else:
+        parts.append('<p class="bad">当前载入的数据尚未全部具备HBM DRAM Core执行记录，不应据此声称已经完成物理Core重跑。旧版完整服务曾绕过公共HBM Core，详见历史审计。</p>')
     findings=[]
+    decode_group=next((g for g in groups if g['id']=='19_decode_physical'),{})
+    for pair in decode_group.get('comparisons',[]):
+        if pair['prompt_tokens'] not in (2048,1048576): continue
+        findings.append((pair['model_id']+'，'+('2K' if pair['prompt_tokens']==2048 else '1M*')+'独立Decode',
+            'A '+number(pair['A_decode_tps'])+' → B '+number(pair['B_decode_tps'])+' token/s；B/A='+number(pair['B_over_A_decode_tps'],4),
+            '真实prefill后单独测量；固定'+str(pair['output_tokens'])+'输出。*1M为架构压力外推。'))
     for model_id,label in (('llama3_1-8b','Llama 3.1 8B'),('llama3_1-70b','Llama 3.1 70B')):
         prefix='model/'+model_id+'/2048/'
         a=next((r for r in service if r['id']==prefix+'A_hbm_only'),None)
@@ -145,9 +163,17 @@ def render_report(report):
         parts.insert(3,'<h2>先看实际结论</h2>'+table(('场景','观察结果','解释边界'),findings))
     parts.append('<p><strong>本次所选检查：'+('全部通过' if report.get('all_selected_checks_passed') else '存在未通过项，请看各组明细')+'</strong>。真实外部数据校准依用户指示暂不纳入完成条件；检查通过表示实现和所述实验通过，不表示任何硬件预测已经校准。</p>')
     parts.append(table(('原审计项','当前状态','实际完成范围'),[(r['item'],r['status'],r['reason']) for r in report.get('audit_completion',[])]))
-    parts.append('<h3>合并后的逐模型执行范围</h3>'+table(('模型ID','实际执行模式','点数','上下文','完整算子服务'),[
-        (r['model_id'],' / '.join(r['modes']),r['executed_points'],str(r['contexts']),r['native_full_serving']) for r in report.get('model_execution_coverage',[])]))
+    parts.append('<h3>合并后的逐模型执行范围</h3>'+table(('模型ID','实际执行模式','执行/拒绝点数','上下文','完整算子服务'),[
+        (r['model_id'],' / '.join(r['modes']),str(r['executed_points'])+'/'+str(r.get('rejected_points',0)),str(r['contexts']),r['native_full_serving']) for r in report.get('model_execution_coverage',[])]))
     if study:
+        capacity=[r for r in study.get('rows',[]) if r.get('mode')=='physical_capacity_rejected']
+        if capacity:
+            parts.append('<h3>512GiB库存的真实容量失败</h3><p>第9组保留原配置的失败结果和可完成的B点；另将70B/1M的A/B/D共同扩为1TiB HBM进行可比较的性能对照。容量控制点不与扩容点混配。</p>'+table(
+                ('点ID','HBM GiB','失败的单次申请 GiB','阶段','结果'),[
+                    (r['id'],r['capacity_failure']['capacity_bytes']/1024**3,
+                     r['capacity_failure']['requested_allocation_bytes']/1024**3,
+                     r['capacity_failure']['failure_stage'],r['reason']) for r in capacity])+
+                '<p>失败的申请大小不等于整体峰值需求，碎片也可能影响分配；详细占用与空闲区间见原始JSON。不为失败点生成TPS。</p>')
         parts.append('<p>第9组保留其运行时的历史覆盖清单；其中“未运行/缺失preset”仅描述该组当时范围。当前项目模型状态以以上第9+17组合并表为准。</p>')
         parts.append(details('第9组当时的覆盖与边界（非当前项目缺项）', {key:study[key] for key in ('coverage','search','slo_search','slo_boundaries','limitations') if key in study}))
         batch_bounds=[b for b in study.get('slo_boundaries',[]) if b.get('kind')=='batch']
@@ -157,6 +183,46 @@ def render_report(report):
                 [(b['architecture'],b['maximum_tested_feasible_batch'],b['minimum_tested_infeasible_batch'],str(b['actual_batches'])) for b in batch_bounds]))
     if report.get('checklist_progress'):
         parts.append(table(('审计项','本轮状态','说明'),[(x['item'],x['status'],x['reason']) for x in report['checklist_progress']]))
+    decode=next((g for g in groups if g['id']=='19_decode_physical'),None)
+    if decode:
+        output_tokens=decode.get('output_tokens',64)
+        measured_tokens=output_tokens-1
+        parts.append('<h2 id="decode">排除Prefill后的Decode影响</h2>'
+            f'<p>统一batch=1、每请求输出{output_tokens} token。每点先真实执行完整prefill，首token产生后，单独统计余下{measured_tokens}个token的完成窗口。'
+            f'<strong>Decode TPS = {measured_tokens} / 该窗口秒数</strong>；TPOT为首token之后的平均输出间隔。'
+            'A/B使用相同硬件配置和工作量。128K加输出略超原生上下文，1M属于架构压力外推。</p>'
+            '<p>70B/1M的A/B共同使用1TiB HBM；其余Decode点为512GiB。原512GiB配置在prefill工作空间的连续地址分配时被拒绝，不能据此认定总容量必然不足；失败结果另行保留。扩展容量不改变HBM带宽或时序参数。</p>'
+            '<p>旧“命名模型随上下文变化的TPS”图按整个请求窗口计算，长prefill会稀释Decode差异。该旧指标继续保留用于衡量端到端输出速率；下表和独立Decode图专门回答生成阶段的影响。</p>')
+        parts.append(table(('模型','上下文','A Decode TPS','B Decode TPS','Decode B/A','A TPOT ms','B TPOT ms','TPOT变化','全请求TPS B/A'),[
+            (p['model_id'],p['prompt_tokens'],number(p['A_decode_tps'],3),number(p['B_decode_tps'],3),
+             number(p['B_over_A_decode_tps'],4),number(p['A_tpot_ns']/1e6),number(p['B_tpot_ns']/1e6),
+             f"{(p['B_over_A_tpot']-1)*100:+.2f}%",number(p['B_over_A_total_tps'],4)) for p in decode.get('comparisons',[])]))
+        if {p['model_id'] for p in decode.get('comparisons',[]) if p['prompt_tokens']==1048576}>={'llama3_1-8b','llama3_1-70b'}:
+            parts.append('<p><strong>为什么70B仍接近？</strong>这是当前GPU简化模型与计算、访存重叠规则下的机制推断：'
+                '参考配置的FP16/BF16有效张量吞吐为33.15 TFLOP/s，单token注意力按16行矩阵块扩展计量。'
+                '1M时每层attention张量服务估算为8B约8.292ms、70B约16.584ms；相同每层KV在当前NAND参数下的读取扫描下界约16.384ms。'
+                '因此8B更容易暴露HBF读取代价，70B较长的计算服务则可覆盖大部分读取；约6.3ms/token的附加时间随共同计算时间增加而被稀释。'
+                '这不能推成HBF对大模型影响普遍更小的规律。逐点Core计数确认70B确实读取了HBF；当前结果未保存逐算子关键路径，不能把全部附加时间精确归因给写入。</p>')
+        if decode.get('capacity_baseline_observations'):
+            parts.append('<h3>原库存的容量负对照</h3>'+table(('模型 / 放置','输入/输出','原HBM GiB','失败的单次申请 GiB','结果'),[
+                (r['model_id']+' / '+r['placement'],str(r['prompt_tokens'])+'/'+str(r['output_tokens_per_request']),
+                 r['hbm_capacity_bytes']/1024**3,r['failed_allocation_bytes']/1024**3,r['reason'])
+                for r in decode['capacity_baseline_observations']])+
+                '<p>失败发生在规划阶段的物理地址分配，没有完成服务，不产生TPS。单次申请失败不等于整个系统峰值需求；1TiB是本次共同对照配置，不宣称最小可行容量。</p>')
+        core_rows=[]
+        for row in decode.get('rows',[]):
+            audit=row.get('core_execution_audit',{})
+            owners=[owner for cohort in audit.get('cohorts',[]) if cohort['phase']=='decode' for owner in cohort['owners']]
+            for kind,core_name in (('HBM','DramCore'),('NAND','NandCore')):
+                selected=[o for o in owners if o['core']==core_name and (kind=='NAND' or o['memory_kind']==kind)]
+                if not selected: continue
+                core_rows.append((row['id'],kind+' / '+core_name,sum(o['transactions'] for o in selected),
+                    number(sum(o['logical_read_bytes'] for o in selected)/1024**3,5),
+                    number(sum(o['logical_write_bytes'] for o in selected)/1024**3,5),
+                    row['decode_measurement']['pure_decode_tbt_ns']['count']))
+        parts.append('<details><summary>展开：每个Decode点实际Core提交与读写量</summary>'+
+            table(('点ID','内存 / Core','事务数','逻辑读 GiB','逻辑写 GiB','TBT样本数'),core_rows)+
+            '<p>以上只合计decode cohort；完整请求、迁移及物理传输字节见逐点JSON。HBF物理页放大不等于逻辑流量。</p></details>')
     manifest=report.get('figure_manifest',{})
     if manifest.get('status')=='complete':
         parts.append('<h2 id="figures">主要结果图</h2><p>'+esc(manifest.get('global_caption_zh',''))+'</p>')
@@ -168,7 +234,7 @@ def render_report(report):
     parts.extend(['<h2 id="performance">完整服务性能</h2>',
         '<p>第15组使用显式1/2/4 GPU，其余组按各行GPU数计。每GPU TPS = 节点TPS/GPU数；多GPU节点吞吐来自真实并行任务与通信调度。</p>',
         '<p>TPS 是每秒输出 token 数；goodput 是满足延迟目标的合格 TPS。TTFT 是首 token 等待时间，TPOT 是每请求首 token 后的平均输出间隔，TBT 是相邻 token 的间隔，E2E 是请求总时延；SLO 指本实验设定的延迟目标。每项延迟均保留独立样本数。</p>',
-        '<p>主 TPS 和 goodput 使用<strong>最早请求到达至仿真结束</strong>的同一窗口，含请求在初始化期间的等待；另列初始化后 TPS。TTFT/E2E 均从各请求到达起算。prefill 墙钟吞吐是成功请求输入 token（每请求计一次）/主窗口；decode 是非 prefill 阶段提交的输出 token/主窗口。原有 batch 忙时服务速率仍保存在 JSON，不能与墙钟吞吐混用。</p>',
+        '<p>主 TPS 和 goodput 使用<strong>最早请求到达至仿真结束</strong>的同一窗口，含请求在初始化期间的等待；另列初始化后 TPS。TTFT/E2E 均从各请求到达起算。下表prefill和decode列均以主请求窗口为分母，表示各阶段token对整段请求的速率贡献，<strong>不是独立Decode TPS</strong>。独立Decode窗口见上方第19组；原有batch忙时速率仍单独保存在JSON。</p>',
         '<p>A=HBM 权重与 KV；B=全部 KV 在 HBF；C=HBM 活跃 KV/HBF 冷 KV；D=HBF 权重/HBM KV。具体目标与控制面实际放置分别保存在结果中。对照约束见每个场景；相同 GPU 或相同槽数不代表相同成本、面积和功耗。</p>',
         '<p>补充对照 E=主机DRAM中的KV，F=NVMe SSD冷KV，G=CXL连接DRAM中的KV。第9组G是单GPU本地对照，第15组另建多GPU共享池和机架网络变体，路径假设分别保存。</p>',
         '<p>当前未提供真实 token-ID 轨迹；解析 embedding 的远端读取若超过权重表大小，使用明确的循环地址假设保留重复读流量，不扩大权重表驻留容量。不能据此声称复现了真实 token 局部性。</p>',
@@ -177,10 +243,11 @@ def render_report(report):
         (r['id']+' / '+r['placement'],r['model'],str(r['prompt_tokens'])+'/'+str(r['output_tokens_per_request']),r['request_count'],str(r['completed_requests'])+'/'+str(r['rejected_requests']),str(r['requested_concurrency'])+'/'+str(r['max_observed_batch_requests']),number(r['node_tps'],2),number(r.get('runtime_tps'),2),number(r['goodput_tps'],2),number(r.get('phase_service_rates',{}).get('prefill',{}).get('wall_clock_tokens_per_second'),2),number(r.get('phase_service_rates',{}).get('decode',{}).get('wall_clock_tokens_per_second'),2),number(r.get('measurement_windows',{}).get('initialization_ns',0)/1000)) for r in service]))
     pairs=[]
     for a in service:
-        if a['placement']!='A_hbm_only' or not a['id'].startswith(('fixed-','model/')):
+        if a['placement']!='A_hbm_only' or not a['id'].startswith(('fixed-','model/','model-capacity/')):
             continue
         key=(a['model'],a['prompt_tokens'],a['output_tokens_per_request'],a['request_count'],a['requested_concurrency'])
-        b=next((b for b in service if b['placement']=='B_all_kv_hbf' and b['id'].startswith(('fixed-','model/')) and
+        b=next((b for b in service if b['placement']=='B_all_kv_hbf' and b['id'].startswith(('fixed-','model/','model-capacity/')) and
+            b.get('fixed_inventory')==a.get('fixed_inventory') and
             (b['model'],b['prompt_tokens'],b['output_tokens_per_request'],b['request_count'],b['requested_concurrency'])==key),None)
         if b: pairs.append((a['model'],a['prompt_tokens'],a['requested_concurrency'],number(a['node_tps'],2),number(b['node_tps'],2),number(b['node_tps']/a['node_tps'],4),number(a['goodput_tps'],2),number(b['goodput_tps'],2)))
     parts.append('<h3>相同模型、请求和并发下的 B/A</h3><p>比值小于 1 表示全部 KV 放入 HBF 后吞吐下降。只能解释表中给定假设和窗口，不能外推为 HBF 的普适加速倍数。</p>')

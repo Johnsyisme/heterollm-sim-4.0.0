@@ -8,7 +8,6 @@ analytical matrix FLOPs, and explicit omitted kernels; never LLM token/s.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import math
 from pathlib import Path
@@ -23,7 +22,7 @@ from heterollm_sim.nand_core import NandCore
 from heterollm_sim.memory_types import AccessRequest, parse_physical_memory_config
 from heterollm_sim.model_presets import EXTENDED_MODEL_SPECS
 from hbf_hbm_experiments import group
-from hbf_hbm_serving_study import build_study_scenario, run_case
+from hbf_hbm_serving_study import build_study_scenario, run_case, study_cases
 
 TIB = 1024 ** 4
 ARCHITECTURES = ("A_hbm_only", "B_all_kv_hbf", "D_hbf_weights")
@@ -286,20 +285,19 @@ def _full_point(args):
                     hbm_capacity_bytes=4*TIB,hbf_capacity_bytes=4*TIB))
 
 
-def run_extended_models_study(*, workers=2, sections=("full","probes")):
+def run_extended_models_study(*, workers=2, sections=("full","probes"),
+                              point_cache_dir=None, resume=False):
     rows=[]
     if "full" in sections:
-        points=[(m,c,a) for m in FULL_MODELS for c in CONTEXTS for a in ARCHITECTURES]
-        if workers>1:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                jobs={pool.submit(_full_point,p):p for p in points}
-                for job in as_completed(jobs):
-                    row=job.result(); rows.append(row)
-                    print("completed full",row["id"],flush=True)
-        else:
-            for point in points:
-                row=_full_point(point);rows.append(row)
-                print("completed full",row["id"],flush=True)
+        # Reuse the serving study's atomic per-point retention and execution
+        # version. Long HBF-weight points must not discard completed siblings
+        # if the run is interrupted; old aggregate-HBM points are ineligible.
+        cases=[(architecture,f"extended-{model}-{context}-{architecture}",
+                dict(model_id=model,prompt=context,batch=1,output=4,
+                     hbm_capacity_bytes=4*TIB,hbf_capacity_bytes=4*TIB))
+               for model in FULL_MODELS for context in CONTEXTS for architecture in ARCHITECTURES]
+        rows.extend(annotate_full_support(row) for row in study_cases(cases,
+            workers=workers,point_cache_dir=point_cache_dir,resume=resume))
     if "probes" in sections:
         for model in EXTENDED_MODEL_SPECS:
             for context in CONTEXTS:
@@ -318,7 +316,12 @@ def summarize_extended_models(rows, *, sections=("full","probes")):
         checks.update(full_serving_12_points=len(full)==12,
             full_serving_completed=all(r["completed_requests"]==1 and r["visible_output_tokens"]==4 for r in full),
             full_placements_verified=all(all(r["placement_verification"].values()) for r in full),
-            synthetic_model_over_one_trillion=all(r["model_structure"]["weight_bytes"]>=2e12 for r in full if "synthetic-1t" in r["id"]))
+            synthetic_model_over_one_trillion=all(r["model_structure"]["weight_bytes"]>=2e12 for r in full if "synthetic-1t" in r["id"]),
+            full_serving_has_live_hbm_core_evidence=all(
+                r.get("core_execution_audit",{}).get("valid_for_committed_byte_totals")
+                and any(o.get("core")=="DramCore" and o.get("memory_kind")=="HBM"
+                        and o.get("transactions",0)>0 and o.get("transfer_bytes",0)>0
+                        for o in r["core_execution_audit"].get("owners",())) for r in full))
     if "probes" in sections:
         checks.update(structural_probe_24_points=len(probes)==24,
             no_probe_tps=all(r["node_tps"] is None and not r["executed_serving"] for r in probes),
@@ -346,11 +349,14 @@ def main():
     parser.add_argument("--output",type=Path)
     parser.add_argument("--workers",type=int,default=2)
     parser.add_argument("--section",choices=("all","full","probes"),default="all")
+    parser.add_argument("--point-cache-dir",type=Path,default=ROOT/"artifacts/hbf_hbm/extended_model_points")
+    parser.add_argument("--resume",action="store_true")
     args=parser.parse_args()
     if args.output is None:
         suffix="" if args.section=="all" else "_"+args.section
         args.output=ROOT/"artifacts/hbf_hbm"/f"17_extended_models{suffix}.json"
-    result=run_extended_models_study(workers=args.workers,sections=("full","probes") if args.section=="all" else (args.section,))
+    result=run_extended_models_study(workers=args.workers,sections=("full","probes") if args.section=="all" else (args.section,),
+        point_cache_dir=args.point_cache_dir,resume=args.resume)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
     print(json.dumps({"status":result["status"],"rows":len(result["rows"]),"output":str(args.output)},ensure_ascii=False))

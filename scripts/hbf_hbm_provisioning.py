@@ -16,7 +16,7 @@ BUDGETS = {"gpu_count": 1, "memory_area_mm2": 400., "active_node_power_w": 900.,
 
 
 def build_package_scenario(hbm_packages, hbf_packages, architecture, *, model_id="llama3_1-70b", output=8):
-    """One aggregate tier per kind; all capacity/bandwidth/concurrency scale together."""
+    """One physical-core device per tier; scale capacity/bandwidth/concurrency together."""
     if not isinstance(hbm_packages, int) or not isinstance(hbf_packages, int) or min(hbm_packages, hbf_packages)<0:
         raise ValueError("package counts must be nonnegative integers")
     if not hbm_packages:
@@ -129,7 +129,7 @@ def run_provisioning_study(*, model_id="llama3_1-70b", progress=True):
     return group("11_provisioning","⑪ 预算约束下重新执行服务",rows,checks,
         ["固定4槽、GPU和SLO，重新执行70B代表工作量后进行有限候选预算筛选与条件成本比较"],
         ["容量、功率、成本是共同上限而非每点消耗完全相等；价格/面积/功耗是假设。",
-         "每种内存使用一个聚合设备，容量、带宽和并行度同时随栈数改变；不是实际多栈布线模型。",
+         "每种内存使用一个物理Core设备，容量、带宽和并行度同时随栈数改变；不是实际多栈布线模型。",
          "单请求2K/8输出、有限候选不构成全工作负载全局最优；热降额、磨损和成本尚未闭环。",
          "无可行候选时保留null，不放宽SLO或预算以制造赢家。"],
         budgets=BUDGETS,selected_candidate_id=selected["id"] if selected else None,

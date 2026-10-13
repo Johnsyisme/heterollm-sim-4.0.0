@@ -152,21 +152,23 @@ class CalibratedHbfProfileTests(unittest.TestCase):
         self.assertFalse(son["paper_compute_applied"])
         self.assertTrue(hot_cold["paper_compute_applied"])
 
-    def test_hbm_full_backend_defaults_to_aggregate_service_mode(self):
+    def test_hbm_full_backend_uses_live_dram_core_by_default(self):
+        from hbf_hbm_core_audit import CoreExecutionAudit
+
         profile = profiles._profile_by_id("son_hbf")
-        aggregate = profiles._full_backend_summary(
-            profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4
-        )
-        physical = profiles._full_backend_summary(
-            profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
-            hbm_execution_mode="physical",
-        )
-        self.assertEqual(aggregate["hbm_execution_mode"], "aggregate")
-        self.assertGreater(aggregate["summary"]["throughput_visible_output_tokens_per_s"], 0.0)
-        self.assertGreater(
-            physical["resources"]["dram_traffic"]["task_count"],
-            aggregate["resources"]["dram_traffic"]["task_count"],
-        )
+        with CoreExecutionAudit() as audit:
+            result = profiles._full_backend_summary(
+                profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4
+            )
+        observed = audit.summary()
+        self.assertTrue(observed["valid_for_committed_byte_totals"])
+        hbm = [row for row in observed["owners"] if row["memory_kind"] == "HBM"]
+        self.assertTrue(hbm, "Host DRAM or preview work cannot prove live HBM execution")
+        self.assertTrue(all(row["core"] == "DramCore" for row in hbm))
+        self.assertGreater(sum(row["logical_read_bytes"] for row in hbm), 0)
+        self.assertGreater(sum(row["logical_write_bytes"] for row in hbm), 0)
+        self.assertGreater(sum(row["burst_count"] for row in hbm), 0)
+        self.assertGreater(result["summary"]["throughput_visible_output_tokens_per_s"], 0.0)
 
     def test_micro_and_serving_share_memory_parameters(self):
         for profile in profiles._profile_specs():

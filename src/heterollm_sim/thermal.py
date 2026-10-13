@@ -16,6 +16,7 @@ from .config import ScenarioConfig
 from .cost_models import (
     CPUProfile, DigitalSramCimProfile, GPUProfile, HBMProfile, HostMemoryProfile,
 )
+from .memory_types import DramConfig, parse_physical_memory_config
 
 
 def advance_nand_thermal(state, config, start_ns: float, work_ns: float):
@@ -155,6 +156,33 @@ def _derate_profile(profile, point: ThermalOperatingPoint):
     raise TypeError("unsupported thermal cost profile: " + type(profile).__name__)
 
 
+def _derate_physical_memory_config(config, point: ThermalOperatingPoint):
+    """Scale the Core's explicit rates/timings without changing its geometry.
+
+    Bandwidth and latency factors are independent authored sensitivities.
+    All declared equivalent DRAM rate representations must change together,
+    including GDDR pin rate, or the resulting physical contract is inconsistent.
+    Dynamic NAND RC/wear parameters are retained: if enabled, their feedback
+    acts on this statically derated baseline rather than being recomputed here.
+    """
+    config = parse_physical_memory_config(config)
+    if isinstance(config, DramConfig):
+        rates = ("data_rate_mt_s", "effective_pin_data_rate_gbps",
+                 "lane_bandwidth_gb_s", "interface_bandwidth_gb_s",
+                 "read_bandwidth_gb_s", "write_bandwidth_gb_s")
+        timings = ("open_ns", "close_ns", "read_latency_ns", "write_latency_ns",
+                   "burst_interval_ns", "read_recovery_ns", "write_recovery_ns",
+                   "read_to_write_ns", "write_to_read_ns")
+    else:
+        rates = ("host_bandwidth_gb_s", "host_read_bandwidth_gb_s",
+                 "host_write_bandwidth_gb_s", "internal_bandwidth_gb_s")
+        timings = ("page_read_ns", "page_program_ns", "block_erase_ns", "front_ns")
+    changes = {name: getattr(config, name) * point.memory_bandwidth_scale
+               for name in rates if getattr(config, name) is not None}
+    changes.update({name: getattr(config, name) * point.latency_scale for name in timings})
+    return replace(config, **changes)
+
+
 def apply_thermal_operating_point(
     scenario: ScenarioConfig, operating_point: ThermalOperatingPoint,
 ) -> ScenarioConfig:
@@ -164,6 +192,8 @@ def apply_thermal_operating_point(
     ``metadata['thermal_domain_id']``. Profiles shared with another domain are
     cloned per component, never edited in place. Route caps on the associated
     ports change along with links; off-domain host CPU/memory remain untouched.
+    Memory Core rates and timings change with the corresponding endpoint;
+    capacities, address geometry and optional dynamic NAND feedback stay fixed.
     This is a sensitivity operation, not a calibrated prediction of throttling.
     """
 
@@ -195,6 +225,10 @@ def apply_thermal_operating_point(
                 profiles[kind][profile_id] = _derate_profile(scenario.resolve_component_profile(component), point)
                 updates["cost_profile_id"] = profile_id
             metadata = dict(component.metadata)
+            if metadata.get("physical_memory_config") is not None:
+                metadata["physical_memory_config"] = asdict(
+                    _derate_physical_memory_config(metadata["physical_memory_config"], point)
+                )
             for name in ("read_latency_ns", "write_latency_ns"):
                 if name in metadata:
                     metadata[name] *= point.latency_scale
@@ -225,8 +259,10 @@ def apply_thermal_operating_point(
     derated = replace(scenario, hardware=hardware, component_profiles=profiles,
                       assumptions=scenario.assumptions + ("Static thermal derating only: " + point.evidence,))
     changed_memories = tuple(component.component_id for component in scenario.hardware.components
-        if component.is_active_memory and component.metadata.get("memory_service") !=
-        derated.hardware.get_component(component.component_id).metadata.get("memory_service"))
+        if component.is_active_memory and any(
+            component.metadata.get(key) !=
+            derated.hardware.get_component(component.component_id).metadata.get(key)
+            for key in ("memory_service", "physical_memory_config")))
     changed_links = tuple(link.link_id for link, updated in zip(scenario.hardware.links, derated.hardware.links)
                           if link != updated)
     if changed_memories or changed_links:

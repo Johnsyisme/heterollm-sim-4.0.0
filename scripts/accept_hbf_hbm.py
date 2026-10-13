@@ -1256,6 +1256,12 @@ def check_hbm_hbf_ratio() -> dict[str, Any]:
 
 def check_backend_policy_sensitivity() -> dict[str, Any]:
     """Verify non-memory controls change execution through the real backend."""
+    audit_spec = importlib.util.spec_from_file_location(
+        "hbf_hbm_core_audit_acceptance", ROOT / "scripts" / "hbf_hbm_core_audit.py"
+    )
+    audit_module = importlib.util.module_from_spec(audit_spec)
+    assert audit_spec.loader is not None
+    audit_spec.loader.exec_module(audit_module)
     script = ROOT / "scripts" / "calibrated_hbf_profiles.py"
     spec = importlib.util.spec_from_file_location("calibrated_hbf_profiles_acceptance", script)
     module = importlib.util.module_from_spec(spec)
@@ -1263,9 +1269,20 @@ def check_backend_policy_sensitivity() -> dict[str, Any]:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     profile = module._profile_by_id("son_hbf")
-    baseline = module._full_backend_summary(
-        profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4
-    )
+    with audit_module.CoreExecutionAudit() as audit:
+        baseline = module._full_backend_summary(
+            profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4
+        )
+    core_observations = audit.summary()
+    live_hbm = [row for row in core_observations["owners"] if row["memory_kind"] == "HBM"]
+    require(core_observations["valid_for_committed_byte_totals"],
+            "default HBM evidence must come from successful persistent Core submissions")
+    require(bool(live_hbm) and all(row["core"] == "DramCore" for row in live_hbm),
+            "default HBM operators must actually execute through DramCore")
+    require(sum(row["logical_read_bytes"] for row in live_hbm) > 0
+            and sum(row["logical_write_bytes"] for row in live_hbm) > 0
+            and sum(row["burst_count"] for row in live_hbm) > 0,
+            "default HBM must execute physical read and write bursts")
     gpu = module._full_backend_summary(
         profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
         gpu_compute_pflops=0.06,
@@ -1284,23 +1301,17 @@ def check_backend_policy_sensitivity() -> dict[str, Any]:
             "GPU compute override must not change logical DRAM traffic")
     require(host["summary"]["makespan_ns"] > baseline["summary"]["makespan_ns"],
             "host control scaling must increase full-backend makespan")
-    physical = module._full_backend_summary(
-        profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
-        hbm_execution_mode="physical",
-    )
-    require(physical["resources"]["dram_traffic"]["task_count"] > baseline["resources"]["dram_traffic"]["task_count"],
-            "physical HBM diagnostic mode must expose more DRAM tasks than aggregate mode")
     require(link["summary"]["makespan_ns"] > module._full_backend_summary(
         profile, use_hbf=True, request_count=1, prompt_tokens=32, output_tokens=4
     )["summary"]["makespan_ns"], "link bandwidth override must affect HBF makespan")
     return {
-        "aggregate_hbm_mode": baseline["hbm_execution_mode"],
+        "hbm_backend": "DramCore",
         "gpu_reference_makespan_ns": baseline["summary"]["makespan_ns"],
         "gpu_override_makespan_ns": gpu["summary"]["makespan_ns"],
         "host_scaled_makespan_ns": host["summary"]["makespan_ns"],
         "hbf_slow_link_makespan_ns": link["summary"]["makespan_ns"],
-        "physical_hbm_task_count": physical["resources"]["dram_traffic"]["task_count"],
-        "aggregate_hbm_task_count": baseline["resources"]["dram_traffic"]["task_count"],
+        "live_hbm_core_observations": live_hbm,
+        "physical_dram_task_count": baseline["resources"]["dram_traffic"]["task_count"],
     }
 
 
@@ -1475,6 +1486,7 @@ def run_acceptance() -> dict[str, Any]:
             },
             "external_validation": "pending_external_measurements",
             "limitations": ["Serving coverage uses a tiny synthetic scheduler workload; it does not claim calibrated LLM token throughput.",
+                            "HBM memory accesses execute DramCore transactions; GPU compute and launch overhead retain the existing analytical operator/resource models, not cycle-accurate GPU execution.",
                             "Prefetch is modeled as fixed token lookahead rounded to pages in paged-pool serving; no predictive policy is included.",
                             "Page-merge, host-ack and media-drain write-buffer semantics are enabled by the explicit buffered_write_mode metadata switch; legacy write-through remains the default.",
                             "The four-slot package sweep is a coupled hypothetical budget, not commercial packaging calibration.",

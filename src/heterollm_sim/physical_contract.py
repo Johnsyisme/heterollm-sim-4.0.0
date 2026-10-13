@@ -75,6 +75,9 @@ def parse_required_physical_config(component_id, kind, raw):
 def require_physical_memory_config(component):
     """Return a validated core config, or identify the incomplete component."""
     prefix = "component {} ({}): ".format(component.component_id, component.kind)
+    legacy_mode = component.metadata.get("memory_execution_mode")
+    if legacy_mode is not None and str(legacy_mode).strip().lower() != "physical":
+        raise ValueError(prefix + "memory_execution_mode is no longer configurable; remove the obsolete setting. All memory execution requires its physical DRAM/NAND core")
     parsed = parse_required_physical_config(
         component.component_id, component.normalized_kind,
         component.metadata.get("physical_memory_config"),

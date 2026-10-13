@@ -10,9 +10,119 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 sys.path.insert(0,str(ROOT/'src'))
 import hbf_hbm_serving_study as study
+from heterollm_sim.memory_allocator import AllocationError, PhysicalAddressAllocator
 
 
 class ServingStudyTests(unittest.TestCase):
+    @staticmethod
+    def _raise_capacity_failure(*args, **kwargs):
+        allocator = PhysicalAddressAllocator(1024, alignment_bytes=64)
+        allocator.allocate('resident', 800)
+        # 224 bytes remain, but the next aligned base is 832: only 192 fit.
+        allocator.allocate('new_buffer', 200)
+
+    def test_physical_capacity_failure_preserves_real_alignment_and_fragmentation(self):
+        aligned = PhysicalAddressAllocator(1024, alignment_bytes=64)
+        aligned.allocate('resident', 800)
+        fragmented = PhysicalAddressAllocator(1024, alignment_bytes=64)
+        fragmented.allocate('first', 256, address=0)
+        fragmented.allocate('second', 256, address=512)
+        fragmented.allocate('shared_prefix', 128, alias_of='first')
+        partitioned = PhysicalAddressAllocator(1024, alignment_bytes=64,
+                                               workspace_capacity_bytes=256)
+        partitioned.allocate('resident', 640)
+        partitioned.allocate('workspace', 128, generation=1)
+        for allocator, requested, occupied, free, largest, bound, arena_end in (
+            (aligned, 200, 800, 224, 192, 1032, 1024),
+            (fragmented, 300, 512, 512, 256, 1068, 1024),
+            (partitioned, 160, 640, 128, 128, 800, 768),
+        ):
+            with self.subTest(occupied=occupied, requested=requested):
+                before = allocator.allocations()
+                try:
+                    allocator.allocate('does_not_fit', requested)
+                except AllocationError as error:
+                    failure = study.physical_capacity_failure(error)
+                else:
+                    self.fail('the physical allocator must actually reject the extent')
+                self.assertEqual(failure['classification'], 'physical_allocator_no_contiguous_extent')
+                self.assertEqual(failure['requested_allocation_bytes'], requested)
+                self.assertEqual(failure['capacity_bytes'], 1024)
+                self.assertEqual(failure['occupied_bytes_at_failure'], occupied)
+                self.assertEqual(failure['free_bytes_at_failure'], free)
+                self.assertEqual(failure['largest_free_extent_bytes'], largest)
+                self.assertEqual(failure['same_layout_minimum_capacity_bytes'], bound)
+                self.assertEqual(failure['compacted_occupancy_plus_request_bytes'], occupied + requested)
+                self.assertEqual(failure['arena_end_bytes'], arena_end)
+                self.assertEqual(allocator.allocations(), before)
+
+    def test_capacity_classification_does_not_swallow_other_allocation_errors(self):
+        import hbf_hbm_experiments as experiments
+        message = 'unable to allocate 200 bytes in capacity 1024'
+        errors = [ValueError(message), AllocationError('prefix ' + message),
+                  AllocationError(message + ' unrelated suffix')]
+        allocation = PhysicalAddressAllocator(1024).allocate('bounded', 64)
+        try:
+            allocation.address(32, 64)
+        except AllocationError as error:
+            errors.append(error)
+        else:
+            self.fail('out-of-bounds access must raise a real AllocationError')
+        for error in errors:
+            with self.subTest(error=str(error)):
+                self.assertIsNone(study.physical_capacity_failure(error))
+                with mock.patch.object(experiments, 'serving_row', side_effect=error):
+                    with self.assertRaises(type(error)) as captured:
+                        study.run_case('A_hbm_only', row_id='capacity/unrelated', prompt=8, output=2)
+                self.assertIs(captured.exception, error)
+
+    def test_capacity_rejection_is_not_reported_as_executed_throughput(self):
+        import hbf_hbm_experiments as experiments
+        parameters = dict(prompt=8, output=2, hbm_capacity_bytes=study.GIB)
+        with mock.patch.object(experiments, 'serving_row', side_effect=self._raise_capacity_failure):
+            row = study.run_case('A_hbm_only', row_id='capacity/rejected', **parameters)
+        self.assertEqual(row['id'], 'capacity/rejected')
+        self.assertEqual(row['mode'], 'physical_capacity_rejected')
+        self.assertEqual(row['parameters'], parameters)
+        self.assertFalse(row['executed_serving'])
+        self.assertTrue(row['attempted_serving'])
+        self.assertIsNone(row['node_tps'])
+        self.assertIsNone(row['goodput_tps'])
+        self.assertEqual(row['fixed_inventory']['hbm0']['capacity_bytes'], study.GIB)
+        self.assertGreater(row['model_structure']['weight_bytes'], 0)
+        self.assertEqual(row['capacity_failure']['largest_free_extent_bytes'], 192)
+        self.assertNotIn('completed_requests', row)
+        self.assertNotIn('core_execution_audit', row)
+
+    def test_capacity_rejection_cache_requires_matching_parameters_version_and_evidence(self):
+        import hbf_hbm_experiments as experiments
+        cases = (('A_hbm_only', 'capacity/cache', dict(prompt=8, output=2)),)
+        with tempfile.TemporaryDirectory(prefix='hbf-capacity-cache-') as directory, \
+             mock.patch.object(experiments, 'serving_row', side_effect=self._raise_capacity_failure):
+            initial = study.study_cases(cases, point_cache_dir=directory, progress=False)
+            self.assertEqual(initial[0]['point_result_version'], study.POINT_RESULT_VERSION)
+            self.assertEqual(initial[0]['mode'], 'physical_capacity_rejected')
+            with mock.patch.object(study, 'run_case', side_effect=AssertionError('matching rejection must resume')):
+                resumed = study.study_cases(cases, point_cache_dir=directory, resume=True, progress=False)
+            self.assertEqual(resumed, initial)
+            path = Path(directory) / 'capacity__cache.json'
+            for changed in ('parameters', 'version', 'evidence', 'rejection_kind'):
+                with self.subTest(changed=changed):
+                    stale = json.loads(json.dumps(initial[0]))
+                    if changed == 'parameters':
+                        stale['parameters']['prompt'] = 16
+                    elif changed == 'version':
+                        stale['point_result_version'] = study.POINT_RESULT_VERSION - 1
+                    elif changed == 'evidence':
+                        stale['capacity_failure'] = None
+                    else:
+                        stale['mode'] = 'configuration_rejected'
+                    path.write_text(json.dumps(stale), encoding='utf-8')
+                    with mock.patch.object(study, 'run_case', wraps=study.run_case) as execute:
+                        refreshed = study.study_cases(cases, point_cache_dir=directory, resume=True, progress=False)
+                    self.assertEqual(execute.call_count, 1)
+                    self.assertEqual(refreshed, initial)
+
     def test_named_architecture_and_context_extension(self):
         eight=study.build_study_scenario('A_hbm_only',model_id='llama3_1-8b',prompt=2048)
         seventy=study.build_study_scenario('B_all_kv_hbf',model_id='llama3_1-70b',prompt=1048576)

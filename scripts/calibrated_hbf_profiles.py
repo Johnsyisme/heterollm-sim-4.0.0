@@ -651,7 +651,6 @@ def _full_backend_scenario(
     interconnect_bandwidth_gbps: Optional[float] = None,
     interconnect_latency_ns: Optional[float] = None,
     cim_mode: str = "disabled",
-    hbm_execution_mode: str = "aggregate",
 ):
     """Build a small continuous-batching scenario on the real V4 backend.
 
@@ -671,8 +670,6 @@ def _full_backend_scenario(
         interconnect_latency_ns=interconnect_latency_ns,
         cim_mode=cim_mode,
     )
-    if hbm_execution_mode not in {"aggregate", "physical"}:
-        raise ValueError("hbm_execution_mode must be aggregate or physical")
     if request_count < 1 or prompt_tokens < 1 or output_tokens < 1:
         raise ValueError("request_count, prompt_tokens and output_tokens must be positive")
     bw = profile.bandwidth
@@ -775,8 +772,8 @@ def _full_backend_scenario(
             "physical_memory_config": hbf_physical,
             # HBF is an active, writable, directly exposed device buffer in
             # this probe.  This is what makes _add_kv_access use
-            # endpoint_service/PhysicalService rather than the DRAM-only
-            # aggregate planner path.
+            # endpoint_service/PhysicalService and the NAND core rather than
+            # being treated as a DRAM profile.
             "access_mode": "memory",
             "writable": True,
             "read_only": False,
@@ -817,7 +814,7 @@ def _full_backend_scenario(
                 "interconnect_bandwidth_gbps": backend_policy.interconnect_bandwidth_gbps,
                 "interconnect_latency_ns": backend_policy.interconnect_latency_ns,
                 "cim_mode": backend_policy.cim_mode,
-                "hbm_execution_mode": hbm_execution_mode,
+                "hbm_backend": "DramCore",
             },
         },
         require_connected=False,
@@ -848,21 +845,6 @@ def _full_backend_scenario(
         read_bandwidth_gb_s=hbm_read,
         write_bandwidth_gb_s=hbm_write,
         measured_effective_bandwidth_gb_s=None,
-    )
-    hbm_component = next(
-        component for component in hardware.components if component.component_id == "hbm0"
-    )
-    hardware = replace(
-        hardware,
-        components=tuple(
-            replace(
-                component,
-                metadata={**component.metadata, "memory_execution_mode": hbm_execution_mode},
-            )
-            if component.component_id == hbm_component.component_id
-            else component
-            for component in hardware.components
-        ),
     )
     gpu_profile_id = gpu0.cost_profile_id
     gpu_profile = component_profiles["gpu"].get(gpu_profile_id)
@@ -995,7 +977,6 @@ def _full_backend_summary(
     interconnect_bandwidth_gbps: Optional[float] = None,
     interconnect_latency_ns: Optional[float] = None,
     cim_mode: str = "disabled",
-    hbm_execution_mode: str = "aggregate",
 ) -> dict[str, Any]:
     """Run the calibrated profile through the full GPU/serving backend."""
 
@@ -1019,7 +1000,6 @@ def _full_backend_summary(
         interconnect_bandwidth_gbps=interconnect_bandwidth_gbps,
         interconnect_latency_ns=interconnect_latency_ns,
         cim_mode=cim_mode,
-        hbm_execution_mode=hbm_execution_mode,
     )
     result = run_scenario(scenario)
     report = report_dict(result)
@@ -1083,7 +1063,7 @@ def _full_backend_summary(
                 if profile.hardware.get("gpu_count", 1) > 1 else None
             ),
         },
-        "hbm_execution_mode": hbm_execution_mode,
+        "hbm_backend": "DramCore",
         "summary": {
             "makespan_ns": summary.get("makespan_ns"),
             "completed_requests": summary.get("completed_requests"),
@@ -1406,7 +1386,8 @@ def build_report() -> dict[str, Any]:
         "limitations": [
             "The physical micro-profile does not include GPU compute or continuous batching; the separate full_backend result uses the V4 GPU/operator/CPU/scheduler path and reports grouped resource utilization.",
             "CIM is explicitly disabled for the calibrated memory-tier probe; enabling it remains a separate experiment because the papers do not provide a matching CIM workload or calibration.",
-            "HBM full-backend execution defaults to the aggregate service envelope; hbm_execution_mode=physical remains an explicit diagnostic mode.",
+            "All HBM accesses use DramCore physical transactions; no aggregate-service execution mode is available.",
+            "GPU compute and launch overhead retain the existing analytical operator/resource models; removing the HBM memory-service bypass does not make GPU execution cycle-accurate.",
             "HBF Sucks TokenSim traces, near-tier capacity tradeoff, queueing and SLO goodput are not reproduced.",
             "Hot-Cold original agent trajectories and simulator are not public; the block-fetch run is a mechanism check only.",
             "HBF+ serving retains an extra HBM support tier; it is a synthetic KV-placement probe, not the paper's HBF-only package.",

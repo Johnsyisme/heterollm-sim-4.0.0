@@ -36,3 +36,12 @@ def test_unaligned_write_chunks_fit_rounded_buffer_budget():
     assert result["logical_bytes"] == 4096
     assert result["host_transfer_bytes"] == 8192
     assert result["write_buffer_peak_bytes"] <= 4096
+
+
+def test_serial_write_chunks_do_not_add_admission_peaks():
+    executor, page = _executor()
+    result = executor.write_page(page, arrival_ns=1000.0)
+    assert result["host_admission_samples"] == 4
+    assert result["host_outstanding_at_admission_peak"] == 1
+    assert result["host_write_outstanding_at_admission_peak"] == 1
+    assert result["host_read_outstanding_at_admission_peak"] == 0

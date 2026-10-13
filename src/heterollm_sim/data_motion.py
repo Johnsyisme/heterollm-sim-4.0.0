@@ -313,7 +313,13 @@ class PhysicalRuntimeContext:
                 continue
             active.clock_ns = state["clock_ns"]
             active.core.__dict__.clear()
-            active.core.__dict__.update(state["core"])
+            # Restored live state must not become the rollback point itself.
+            # Otherwise another submission mutates the saved bank rows,
+            # staged pages or thermal state and a second restore is partial.
+            active.core.__dict__.update({
+                key: value if key == "config" else copy.deepcopy(value)
+                for key, value in state["core"].items()
+            })
             active.core.timeline = self.timeline
         for owner, allocations in snapshot.get("allocator_state", {}).items():
             allocator = self.allocators.get(owner)
@@ -326,12 +332,12 @@ class PhysicalRuntimeContext:
             target = getattr(timeline, name)
             target.clear()
             target.update(timeline_state[name])
-        timeline._intervals = timeline_state["_intervals"]
+        timeline._intervals = copy.deepcopy(timeline_state["_intervals"])
         timeline._interval_limit = timeline_state["_interval_limit"]
         timeline._interval_count = timeline_state["_interval_count"]
         timeline._intervals_truncated = timeline_state["_intervals_truncated"]
-        timeline._touched = timeline_state["_touched"]
-        timeline._interval_payloads = timeline_state["_interval_payloads"]
+        timeline._touched = set(timeline_state["_touched"])
+        timeline._interval_payloads = copy.deepcopy(timeline_state["_interval_payloads"])
         timeline.lane_available.clear()
         timeline.lane_available.update({
             resource: list(lanes)
@@ -580,6 +586,27 @@ def resolve_physical_task(
     *,
     _caller_managed_transaction: bool = False,
 ) -> TaskSpec:
+    """Commit a physical task atomically, including allocation and billing.
+
+    The event kernel already owns a wider transaction. Standalone callers
+    need the rollback point before allocation registration, and protection
+    through construction of the final resource demands.
+    """
+    if _caller_managed_transaction:
+        return _resolve_physical_task(task, runtime, arrival_ns)
+    snapshot = runtime.snapshot()
+    try:
+        return _resolve_physical_task(task, runtime, arrival_ns)
+    except Exception:
+        runtime.restore(snapshot)
+        raise
+
+
+def _resolve_physical_task(
+    task: TaskSpec,
+    runtime: PhysicalRuntimeContext,
+    arrival_ns: float,
+) -> TaskSpec:
     """Commit one physical task at its event-kernel arrival time.
 
     Planner pricing remains a preview.  This function is the single formal
@@ -718,7 +745,6 @@ def resolve_physical_task(
         for owner, endpoints in endpoints_by_owner.items()
     }
 
-    snapshot = None if _caller_managed_transaction else runtime.snapshot()
     placeholder_ids = set()
     for access, _op, _address, _bytes, _owner, _config in validated:
         for key in ("resource_id", "physical_resource_id", "physical_owner"):
@@ -727,9 +753,8 @@ def resolve_physical_task(
                 placeholder_ids.add(str(value))
     results = []
     resolved_accesses = []
-    try:
-      index = 0
-      while index < len(validated):
+    index = 0
+    while index < len(validated):
         access, operation, address, byte_count, owner, access_config = validated[index]
         active = runtime.runtime(access_config, owner)
         stop = index + 1
@@ -774,11 +799,7 @@ def resolve_physical_task(
                 write_completion[owner].update(addr, count, result.completion_ns)
             resolved_accesses.append({**dict(access), "address": addr})
         index = stop
-      completion_ns = max(item.completion_ns for item in results)
-    except Exception:
-        if snapshot is not None:
-            runtime.restore(snapshot)
-        raise
+    completion_ns = max(item.completion_ns for item in results)
     result = max(results, key=lambda item: item.completion_ns)
     counters = dict(result.counters)
     resource_busy = {}
@@ -847,11 +868,14 @@ def resolve_physical_task(
             "read_operations", "program_operations", "rmw_read_operations",
             "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
             "host_transfer_bytes", "internal_transfer_bytes",
+            "write_buffer_wait_ns", "write_buffer_bytes", "merge_bytes",
+            "staging_read_hits", "staging_read_merges", "staging_write_pages",
+            "merged_pages", "auto_drain_physical_programs",
         ):
             value = item.counters.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 row[key] = row.get(key, 0) + value
-        for key in ("host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
+        for key in ("write_buffer_peak_bytes", "host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
                     "host_write_outstanding_at_admission_peak"):
             value = item.counters.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -871,6 +895,9 @@ def resolve_physical_task(
         "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
         "row_hits", "row_misses", "row_conflicts", "read_write_switches",
         "queue_wait_ns", "refresh_wait_ns", "turnaround_wait_ns",
+        "write_buffer_wait_ns", "write_buffer_bytes", "merge_bytes",
+        "staging_read_hits", "staging_read_merges", "staging_write_pages",
+        "merged_pages", "auto_drain_physical_programs",
     ):
         if key == "physical_bytes":
             counters[key] = sum(item.transfer_bytes for item in results)
@@ -880,7 +907,7 @@ def resolve_physical_task(
             values = [item.counters.get(key) for item in results]
             if any(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
                 counters[key] = sum(float(value or 0) for value in values)
-    for key in ("host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
+    for key in ("write_buffer_peak_bytes", "host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
                 "host_write_outstanding_at_admission_peak"):
         values = [item.counters[key] for item in results if key in item.counters]
         if values:
@@ -896,8 +923,6 @@ def resolve_physical_task(
                     if resource_owners.get(resource) == owner)
         physical = execution["physical_bytes"]
         if physical and not moved and owner_energy[owner]:
-            if snapshot is not None:
-                runtime.restore(snapshot)
             raise ValueError("physical memory energy requires resource byte accounting")
         if moved and moved != physical:
             energy_rates[owner] *= physical / moved
@@ -1295,11 +1320,6 @@ class PhysicalService:
             _non_negative_int(page_offset_bytes, "page_offset_bytes")
         if not isinstance(summary_only, bool):
             raise TypeError("summary_only must be a boolean")
-        aggregate_mode = (
-            str(self.component.metadata.get("memory_execution_mode", "physical"))
-            .strip().lower()
-            == "aggregate"
-        )
         if page_offset_bytes is None and self.component is not None:
             page_offset_bytes = self.component.metadata.get("memory_access_offset_bytes")
             if page_offset_bytes is not None:
@@ -1308,39 +1328,6 @@ class PhysicalService:
         if (byte_count and kind is not AccessKind.ERASE and bandwidth <= 0
                 and not (self.component is not None and self.component.metadata.get("physical_memory_config") is not None)):
             raise ValueError(f"storage service {self.service_id} requires a positive {kind.value.lower()} bandwidth")
-        if aggregate_mode:
-            if kind is AccessKind.ERASE:
-                raise ValueError("aggregate memory service does not support ERASE operations")
-            billed = memory_service(
-                read_bytes=byte_count if read else 0,
-                write_bytes=byte_count if not read else 0,
-                bandwidth_gb_s=min(self.read_bandwidth_gb_s, self.write_bandwidth_gb_s),
-                read_bandwidth_gb_s=self.read_bandwidth_gb_s,
-                write_bandwidth_gb_s=self.write_bandwidth_gb_s,
-                read_latency_ns=self.read_latency_ns,
-                write_latency_ns=self.write_latency_ns,
-                transaction_bytes=self.transaction_granularity,
-                max_outstanding_requests=self.queue_depth,
-                parallel_lanes=self.parallel_lanes,
-                service_model=service_model or self.service_model,
-            )
-            return {
-                **billed,
-                "actual_bandwidth_gb_s": (
-                    billed["logical_bytes"] / billed["service_ns"]
-                    if billed["service_ns"] else 0.0
-                ),
-                "operation": kind.value.lower(),
-                "timing_model": "aggregate_service_v1",
-                "energy_pj": 0.0,
-                "pages_touched": 0,
-                "arrival_ns": 0.0 if arrival_ns is None else float(arrival_ns),
-                "completion_ns": (
-                    (0.0 if arrival_ns is None else float(arrival_ns))
-                    + float(billed["service_ns"])
-                ),
-                "write_completion": "service_complete" if not read else "n/a",
-            }
         # The component configuration is the single physical transaction contract.
         # and therefore gets explicit array and data-path stages.
         if self.component is not None and self.component.metadata.get("physical_memory_config") is not None:
@@ -1434,64 +1421,6 @@ class PhysicalService:
             raise ValueError("price_batch requires a physical memory component")
         from .physical_contract import require_physical_memory_config
         config = require_physical_memory_config(self.component)
-        aggregate_mode = (
-            str(self.component.metadata.get("memory_execution_mode", "physical"))
-            .strip().lower()
-            == "aggregate"
-        )
-        if aggregate_mode:
-            batch_requests = tuple(requests)
-            read_bytes = 0
-            write_bytes = 0
-            for item in batch_requests:
-                operation = str(item.get("operation", "")).lower()
-                byte_count = item.get("byte_count")
-                if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count < 0:
-                    raise ValueError("aggregate batch byte_count must be a non-negative integer")
-                if operation == "read":
-                    read_bytes += byte_count
-                elif operation == "write":
-                    write_bytes += byte_count
-                else:
-                    raise ValueError("aggregate memory service supports read and write only")
-            billed = memory_service(
-                read_bytes=read_bytes,
-                write_bytes=write_bytes,
-                bandwidth_gb_s=min(self.read_bandwidth_gb_s, self.write_bandwidth_gb_s),
-                read_bandwidth_gb_s=self.read_bandwidth_gb_s,
-                write_bandwidth_gb_s=self.write_bandwidth_gb_s,
-                read_latency_ns=self.read_latency_ns,
-                write_latency_ns=self.write_latency_ns,
-                transaction_bytes=self.transaction_granularity,
-                max_outstanding_requests=self.queue_depth,
-                parallel_lanes=self.parallel_lanes,
-                service_model=self.service_model,
-            )
-            return {
-                "model": "aggregate_service_v1",
-                "requests": tuple(),
-                "request_count": len(batch_requests),
-                "logical_bytes": billed["logical_bytes"],
-                "physical_bytes": billed["physical_bytes"],
-                "host_transfer_bytes": billed["physical_bytes"],
-                "internal_transfer_bytes": 0,
-                "physical_read_bytes": billed["physical_read_bytes"],
-                "physical_write_bytes": billed["physical_write_bytes"],
-                "pages_read": 0,
-                "pages_programmed": 0,
-                "erase_operations": 0,
-                "queue_wait_ns": 0.0,
-                "write_buffer_wait_ns": 0.0,
-                "write_buffer_bytes": 0,
-                "write_buffer_peak_bytes": 0,
-                "service_ns": billed["service_ns"],
-                "end_ns": float(start_ns) + float(billed["service_ns"]),
-                "actual_bandwidth_gb_s": (
-                    billed["logical_bytes"] / billed["service_ns"]
-                    if billed["service_ns"] else 0.0
-                ),
-                "bandwidth_ceiling_gb_s": billed["bandwidth_gb_s"],
-            }
         if self.component is not None and self.component.metadata.get("physical_memory_config") is not None:
             from .memory_types import AccessRequest, Operation
             explicit_context = runtime or (state if isinstance(state, PhysicalRuntimeContext) else None)
@@ -1831,13 +1760,9 @@ def expand_access(
             page_offset_bytes=position.offset_bytes,
         )
         metadata: dict[str, Any] = {}
-        aggregate_mode = (
-            service.component is not None
-            and str(service.component.metadata.get("memory_execution_mode", "physical")).strip().lower() == "aggregate"
-        )
         raw_config = (
             service.component.metadata.get("physical_memory_config")
-            if service.component is not None and not aggregate_mode
+            if service.component is not None
             else None
         )
         if raw_config is not None:
@@ -1968,10 +1893,8 @@ def endpoint_service(
         address = component.metadata.get("memory_access_offset_bytes")
     from .physical_contract import require_physical_memory_config
     require_physical_memory_config(component)
-    aggregate_mode = str(component.metadata.get("memory_execution_mode", "physical")).strip().lower() == "aggregate"
     if address is None:
-        if not aggregate_mode:
-            raise ValueError("physical_memory_config requires an explicit memory address")
+        raise ValueError("physical_memory_config requires an explicit memory address")
     if address is not None:
         _non_negative_int(address, "memory access address")
     op_name = ("read" if read else "write") if operation is None else str(operation).lower()
@@ -1991,7 +1914,7 @@ def endpoint_service(
         preview=preview,
         summary_only=compact_preview,
     )
-    if compact_preview and runtime is None and component.metadata.get("physical_memory_config") is not None and not aggregate_mode:
+    if compact_preview and runtime is None and component.metadata.get("physical_memory_config") is not None:
         # Planner-authored endpoint tasks only need scalar preview counters.
         # The event kernel resolves the physical descriptor again at dispatch,
         # where the complete interval/payload trace is attached to the result.
@@ -2031,13 +1954,12 @@ def endpoint_service(
             "access_kind": op_name.upper(),
             "timing_evidence": "ANALYTICAL",
         }
-    if not aggregate_mode:
-        endpoint_metadata.update({
-            "physical_memory_config": component.metadata.get("physical_memory_config"),
-            "physical_execution": dict(billed),
-            "physical_execution_role": "construction_preview" if runtime is None else "runtime_dispatch",
-        })
-    if component.metadata.get("physical_memory_config") is not None and not aggregate_mode:
+    endpoint_metadata.update({
+        "physical_memory_config": component.metadata.get("physical_memory_config"),
+        "physical_execution": dict(billed),
+        "physical_execution_role": "construction_preview" if runtime is None else "runtime_dispatch",
+    })
+    if component.metadata.get("physical_memory_config") is not None:
         endpoint_metadata["memory_access"] = {
             "operation": op_name,
             "address": address,

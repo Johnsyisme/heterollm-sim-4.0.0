@@ -67,7 +67,15 @@ def _mapping_cycle(lanes, banks, groups, banks_per_group, inner,
 
 
 class DramCore:
-    """Generate DRAM array and burst stages on a caller-owned time line."""
+    """Generate reduced DRAM array/burst stages on a shared time line.
+
+    Banks retain one open row. PRE/ACT occupy the bank; column commands occupy
+    the lane's command resource, and full bursts occupy its directional data
+    resource. This is not a full JEDEC command scheduler: PRE/ACT do not also
+    reserve command slots, and refresh, tFAW/tRRD/tRAS and bank-group-specific
+    timing constraints are outside this model. Requests retain submission
+    order at admission and resource calendars; no FR-FCFS reordering is used.
+    """
 
     def __init__(
         self,
@@ -111,8 +119,6 @@ class DramCore:
         return self.submit(request)
 
     def submit(self, request: AccessRequest) -> TransactionResult:
-        if request.operation is Operation.ERASE:
-            raise ValueError("DRAM does not support ERASE operations")
         validate_dram_request(request, self.config)
         effective_arrival = max(request.arrival_ns, self._acceptance_ns)
         inflight = [end for end in self._inflight if end > effective_arrival]
@@ -142,8 +148,6 @@ class DramCore:
         """Execute the same ordered requests, amortizing numeric state packing."""
         items = tuple(requests)
         for request in items:
-            if request.operation is Operation.ERASE:
-                raise ValueError("DRAM does not support ERASE operations")
             validate_dram_request(request, self.config)
         if len(items) > 1 and self._can_accelerate():
             from ._compiled_dram import execute_compiled_many

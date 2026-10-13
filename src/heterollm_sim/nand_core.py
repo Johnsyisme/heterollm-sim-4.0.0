@@ -82,7 +82,7 @@ class NandCore:
 
     @property
     def pending_write_buffer_bytes(self) -> int:
-        """Bytes currently held in the opt-in host staging buffer."""
+        """Dirty host payload awaiting flush, excluding scheduled media drains."""
 
         return int(self._write_buffer_occupancy if self._buffered_write_mode else 0)
 
@@ -91,6 +91,15 @@ class NandCore:
         """Number of dirty physical pages awaiting a media program."""
 
         return len(self._staged_pages)
+
+    @property
+    def inflight_write_buffer_bytes(self) -> int:
+        """Draining bytes at the last admission or explicit flush timestamp."""
+
+        return sum(byte_count for _release_ns, byte_count in self._write_buffer_pending) if self._buffered_write_mode else 0
+
+    def _held_write_buffer_bytes(self) -> int:
+        return self._write_buffer_occupancy + self.inflight_write_buffer_bytes
 
     def _array_id(self, mapping) -> str:
         prefix = str(self.config.metadata.get("array_resource_prefix", "nand:array"))
@@ -114,9 +123,10 @@ class NandCore:
     def _bandwidth_ceiling_gb_s(self, operation: Optional[Operation | str] = None) -> float:
         """Return the end-to-end payload ceiling for the NAND data path.
 
-        A request crosses both the host link and the NAND internal channel.
-        The slower leg is therefore the ceiling exposed to reports.  The
-        reservation timeline still models each leg separately; this helper
+        The device has one host link and independent internal channels. The
+        smaller of host and summed channel bandwidth is the transfer ceiling;
+        a request touching fewer channels or paying array latency can be slower.
+        The reservation timeline still models each leg separately; this helper
         only fixes the derived bottleneck/utilization metric.
         """
         # Keep the no-operation form as the legacy aggregate ceiling used by
@@ -126,7 +136,7 @@ class NandCore:
             if operation is None
             else self.config.host_bandwidth_for(operation)
         )
-        return min(host_bandwidth, float(self.config.internal_bandwidth_gb_s))
+        return min(host_bandwidth, self.config.channels * float(self.config.internal_bandwidth_gb_s))
 
     def _array_stage(self, name: str, resource: str, earliest: float, duration: float, bytes: int = 0) -> StageTiming:
         reservation = self.timeline.reserve(resource, earliest, duration)
@@ -248,7 +258,8 @@ class NandCore:
             else:
                 retained.append((release_ns, byte_count))
         if released:
-            self._write_buffer_occupancy = max(0, self._write_buffer_occupancy - released)
+            if not self._buffered_write_mode:
+                self._write_buffer_occupancy = max(0, self._write_buffer_occupancy - released)
             self._write_buffer_pending = retained
 
     def _admit_write_buffer(
@@ -264,6 +275,7 @@ class NandCore:
             if self._buffered_write_mode and request.operation is Operation.ERASE and self._staged_pages:
                 drained = self.flush(now_ns=effective_arrival)
                 arrival = max(effective_arrival, drained["media_drain_completion_ns"])
+                self._release_write_buffer(arrival)
                 return arrival, 0, arrival - effective_arrival, drained
             self._release_write_buffer(effective_arrival)
             return effective_arrival, 0, 0.0, {}
@@ -280,14 +292,23 @@ class NandCore:
             # automatic drain.  A full buffer therefore stalls admission at
             # the media-drain completion point instead of pretending that a
             # host acknowledgement freed the bytes.
-            while self._write_buffer_occupancy + payload_bytes > capacity:
-                drained = self.flush(now_ns=effective_arrival)
-                for key in ("physical_programs", "physical_write_bytes", "pages_read", "physical_read_bytes", "internal_transfer_bytes"):
-                    drain_counters[key] = drain_counters.get(key, 0) + drained.get(key, 0)
-                drain_end = float(drained.get("media_drain_completion_ns", effective_arrival))
-                if drain_end <= effective_arrival and self._write_buffer_occupancy:
-                    raise RuntimeError("write buffer occupancy cannot be drained")
-                effective_arrival = max(effective_arrival, drain_end)
+            self._release_write_buffer(effective_arrival)
+            while self._held_write_buffer_bytes() + payload_bytes > capacity:
+                if self._staged_pages:
+                    drained = self.flush(now_ns=effective_arrival)
+                    for key in ("physical_programs", "physical_write_bytes", "pages_read", "physical_read_bytes", "internal_transfer_bytes"):
+                        drain_counters[key] = drain_counters.get(key, 0) + drained.get(key, 0)
+                    effective_arrival = max(effective_arrival, float(drained["media_drain_completion_ns"]))
+                else:
+                    # Explicit flush schedules future work; its source bytes
+                    # cannot be overwritten merely because they left the
+                    # dirty-page map. Preserve the same media-complete release
+                    # contract as automatic draining and write-through staging.
+                    future = [end for end, _count in self._write_buffer_pending if end > effective_arrival]
+                    if not future:
+                        raise RuntimeError("write buffer occupancy cannot be drained")
+                    effective_arrival = min(future)
+                self._release_write_buffer(effective_arrival)
             return effective_arrival, payload_bytes, max(0.0, effective_arrival - initial_arrival), drain_counters
         while True:
             self._release_write_buffer(effective_arrival)
@@ -322,6 +343,11 @@ class NandCore:
         observation_start = len(self._observation_events)
         if now_ns is not None and (isinstance(now_ns, bool) or not isfinite(now_ns) or now_ns < 0):
             raise ValueError("now_ns must be finite and non-negative")
+        if now_ns is not None:
+            # An explicit clock advance releases completed drains, and later
+            # submissions cannot travel back before that observed instant.
+            self._acceptance_ns = max(self._acceptance_ns, float(now_ns))
+            self._release_write_buffer(self._acceptance_ns)
         if not self._buffered_write_mode:
             return {
                 "buffered_write_mode": False,
@@ -346,7 +372,8 @@ class NandCore:
                 "physical_programs": 0,
                 "physical_write_bytes": 0,
                 "media_drain_start_ns": value,
-                "media_drain_completion_ns": value,
+                "media_drain_completion_ns": max(value, max(
+                    (end for end, _count in self._write_buffer_pending), default=value)),
                 "write_completion": "media_program_complete",
             }
         cursor = float(
@@ -394,11 +421,13 @@ class NandCore:
             physical_write_bytes += self.config.page_bytes
             internal_transfer_bytes += internal.bytes
             host_bytes += staged.host_bytes
+            self._write_buffer_pending.append((program.end_ns, staged.host_bytes))
         merge_bytes = int(self._buffer_merge_bytes)
         flushed_pages = len(self._staged_pages)
         self._staged_pages.clear()
         self._buffer_merge_bytes = 0
         self._write_buffer_occupancy = 0
+        cursor = max(cursor, max((end for end, _count in self._write_buffer_pending), default=cursor))
         return {
             "buffered_write_mode": True,
             "flushed_pages": flushed_pages,
@@ -406,6 +435,7 @@ class NandCore:
             "physical_programs": physical_programs,
             "physical_write_bytes": physical_write_bytes,
             "pages_read": pages_read,
+            "rmw_read_operations": pages_read,
             "physical_read_bytes": pages_read * self.config.page_bytes,
             "host_transfer_bytes": host_bytes,
             "internal_transfer_bytes": internal_transfer_bytes,
@@ -464,6 +494,9 @@ class NandCore:
         )
         if drained:
             counters = dict(result.counters)
+            counters["rmw_read_operations"] = (
+                counters.get("pages_read", 0) if request.operation is Operation.WRITE else 0
+            ) + drained.get("pages_read", 0)
             for key in ("physical_write_bytes", "physical_read_bytes", "pages_read", "internal_transfer_bytes"):
                 counters[key] = counters.get(key, 0) + drained.get(key, 0)
             counters["pages_programmed"] = counters.get("pages_programmed", 0) + drained.get("physical_programs", 0)
@@ -474,8 +507,8 @@ class NandCore:
             "pages_touched": result.counters.get("page_count", 0),
             "read_operations": result.counters.get("pages_read", 0),
             "program_operations": result.counters.get("pages_programmed", 0),
-            "rmw_read_operations": (result.counters.get("pages_read", 0)
-                                    if request.operation is Operation.WRITE else 0),
+            "rmw_read_operations": result.counters.get("rmw_read_operations",
+                result.counters.get("pages_read", 0) if request.operation is Operation.WRITE else 0),
             "page_access_payload_bytes": request.byte_count if request.operation is not Operation.ERASE else 0,
             "page_access_capacity_bytes": (result.counters.get("page_count", 0) * self.config.page_bytes
                                             if request.operation is not Operation.ERASE else 0),
@@ -485,8 +518,9 @@ class NandCore:
             "queue_wait_ns": effective_arrival - request.arrival_ns,
             "write_buffer_wait_ns": write_buffer_wait_ns,
             "write_buffer_bytes": write_buffer_bytes,
-            "write_buffer_occupancy_bytes": self._write_buffer_occupancy + write_buffer_bytes,
-            "write_buffer_peak_bytes": self._write_buffer_occupancy + write_buffer_bytes,
+            "write_buffer_occupancy_bytes": self._held_write_buffer_bytes() + write_buffer_bytes,
+            "write_buffer_peak_bytes": self._held_write_buffer_bytes() + write_buffer_bytes,
+            "write_buffer_draining_bytes": self.inflight_write_buffer_bytes,
             "buffered_write_mode": self._buffered_write_mode,
             **self.timeline.metrics_delta(before_metrics),
             **self._observations(),
@@ -534,6 +568,7 @@ class NandCore:
         merged_pages = 0
         staging_write_pages = 0
         staging_read_hits = 0
+        staging_read_merges = 0
         for segment in segments:
             segment_count += 1
             if segment_count > self.config.max_expanded_segments and not details_truncated:
@@ -629,9 +664,18 @@ class NandCore:
                     direction="read",
                 )
                 record(StageTiming("INTERNAL_TRANSFER", internal.start_ns, internal.end_ns, internal.resource_id, internal.bytes))
+                host_ready = internal.end_ns
+                if staged is not None and any(left < logical_end and logical_start < right
+                                              for left, right in staged.ranges):
+                    # A partial staging hit still reads old media for the
+                    # untouched bytes, then overlays dirty host bytes. With
+                    # multiple host lanes, bus contention alone cannot enforce
+                    # that the earlier write's payload has actually arrived.
+                    host_ready = max(host_ready, staged.ready_ns)
+                    staging_read_merges += 1
                 host = self.timeline.transfer(
                     self._host_id(), segment.host_transfer_bytes,
-                    internal.end_ns, self.config.host_bandwidth_for(Operation.READ),
+                    host_ready, self.config.host_bandwidth_for(Operation.READ),
                     direction="read",
                 )
                 record(StageTiming("HOST_TRANSFER", host.start_ns, host.end_ns, host.resource_id, host.bytes))
@@ -679,10 +723,20 @@ class NandCore:
                 "merged_pages": merged_pages,
                 "staging_write_pages": staging_write_pages,
                 "staging_read_hits": staging_read_hits,
+                "staging_read_merges": staging_read_merges,
                 "erase_operations": erases,
                 "page_count": segment_count,
                 "details_truncated": details_truncated,
-                "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(request.operation),
+                "bandwidth_ceiling_gb_s": (
+                    self.config.host_bandwidth_for(request.operation)
+                    if staging_write_pages or staging_read_hits
+                    else self._bandwidth_ceiling_gb_s(request.operation)
+                ),
+                "bandwidth_ceiling_scope": (
+                    "directional host upper bound for transactions using staging; host acknowledgement is not media drain"
+                    if staging_write_pages or staging_read_hits
+                    else "device transfer upper bound: min(directional host, summed independent channels); excludes array latency"
+                ),
                 "array_units": self.config.array_units,
                 "write_completion": (
                     "host_buffer_ack_pending_media_drain"
@@ -746,6 +800,7 @@ class NandCore:
                 "details_truncated": page_count > self.config.max_expanded_segments,
                 "accelerated_pages": accelerated_pages,
                 "bandwidth_ceiling_gb_s": self._bandwidth_ceiling_gb_s(request.operation),
+                "bandwidth_ceiling_scope": "device transfer upper bound: min(directional host, summed independent channels); excludes array latency",
                 "array_units": self.config.array_units,
                 "write_completion": "media_program_complete" if request.operation is Operation.WRITE else "n/a",
             },
@@ -757,10 +812,10 @@ class NandCore:
     def run(self, requests: Iterable[AccessRequest]):
         """Execute a batch and return one aggregate with achieved bandwidth."""
         from .memory_transfer import summarize_batch
-        return summarize_batch(
-            self.execute_batch(requests),
-            bandwidth_ceiling_gb_s=self._bandwidth_ceiling_gb_s(),
-        )
+        results = self.execute_batch(requests)
+        return summarize_batch(results, bandwidth_ceiling_gb_s=max(
+            (result.bandwidth_ceiling_gb_s for result in results),
+            default=self._bandwidth_ceiling_gb_s()))
 
 
 def nand_service(config: NandConfig, request: AccessRequest, *, timeline: Optional[ResourceTimeline] = None) -> TransactionResult:

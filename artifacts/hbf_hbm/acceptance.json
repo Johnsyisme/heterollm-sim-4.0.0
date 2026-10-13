@@ -514,13 +514,34 @@
       "id": "backend_policy_sensitivity",
       "passed": true,
       "metrics": {
-        "aggregate_hbm_mode": "aggregate",
-        "gpu_reference_makespan_ns": 398192.56746666663,
-        "gpu_override_makespan_ns": 406161.89055806934,
-        "host_scaled_makespan_ns": 437799.2150968749,
-        "hbf_slow_link_makespan_ns": 1355018.8583009525,
-        "physical_hbm_task_count": 160,
-        "aggregate_hbm_task_count": 12
+        "hbm_backend": "DramCore",
+        "gpu_reference_makespan_ns": 244999.76446333298,
+        "gpu_override_makespan_ns": 269049.5439499841,
+        "host_scaled_makespan_ns": 307792.014463555,
+        "hbf_slow_link_makespan_ns": 1202040.5752959566,
+        "live_hbm_core_observations": [
+          {
+            "physical_owner": "hbm0.hbm_fabric",
+            "core": "DramCore",
+            "memory_kind": "HBM",
+            "entrypoint_calls": {
+              "submit": 360
+            },
+            "transactions": 360,
+            "logical_read_bytes": 90602649,
+            "logical_write_bytes": 812520,
+            "physical_read_bytes": 90603584,
+            "physical_write_bytes": 814144,
+            "transfer_bytes": 91417728,
+            "burst_count": 1428402,
+            "pages_read": 0,
+            "pages_programmed": 0,
+            "erase_operations": 0,
+            "first_arrival_ns": 10939.542208333332,
+            "last_completion_ns": 252403.28646333297
+          }
+        ],
+        "physical_dram_task_count": 160
       }
     },
     {
@@ -2011,6 +2032,7 @@
   "external_validation": "pending_external_measurements",
   "limitations": [
     "Serving coverage uses a tiny synthetic scheduler workload; it does not claim calibrated LLM token throughput.",
+    "HBM memory accesses execute DramCore transactions; GPU compute and launch overhead retain the existing analytical operator/resource models, not cycle-accurate GPU execution.",
     "Prefetch is modeled as fixed token lookahead rounded to pages in paged-pool serving; no predictive policy is included.",
     "Page-merge, host-ack and media-drain write-buffer semantics are enabled by the explicit buffered_write_mode metadata switch; legacy write-through remains the default.",
     "The four-slot package sweep is a coupled hypothetical budget, not commercial packaging calibration.",

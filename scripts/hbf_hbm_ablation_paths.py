@@ -91,7 +91,7 @@ def build_ablation_scenario(medium="hbf", ablation="ideal", *, batch=4, prompt=1
             "read_latency_ns":profile.read_latency_ns,"write_latency_ns":profile.write_latency_ns,
             "transfer_granularity_bytes":64,"max_outstanding_requests":profile.max_outstanding_requests,
             "parallel_lanes":profile.parallel_lanes,
-            "write_buffer_bytes":0,"memory_execution_mode":"physical"})
+            "write_buffer_bytes":0})
     if medium == "hbm":
         endpoint=replace(endpoint,ports=tuple(replace(p,protocol="HBM",role="device",version="3.0") for p in endpoint.ports))
     components = tuple(endpoint if c.component_id=="hbf0" else
