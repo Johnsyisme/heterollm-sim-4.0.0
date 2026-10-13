@@ -1,0 +1,751 @@
+"""Run small, paper-parameterized HBM/HBF comparison profiles.
+
+The profiles deliberately reuse the simulator's physical DRAM/NAND cores.  They
+do not reproduce the papers' full LLM serving simulators.  The output therefore
+contains a memory-service comparison and a separate comparability matrix instead
+of pretending that a fixed page stream is a token-throughput result.
+
+Run::
+
+    python scripts/calibrated_hbf_profiles.py --output calibrated_hbf_profiles.json
+
+Units are decimal GB/s, bytes and nanoseconds.  Paper values that are derived
+or left unspecified are labelled in the profile metadata.
+"""
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass, field
+import json
+import math
+from pathlib import Path
+import sys
+from typing import Any, Optional
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from heterollm_sim.dram_core import DramCore
+from heterollm_sim.memory_transfer import summarize_batch
+from heterollm_sim.memory_types import (
+    AccessRequest,
+    DramConfig,
+    NandConfig,
+    Operation,
+)
+from heterollm_sim.nand_core import NandCore
+
+
+GB = 1_000_000_000
+GIB = 1024 ** 3
+US = 1_000.0
+MS = 1_000_000.0
+PAGE = 16_384
+
+
+@dataclass(frozen=True)
+class CalibratedProfile:
+    profile_id: str
+    paper: str
+    source_url: str
+    source_version: str
+    hardware: dict[str, Any]
+    bandwidth: dict[str, Any]
+    latency: dict[str, Any]
+    granularity: dict[str, Any]
+    buffering: dict[str, Any]
+    slo: dict[str, Any]
+    workload: dict[str, Any]
+    calibration_notes: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _profile_specs() -> tuple[CalibratedProfile, ...]:
+    son_workload = {
+        "models": ["Llama 3 405B", "Llama 4 Maverick"],
+        "decode_workloads": {
+            "short": {"input_tokens": 1660, "output_tokens": 373},
+            "mid": {"input_tokens": 5900, "output_tokens": 499},
+            "long": {"input_tokens": 103500, "output_tokens": 1100},
+        },
+        "continuous_batching": True,
+        "parallelism": {"intra_node_nvlink_gb_s": 1800, "inter_node_ib_gb_s": 100},
+    }
+    son_common = dict(
+        paper="Exploring High-Bandwidth Flash for Modern LLM Inference",
+        source_url="https://arxiv.org/html/2608.13868v1",
+        source_version="v1",
+        latency={
+            "hbf_read_us": 1.0,
+            "hbf_write_us": 100.0,
+            "source": "paper Section III/Table I",
+        },
+        granularity={
+            "page_bytes": 4096,
+            "page_read_latency_us": 1.0,
+            "page_program_latency_us": 100.0,
+            "hbf_planes_per_core_die": 25,
+            "source": "paper Section III/Table I",
+        },
+        buffering={
+            "per_hbf_stack_sram_bytes": int(3.13 * 1024 * 1024),
+            "double_buffer": True,
+            "write_overlap": True,
+            "source": "paper Section III; represented as metadata, not a full overlap model",
+        },
+        slo={
+            "metric": "TPOT",
+            "threshold_s": 0.1,
+            "sensitivity_s": [0.05, 0.1, 0.2],
+            "offline_limit_s": 24 * 3600,
+        },
+        workload=son_workload,
+        calibration_notes=(
+            "The paper does not disclose GPU FLOPS/clock; this profile only runs the memory path.",
+            "The table's aggregate HBF bandwidth is mapped to one effective host tier; the internal leg is non-bottleneck.",
+            "HBF write bandwidth is a paper configuration assumption, not a silicon measurement.",
+        ),
+    )
+    profiles = [
+        CalibratedProfile(
+            profile_id="son_hbf",
+            hardware={
+                "gpu_count": 1,
+                "hbm_stacks": 1,
+                "hbf_stacks": 7,
+                "hbm_capacity_gb": 36,
+                "hbf_capacity_gb": 7 * 512,
+                "total_capacity_gb": 3620,
+                "hbf_sram_bytes": 7 * int(3.13 * 1024 * 1024),
+                "source": "Table I, single-GPU configuration",
+            },
+            bandwidth={
+                "hbm_read_gb_s": 1600,
+                "hbm_write_gb_s": 1600,
+                "hbf_read_gb_s": 11200,
+                "hbf_write_gb_s": 112,
+                "source": "Table I; HBF write is aggregate modeled bandwidth",
+            },
+            **son_common,
+        ),
+        CalibratedProfile(
+            profile_id="son_hbf_plus",
+            hardware={
+                "gpu_count": 1,
+                "hbm_stacks": 0,
+                "hbf_stacks": 8,
+                "hbm_capacity_gb": 0,
+                "hbf_capacity_gb": 8 * 512,
+                "total_capacity_gb": 4096,
+                "logic_sram_bytes": 40 * 1024 * 1024,
+                "hbf_sram_bytes": 8 * int(3.13 * 1024 * 1024),
+                "source": "Table I, single-GPU configuration",
+            },
+            bandwidth={
+                "hbm_read_gb_s": 0,
+                "hbm_write_gb_s": 0,
+                "hbf_read_gb_s": 12800,
+                "hbf_write_gb_s": 128,
+                "source": "Table I; HBF+ aggregate modeled bandwidth",
+            },
+            **son_common,
+        ),
+        CalibratedProfile(
+            profile_id="hbf_sucks_hbf2_b200",
+            paper="A Full-Stack Characterization of High-Bandwidth Flash for KV-Centric LLM Serving",
+            source_url="https://arxiv.org/html/2608.11668v4",
+            source_version="v4",
+            hardware={
+                "gpu_count": 8,
+                "local_tier": "B200 HBM3e",
+                "near_tier_capacity_gb_per_gpu": 96,
+                "near_tier_bandwidth_gb_s_per_gpu": 4000,
+                "secondary_tier": "HBF-2",
+                "secondary_capacity_tb": 24,
+                "secondary_bandwidth_gb_s": 1200,
+                "parallelism": "TP8, PP1, DP1",
+                "expert_parallelism": "enabled for MoE models",
+                "effective_parallel_units": 128,
+                "effective_parallel_units_source": "modeled sensitivity anchor; physical HBF channel/plane count is not disclosed",
+                "source": "Table 3(c); secondary bandwidth is one modeled tier value",
+            },
+            bandwidth={
+                "hbm_read_gb_s": 8000,
+                "hbm_write_gb_s": 8000,
+                "hbf_read_gb_s": 1200,
+                "hbf_write_gb_s": 1200,
+                "thermal_effective_cap_gb_s": 202.27,
+                "thermal_power_w": 53.72,
+                "mapping": "nominal and thermal-cap runs are separate; do not add the cap to nominal bandwidth",
+            },
+            latency={
+                "hbf_read_us": 20,
+                "hbf_write_us": 200,
+                "sweep_us_read_write": [[8, 80], [12, 120], [20, 200], [30, 300]],
+                "source": "Section 4.1/6.1; selected HBF-2 mid point",
+            },
+            granularity={
+                "read_bytes": 64,
+                "write_page_bytes": 4096,
+                "kv_block_tokens": [16, 128, 512],
+                "source": "OCP rules and Section 4.1",
+            },
+            buffering={
+                "controller_page_cache": "two page-cache buffers per bank (OCP §5.3)",
+                "thermal_throttle": True,
+                "source": "OCP/Section 8.1",
+            },
+            slo={
+                "metric": "maximum SLO goodput",
+                "threshold_s": None,
+                "offered_load_qps": [0.05, 32.0],
+                "source": "paper reports a max-goodput comparison; absolute SLO threshold is not exposed in Table 3",
+            },
+            workload={
+                "models": ["Qwen3-4B", "Qwen3-32B", "DeepSeek-V3.2-685B", "GLM-5.2-753B", "Kimi-K2.7-Code-1.1T"],
+                "trace_count": 4,
+                "trace_duration_h": 2,
+                "offered_load_qps": [0.05, 32.0],
+                "kv_block_tokens": 16,
+            },
+            calibration_notes=(
+                "Table 3(c) bandwidth is a shared secondary-tier modeled value; it is mapped to the host leg and not counted twice.",
+                "The paper supplies full TokenSim trace scheduling, near-tier capacity changes and queueing; this profile only supplies the physical memory path.",
+                "The thermal cap is reported as a separate sensitivity because it is a sustained write-heavy limit.",
+            ),
+        ),
+        CalibratedProfile(
+            profile_id="hot_cold_b200",
+            paper="Hot–Cold Tiering of HBM and High Bandwidth Flash for Agentic LLM Serving",
+            source_url="https://arxiv.org/html/2609.25782v1",
+            source_version="v1",
+            hardware={
+                "gpu_count": 1,
+                "gpu": "B200",
+                "compute_pflops": 2.25,
+                "hbm_capacity_gib": 192,
+                "hbf_capacity_tib": 3,
+                "hbf_pe_cycles": 100000,
+                "effective_parallel_units": 128,
+                "effective_parallel_units_source": "modeled sensitivity anchor; physical channel/plane count is not disclosed",
+                "source": "Section IV",
+            },
+            bandwidth={
+                "hbm_read_gb_s": 8000,
+                "hbm_write_gb_s": 8000,
+                "hbf_read_gb_s": 8000,
+                "hbf_write_gb_s": None,
+                "hbf_bandwidth_basis": "matching HBM; write bandwidth not separately disclosed",
+            },
+            latency={
+                "hbf_read_us": 25,
+                "resume_overhead_us_paper": 84,
+                "source": "Section IV; resume overhead at N_a=48",
+            },
+            granularity={
+                "kv_block_bytes": int(1.5 * 1024 * 1024),
+                "kv_block_tokens": "approximately 16-token hash block is not used; 1.5 MiB is the paper's migration block",
+                "physical_page_bytes": None,
+                "source": "Section IV; physical NAND page geometry is not disclosed",
+            },
+            buffering={
+                "base_die_double_buffer": True,
+                "write_policy": "write-on-evict",
+                "prefetch": "one step ahead on resume/decode",
+                "waf": 1.02,
+                "source": "Section III/IV",
+            },
+            slo={
+                "metric": "time-between-tokens",
+                "tbt_s": 0.014,
+                "resume_s": 0.000084,
+                "slo_tbt_s": 0.050,
+                "active_sessions": [8, 48, 128],
+            },
+            workload={
+                "model": "Qwen3-Coder-30B-A3B",
+                "weights_gib": 56.8,
+                "kv_bytes_per_token": 98304,
+                "peak_context_tokens": 16700,
+                "resident_agent_gib": 0.82,
+                "idle_median_s": 8,
+                "idle_mean_s": 23,
+            },
+            calibration_notes=(
+                "The 1.5 MiB block is modeled as a service granularity, not as a physical NAND page.",
+                "The paper does not disclose HBF write bandwidth, physical page/channel geometry or buffer capacity; the read-only resume run does not charge HBF writes.",
+                "Original trajectories and in-house simulator are not published, so 165-to-3900 sessions cannot be replayed here.",
+            ),
+        ),
+    ]
+    return tuple(profiles)
+
+
+def _profile_by_id(profile_id: str) -> CalibratedProfile:
+    for profile in _profile_specs():
+        if profile.profile_id == profile_id:
+            return profile
+    raise KeyError(profile_id)
+
+
+def _capacity_geometry(capacity_bytes: int, *, channels: int, page_bytes: int,
+                       pages_per_block: int = 256) -> int:
+    per_block = channels * pages_per_block * page_bytes
+    return max(1, math.ceil(capacity_bytes / per_block))
+
+
+def _make_hbm(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
+              stacks: int = 8) -> DramCore:
+    # The geometry is only needed to keep requests in range.  It is made large
+    # enough for the advertised capacity while the run itself uses tiny traffic.
+    rows = 65536
+    config = DramConfig(
+        kind="HBM",
+        channels=8,
+        pseudo_channels_per_channel=2,
+        stacks=max(1, stacks),
+        banks_per_group=8,
+        rows_per_bank=rows,
+        row_bytes=8192,
+        burst_bytes=64,
+        interface_bandwidth_gb_s=max(read_gb_s, write_gb_s, 1.0),
+        read_bandwidth_gb_s=max(read_gb_s, 1.0),
+        write_bandwidth_gb_s=max(write_gb_s, 1.0),
+        burst_interval_ns=0.0,
+        capacity_bytes=capacity_bytes,
+        metadata={"profile_kind": "calibrated_hbm"},
+    )
+    return DramCore(config, capture_details=False)
+
+
+def _make_hbf(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
+              page_bytes: int, read_latency_ns: float, program_ns: float,
+              parallel_units: int, buffered: bool = False,
+              host_granularity_bytes: Optional[int] = None) -> NandCore:
+    channels = max(1, parallel_units)
+    blocks = _capacity_geometry(capacity_bytes, channels=channels, page_bytes=page_bytes)
+    # The paper publishes one effective secondary-tier bandwidth, so the host
+    # leg carries that value and the internal leg is deliberately non-bottleneck.
+    shared = max(read_gb_s, write_gb_s, 1.0)
+    config = NandConfig(
+        kind="HBF",
+        channels=channels,
+        targets_per_channel=1,
+        dies_per_target=1,
+        luns_per_die=1,
+        planes_per_lun=1,
+        parallel_units=parallel_units,
+        blocks_per_plane=blocks,
+        pages_per_block=256,
+        page_bytes=page_bytes,
+        host_granularity_bytes=host_granularity_bytes or min(4096, page_bytes),
+        host_bandwidth_gb_s=shared,
+        host_read_bandwidth_gb_s=max(read_gb_s, 1.0),
+        host_write_bandwidth_gb_s=max(write_gb_s, 1.0),
+        internal_bandwidth_gb_s=shared * 1000.0,
+        page_read_ns=read_latency_ns,
+        page_program_ns=program_ns,
+        front_ns=0.0,
+        write_buffer_bytes=0,
+        capacity_bytes=capacity_bytes,
+        metadata={
+            "profile_kind": "calibrated_hbf",
+            "buffered_write_mode": bool(buffered),
+            "bandwidth_mapping": "effective_shared_tier_on_host_leg",
+        },
+    )
+    return NandCore(config, capture_details=False)
+
+
+def _request(core: Any, *, operation: Operation, address: int, bytes_: int,
+             arrival_ns: float, label: str):
+    return core.submit(AccessRequest(label, operation, address, bytes_, arrival_ns))
+
+
+def _stream(core_hbm: Optional[DramCore], core_hbf: Optional[NandCore], *,
+            kv_pages: int, steps: int, kv_read_tier: str,
+            kv_write_tier: str, weight_tier: str,
+            traffic_page_bytes: int = PAGE) -> dict[str, Any]:
+    cores = {"hbm": core_hbm, "hbf": core_hbf}
+    if any(cores[tier] is None for tier in {kv_read_tier, kv_write_tier, weight_tier}):
+        raise ValueError("requested tier is not present in this profile")
+    by_tier: dict[str, list[Any]] = {"hbm": [], "hbf": []}
+    clock = 0.0
+    for step in range(steps):
+        current = []
+        weight = _request(
+            cores[weight_tier], operation=Operation.READ, address=16 * PAGE,
+            bytes_=8 * traffic_page_bytes, arrival_ns=clock, label=f"weight-{step}",
+        )
+        by_tier[weight_tier].append(weight)
+        current.append(weight)
+        for page in range(kv_pages):
+            item = _request(
+                cores[kv_read_tier], operation=Operation.READ,
+                address=page * traffic_page_bytes,
+                bytes_=traffic_page_bytes,
+                arrival_ns=clock, label=f"kv-read-{step}-{page}",
+            )
+            by_tier[kv_read_tier].append(item)
+            current.append(item)
+        for page in (kv_pages - 2, kv_pages - 1):
+            item = _request(
+                cores[kv_write_tier], operation=Operation.WRITE,
+                address=page * traffic_page_bytes,
+                bytes_=traffic_page_bytes,
+                arrival_ns=clock, label=f"kv-write-{step}-{page}",
+            )
+            by_tier[kv_write_tier].append(item)
+            current.append(item)
+        clock = max(item.completion_ns for item in current)
+    logical_bytes = sum(item.logical_bytes for values in by_tier.values() for item in values)
+    tiers: dict[str, Any] = {}
+    for tier, values in by_tier.items():
+        if not values:
+            tiers[tier] = {"logical_bytes": 0, "physical_read_bytes": 0, "physical_write_bytes": 0}
+            continue
+        batch = summarize_batch(values)
+        tiers[tier] = {
+            "logical_bytes": sum(item.logical_bytes for item in values),
+            "logical_read_bytes": sum(item.logical_bytes for item in values if item.operation is Operation.READ),
+            "logical_write_bytes": sum(item.logical_bytes for item in values if item.operation is Operation.WRITE),
+            "physical_read_bytes": batch.physical_read_bytes,
+            "physical_write_bytes": batch.physical_write_bytes,
+            "queue_wait_ns": batch.queue_wait_ns,
+            "write_buffer_wait_ns": batch.write_buffer_wait_ns,
+        }
+    return {
+        "service_ns": float(clock),
+        "service_us": float(clock / US),
+        "logical_bytes": int(logical_bytes),
+        "useful_bandwidth_gb_s": float(logical_bytes / clock) if clock else None,
+        "tiers": tiers,
+        "traffic": {"kv_pages": kv_pages, "steps": steps, "page_bytes": traffic_page_bytes},
+    }
+
+
+def _profile_hardware(profile: CalibratedProfile, *, thermal: bool = False,
+                      latency_override_us: Optional[tuple[float, float]] = None) -> tuple[Optional[DramCore], Optional[NandCore], dict[str, Any]]:
+    p = profile
+    bw = p.bandwidth
+    hbf_read = float(bw.get("hbf_read_gb_s", 0) or 0)
+    hbf_write_declared = bw.get("hbf_write_gb_s")
+    hbf_write = float(hbf_write_declared or 0)
+    applied = "nominal"
+    if thermal and bw.get("thermal_effective_cap_gb_s"):
+        hbf_read = hbf_write = float(bw["thermal_effective_cap_gb_s"])
+        applied = "thermal_effective_cap"
+    hbm_read = float(bw.get("hbm_read_gb_s", 0) or 0)
+    hbm_write = float(bw.get("hbm_write_gb_s", 0) or 0)
+    hbm_cap = p.hardware.get("hbm_capacity_gb")
+    if hbm_cap is None:
+        hbm_cap = p.hardware.get("near_tier_capacity_gb_per_gpu")
+    if hbm_cap is None:
+        hbm_cap = p.hardware.get("hbm_capacity_gib")
+        if hbm_cap is not None:
+            hbm_cap = float(hbm_cap) * GIB / GB
+    hbm = None
+    if hbm_read > 0 and hbm_cap and hbm_cap > 0:
+        hbm = _make_hbm(
+            capacity_bytes=max(PAGE * 64, int(float(hbm_cap) * GB)),
+            read_gb_s=hbm_read,
+            write_gb_s=hbm_write or hbm_read,
+            stacks=int(p.hardware.get("hbm_stacks", 8) or 8),
+        )
+    hbf_cap = p.hardware.get("hbf_capacity_gb")
+    if hbf_cap is None and p.hardware.get("secondary_capacity_tb"):
+        hbf_cap = float(p.hardware["secondary_capacity_tb"]) * 1000.0
+    if hbf_cap is None and p.hardware.get("hbf_capacity_tib"):
+        hbf_cap = float(p.hardware["hbf_capacity_tib"]) * (1024 ** 4) / GB
+    hbf = None
+    if hbf_read > 0 and hbf_cap and hbf_cap > 0:
+        if hbf_write <= 0:
+            # A read-only profile still needs a valid constructor field.  It is
+            # never used by the Hot-Cold resume experiment and is reported as
+            # unspecified rather than treated as a measured write bandwidth.
+            hbf_write = hbf_read
+        granularity = p.granularity
+        page_bytes = int(granularity.get("page_bytes") or granularity.get("write_page_bytes") or granularity.get("kv_block_bytes") or PAGE)
+        read_us = float(p.latency.get("hbf_read_us", granularity.get("page_read_latency_us", 4.0)) or 4.0)
+        program_us = float(p.latency.get("hbf_write_us", granularity.get("page_program_latency_us", 75.0)) or 75.0)
+        if latency_override_us is not None:
+            read_us, program_us = latency_override_us
+        read_ns = read_us * US
+        program_ns = program_us * US
+        parallel_units = int(
+            p.hardware.get("effective_parallel_units")
+            or (p.granularity.get("hbf_planes_per_core_die", 25) * max(1, int(p.hardware.get("hbf_stacks", 1))))
+            or 1
+        )
+        host_granularity = int(p.granularity.get("read_bytes", 0) or 0)
+        if host_granularity <= 0 or host_granularity > page_bytes:
+            host_granularity = min(4096, page_bytes)
+        hbf = _make_hbf(
+            capacity_bytes=max(page_bytes * 256, int(float(hbf_cap) * GB)),
+            read_gb_s=hbf_read,
+            write_gb_s=hbf_write or hbf_read,
+            page_bytes=page_bytes,
+            read_latency_ns=read_ns,
+            program_ns=program_ns,
+            parallel_units=parallel_units,
+            buffered=False,
+            host_granularity_bytes=host_granularity,
+        )
+    return hbm, hbf, {
+        "bandwidth_variant": applied,
+        "hbm_read_gb_s": hbm_read,
+        "hbm_write_gb_s": hbm_write,
+        "hbf_read_gb_s": hbf_read,
+        "hbf_write_gb_s": hbf_write,
+        "hbf_write_was_unspecified": hbf_write_declared is None,
+        "hbf_page_bytes": hbf.config.page_bytes if hbf else None,
+        "hbf_parallel_units": hbf.config.parallel_units if hbf else None,
+        "hbf_host_granularity_bytes": hbf.config.host_granularity_bytes if hbf else None,
+        "hbf_read_latency_ns": hbf.config.page_read_ns if hbf else None,
+        "hbf_program_ns": hbf.config.page_program_ns if hbf else None,
+    }
+
+
+def run_profile(profile: CalibratedProfile, *, thermal: bool = False,
+                kv_pages: int = 8, steps: int = 4,
+                latency_override_us: Optional[tuple[float, float]] = None) -> dict[str, Any]:
+    hbm, hbf, applied = _profile_hardware(profile, thermal=thermal, latency_override_us=latency_override_us)
+    traffic_page_bytes = hbf.config.page_bytes if hbf is not None else PAGE
+    hbm_only = None
+    if hbm is not None:
+        hbm_only = _stream(
+            hbm, None, kv_pages=kv_pages, steps=steps,
+            kv_read_tier="hbm", kv_write_tier="hbm", weight_tier="hbm",
+            traffic_page_bytes=traffic_page_bytes,
+        )
+    elif profile.profile_id == "son_hbf_plus":
+        # HBF+ has no HBM stack in the paper configuration.  Keep a separate
+        # 8-stack HBM4 reference so the memory-path ratio is still useful.
+        baseline = _make_hbm(
+            capacity_bytes=288 * GB, read_gb_s=12800, write_gb_s=12800, stacks=8,
+        )
+        hbm_only = _stream(
+            baseline, None, kv_pages=kv_pages, steps=steps,
+            kv_read_tier="hbm", kv_write_tier="hbm", weight_tier="hbm",
+            traffic_page_bytes=traffic_page_bytes,
+        )
+        hbm_only["baseline_label"] = "son_hbm4_reference_not_same_profile"
+    all_hbf = None
+    if hbf is not None and profile.profile_id != "hot_cold_b200":
+        # Keep the same HBM core for weights when a profile has a near tier;
+        # KV-only HBF is the direct medium-path control.
+        all_hbf = _stream(
+            hbm, hbf, kv_pages=kv_pages, steps=steps,
+            kv_read_tier="hbf", kv_write_tier="hbf",
+            weight_tier="hbm" if hbm is not None else "hbf",
+            traffic_page_bytes=traffic_page_bytes,
+        )
+    hot_cold = None
+    if hbm is not None and hbf is not None:
+        # Run with half the KV pages cold in HBF.  The cold tier is read on
+        # the fixed stream, while generated KV remains an HBM write-on-evict
+        # approximation for the mechanism comparison.
+        hbm, hbf, _ = _profile_hardware(profile, thermal=thermal, latency_override_us=latency_override_us)
+        cores = {"hbm": hbm, "hbf": hbf}
+        by_tier: dict[str, list[Any]] = {"hbm": [], "hbf": []}
+        clock = 0.0
+        cold_pages = kv_pages // 2
+        for step in range(steps):
+            current = []
+            weight = _request(hbm, operation=Operation.READ, address=16 * traffic_page_bytes, bytes_=8 * traffic_page_bytes, arrival_ns=clock, label=f"weight-{step}")
+            by_tier["hbm"].append(weight); current.append(weight)
+            for page in range(kv_pages):
+                tier = "hbf" if page < cold_pages else "hbm"
+                core = cores[tier]
+                item = _request(core, operation=Operation.READ, address=page * traffic_page_bytes, bytes_=traffic_page_bytes, arrival_ns=clock, label=f"kv-read-{step}-{page}")
+                by_tier[tier].append(item); current.append(item)
+            for page in (kv_pages - 2, kv_pages - 1):
+                item = _request(hbm, operation=Operation.WRITE, address=page * traffic_page_bytes, bytes_=traffic_page_bytes, arrival_ns=clock, label=f"kv-write-{step}-{page}")
+                by_tier["hbm"].append(item); current.append(item)
+            clock = max(item.completion_ns for item in current)
+        hot_cold = {
+            "service_ns": float(clock),
+            "service_us": float(clock / US),
+            "logical_bytes": int(sum(item.logical_bytes for values in by_tier.values() for item in values)),
+            "useful_bandwidth_gb_s": float(sum(item.logical_bytes for values in by_tier.values() for item in values) / clock) if clock else None,
+            "tiers": {
+                tier: {"logical_bytes": sum(item.logical_bytes for item in values), "logical_read_bytes": sum(item.logical_bytes for item in values if item.operation is Operation.READ), "logical_write_bytes": sum(item.logical_bytes for item in values if item.operation is Operation.WRITE)}
+                for tier, values in by_tier.items()
+            },
+            "traffic": {"kv_pages": kv_pages, "cold_pages_on_hbf": cold_pages, "steps": steps},
+        }
+    tpot_s = profile.slo.get("threshold_s")
+    if tpot_s is None:
+        tpot_s = profile.slo.get("tbt_s")
+    for result in (hbm_only, all_hbf, hot_cold):
+        if result is not None:
+            result["slo_threshold_ns"] = None if tpot_s is None else float(tpot_s) * 1e9
+            result["memory_service_slo_met"] = None if tpot_s is None else result["service_ns"] <= float(tpot_s) * 1e9
+    return {
+        "profile_id": profile.profile_id,
+        "variant": "thermal_cap" if thermal else "nominal",
+        "latency_override_us": latency_override_us,
+        "thermal": thermal,
+        "applied": applied,
+        "hbm_only": hbm_only,
+        "all_hbf": all_hbf,
+        "hot_cold": hot_cold,
+        "comparability": {
+            "metric": "fixed logical memory service time and useful bandwidth",
+            "full_paper_tps_comparable": False,
+            "reason": "No full GPU compute, continuous batching, paper trace replay, or paper-specific SLO admission is in this backend entry point.",
+        },
+    }
+
+
+def _ratio(numerator: Optional[dict[str, Any]], denominator: Optional[dict[str, Any]]) -> Optional[float]:
+    if not numerator or not denominator or not denominator.get("service_ns"):
+        return None
+    return float(numerator["service_ns"] / denominator["service_ns"])
+
+
+def _comparison_matrix(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    matrix = []
+    for result in results:
+        profile_id = result["profile_id"]
+        all_hbf = result.get("all_hbf")
+        hbm = result.get("hbm_only")
+        hot = result.get("hot_cold")
+        matrix.append({
+            "profile_id": profile_id,
+            "variant": result.get("variant", "nominal"),
+            "sim_hbf_vs_hbm_service_ratio": _ratio(all_hbf, hbm),
+            "sim_hot_cold_vs_hbm_service_ratio": _ratio(hot, hbm),
+            "paper_reference": {
+                "son_hbf": {"metric": "per-GPU batch gain", "reported_range": "1.3–4.5x", "status": "not_comparable"},
+                "son_hbf_plus": {"metric": "per-GPU batch gain", "reported_range": "1.7–5.3x", "status": "not_comparable"},
+                "hbf_sucks_hbf2_b200": {"metric": "E2E latency vs capacity-matched SSD", "reported_range": "2–5.5x", "status": "not_comparable"},
+                "hot_cold_b200": {"metric": "resume overhead", "reported": "0.084 ms at N_a=48", "status": "weak_same_unit_only"},
+            }.get(profile_id, {}),
+        })
+    return matrix
+
+
+def build_report() -> dict[str, Any]:
+    profiles = _profile_specs()
+    results = []
+    for profile in profiles:
+        results.append(run_profile(profile))
+        if profile.profile_id == "hbf_sucks_hbf2_b200":
+            results.append(run_profile(profile, thermal=True))
+            latency_sweep = []
+            for read_us, write_us in profile.latency["sweep_us_read_write"]:
+                sweep = run_profile(profile, latency_override_us=(read_us, write_us))
+                latency_sweep.append({
+                    "read_us": read_us,
+                    "write_us": write_us,
+                    "all_hbf_service_us": sweep["all_hbf"]["service_us"],
+                    "all_hbf_vs_near_hbm_ratio": sweep["all_hbf"]["service_ns"] / sweep["hbm_only"]["service_ns"],
+                })
+            results.append({
+                "profile_id": profile.profile_id,
+                "experiment": "media_latency_sweep",
+                "latency_sweep": latency_sweep,
+                "paper_e2e_sensitivity": {"3.75x_media_speedup_e2e_change": "0.88% HBF-2; not directly comparable"},
+            })
+    # Hot-Cold's paper comparison is a block-fetch measurement.  Keep it in a
+    # separate report entry so it is not confused with the fixed decode stream.
+    hot = _profile_by_id("hot_cold_b200")
+    hbf = _make_hbf(
+        capacity_bytes=3 * 1024 ** 4,
+        read_gb_s=8000,
+        write_gb_s=8000,
+        page_bytes=int(1.5 * 1024 * 1024),
+        read_latency_ns=25 * US,
+        program_ns=100 * US,
+        parallel_units=128,
+    )
+    block_results = []
+    for blocks in (1, 48, 256):
+        values = []
+        for index in range(blocks):
+            values.append(_request(hbf, operation=Operation.READ, address=index * hbf.config.page_bytes, bytes_=hbf.config.page_bytes, arrival_ns=0.0, label=f"resume-{blocks}-{index}"))
+        completion = max(value.completion_ns for value in values)
+        bytes_moved = sum(value.logical_bytes for value in values)
+        block_results.append({"blocks": blocks, "bytes": bytes_moved, "resume_service_ns": completion, "resume_service_us": completion / US, "useful_bandwidth_gb_s": bytes_moved / completion})
+    results.append({
+        "profile_id": hot.profile_id,
+        "experiment": "resume_block_fetch",
+        "block_fetch": block_results,
+        "paper_resume_overhead_us": hot.latency["resume_overhead_us_paper"],
+        "paper_tbt_ms": hot.slo["tbt_s"] * 1000,
+        "comparability": "same block/latency units, but missing-block count and overlap trace are not published",
+    })
+    return {
+        "schema_version": 1,
+        "description": "Paper-parameterized physical memory profiles; not full paper simulator reproduction.",
+        "unit_conventions": {"bandwidth": "decimal GB/s", "latency": "ns", "capacity": "bytes/decimal GB unless profile says GiB/TiB"},
+        "profiles": [profile.as_dict() for profile in profiles],
+        "results": results,
+        "comparison_matrix": _comparison_matrix([row for row in results if "profile_id" in row and "hbm_only" in row]),
+        "limitations": [
+            "Son GPU compute, continuous batching and KV-write overlap are not implemented by this physical micro-profile.",
+            "HBF Sucks TokenSim traces, near-tier capacity tradeoff, queueing and SLO goodput are not reproduced.",
+            "Hot-Cold original agent trajectories and simulator are not public; the block-fetch run is a mechanism check only.",
+            "No absolute TPS, TTFT, TPOT or SLO-goodput error is reported from these memory-only runs.",
+        ],
+    }
+
+
+def _markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Calibrated HBF profiles",
+        "",
+        "These are physical memory-path profiles. They do not reproduce the papers' full LLM serving simulators.",
+        "",
+        "| profile | variant | experiment | service (us) | useful BW (GB/s) | HBF/HBM service ratio | SLO gate |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for row in report["results"]:
+        if "hbm_only" not in row:
+            for item in row.get("block_fetch", []):
+                lines.append(f"| {row['profile_id']} | — | resume {item['blocks']} blocks | {item['resume_service_us']:.3f} | {item['useful_bandwidth_gb_s']:.3f} | — | paper target {row['paper_resume_overhead_us']:.0f} us |")
+            continue
+        ratio = next((item["sim_hbf_vs_hbm_service_ratio"] for item in report["comparison_matrix"] if item["profile_id"] == row["profile_id"]), None)
+        for name in ("hbm_only", "all_hbf", "hot_cold"):
+            item = row.get(name)
+            if not item:
+                continue
+            gate = item.get("memory_service_slo_met")
+            lines.append(f"| {row['profile_id']} | {row.get('variant', 'nominal')} | {name} | {item['service_us']:.3f} | {item['useful_bandwidth_gb_s']:.3f} | {ratio:.3f} | {gate} |" if name == "all_hbf" and ratio is not None else f"| {row['profile_id']} | {row.get('variant', 'nominal')} | {name} | {item['service_us']:.3f} | {item['useful_bandwidth_gb_s']:.3f} | — | {gate} |")
+    lines.extend([
+        "",
+        "## Paper comparison",
+        "",
+        "| profile | paper metric | simulator metric | comparability |",
+        "|---|---|---|---|",
+        "| Son HBF/HBF+ | per-GPU batch 1.3–4.5x / 1.7–5.3x | fixed memory service ratio | not comparable |",
+        "| HBF Sucks | E2E latency 2–5.5x, goodput 1.1–2.7x lower | fixed memory service ratio | not comparable |",
+        "| Hot-Cold | resume 0.084 ms at N_a=48 | block-fetch service in same units | weak same-unit comparison; missing-block trace is unpublished |",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--markdown", type=Path, default=None)
+    args = parser.parse_args()
+    report = build_report()
+    rendered = json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+    else:
+        print(rendered)
+    if args.markdown:
+        args.markdown.parent.mkdir(parents=True, exist_ok=True)
+        args.markdown.write_text(_markdown(report), encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
