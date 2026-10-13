@@ -1,9 +1,10 @@
-"""Run small, paper-parameterized HBM/HBF comparison profiles.
+"""Run paper-parameterized HBM/HBF profiles and a full-backend probe.
 
-The profiles deliberately reuse the simulator's physical DRAM/NAND cores.  They
-do not reproduce the papers' full LLM serving simulators.  The output therefore
-contains a memory-service comparison and a separate comparability matrix instead
-of pretending that a fixed page stream is a token-throughput result.
+The physical profiles deliberately reuse the simulator's DRAM/NAND cores and
+remain memory-service diagnostics.  Each nominal profile also runs a small
+continuous-batching trace through the V4 GPU/operator/serving backend.  That
+trace is useful for checking integration and bottlenecks, but it does not
+reproduce the papers' private model, topology or workload traces.
 
 Run::
 
@@ -15,7 +16,7 @@ or left unspecified are labelled in the profile metadata.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
 import math
 from pathlib import Path
@@ -27,11 +28,23 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from heterollm_sim.dram_core import DramCore
 from heterollm_sim.memory_transfer import summarize_batch
+from heterollm_sim.reference import build_reference_scenario
+from heterollm_sim.reporting import report_dict, run_scenario
 from heterollm_sim.memory_types import (
     AccessRequest,
     DramConfig,
     NandConfig,
     Operation,
+    make_hbm_config,
+    make_hbf_config,
+)
+from heterollm_sim.cost_models import HostMemoryProfile
+from heterollm_sim.ir import (
+    ComponentSpec,
+    KVCachePolicy,
+    LinkSpec,
+    PortSpec,
+    RequestSpec,
 )
 from heterollm_sim.nand_core import NandCore
 
@@ -508,6 +521,379 @@ def _profile_hardware(profile: CalibratedProfile, *, thermal: bool = False,
     }
 
 
+def _full_backend_scenario(
+    profile: CalibratedProfile,
+    *,
+    use_hbf: bool = True,
+    request_count: int = 2,
+    prompt_tokens: int = 128,
+    output_tokens: int = 16,
+):
+    """Build a small continuous-batching scenario on the real V4 backend.
+
+    The physical profile remains a memory microbenchmark.  This companion
+    scenario uses the repository's normal control-plane, GPU operator cost
+    model, HBM resource queues, CPU submission path and serving scheduler.  It
+    intentionally uses a small trace so the experiment stays repeatable; it
+    is not a replay of any paper's private workload trace.
+    """
+
+    base = build_reference_scenario()
+    bw = profile.bandwidth
+    hbm_read = float(bw.get("hbm_read_gb_s", 0) or 0)
+    # HBF+ has no local HBM stack.  Keep the paper's HBM4 reference as the
+    # full-backend control, and label it as a separate reference below.
+    if hbm_read <= 0:
+        hbm_read = 12_800.0
+    hbm_write = float(bw.get("hbm_write_gb_s", 0) or hbm_read)
+    hbm_capacity_gb = profile.hardware.get("hbm_capacity_gb")
+    if hbm_capacity_gb is None:
+        hbm_capacity_gb = profile.hardware.get("near_tier_capacity_gb_per_gpu")
+    if hbm_capacity_gb is None:
+        hbm_capacity_gb = profile.hardware.get("hbm_capacity_gib")
+        if hbm_capacity_gb is not None:
+            hbm_capacity_gb = float(hbm_capacity_gb) * GIB / GB
+    if not hbm_capacity_gb or float(hbm_capacity_gb) <= 0.0:
+        hbm_capacity_gb = 288.0 if profile.profile_id == "son_hbf_plus" else 16.0
+    hbm_capacity = max(
+        16 * GIB,
+        int(float(hbm_capacity_gb or 16.0) * GB),
+    )
+    physical_hbm = make_hbm_config(
+        capacity_bytes=hbm_capacity,
+        rows_per_bank=524_288,
+        interface_bandwidth_gb_s=hbm_read,
+        read_bandwidth_gb_s=hbm_read,
+        write_bandwidth_gb_s=hbm_write,
+        burst_interval_ns=0.0,
+    )
+    hbm0 = base.hardware.get_component("hbm0")
+    hbm_link_gbps = max(hbm_read, hbm_write, 1.0) * 8.0
+    hbm0 = replace(
+        hbm0,
+        capacity_bytes=hbm_capacity,
+        bandwidth_gbps=hbm_link_gbps,
+        read_bandwidth_gbps=hbm_link_gbps,
+        write_bandwidth_gbps=hbm_link_gbps,
+        ports=tuple(
+            replace(port, bandwidth_gbps=hbm_link_gbps)
+            for port in hbm0.ports
+        ),
+        metadata={**hbm0.metadata, "physical_memory_config": physical_hbm},
+    )
+    gpu0 = base.hardware.get_component("gpu0")
+    gpu0 = replace(
+        gpu0,
+        ports=tuple(
+            replace(port, bandwidth_gbps=hbm_link_gbps)
+            if port.port_id == "hbm0" else port
+            for port in gpu0.ports
+        ) + (PortSpec(
+            port_id="ucie_hbf", protocol="UCIe", role="controller",
+            version="1.1", lanes=64, bandwidth_gbps=2048.0,
+            payload="streaming",
+        ),),
+    )
+    hbf_read = float(bw.get("hbf_read_gb_s", 0) or 0)
+    hbf_write = float(bw.get("hbf_write_gb_s", 0) or hbf_read or 1.0)
+    hbf_capacity_gb = profile.hardware.get("hbf_capacity_gb")
+    if hbf_capacity_gb is None and profile.hardware.get("secondary_capacity_tb"):
+        hbf_capacity_gb = float(profile.hardware["secondary_capacity_tb"]) * 1000.0
+    if hbf_capacity_gb is None and profile.hardware.get("hbf_capacity_tib"):
+        hbf_capacity_gb = float(profile.hardware["hbf_capacity_tib"]) * (1024 ** 4) / GB
+    hbf_capacity = max(256 * 1024**2, int(float(hbf_capacity_gb or 1.0) * GB))
+    page_bytes = int(
+        profile.granularity.get("page_bytes")
+        or profile.granularity.get("write_page_bytes")
+        or profile.granularity.get("kv_block_bytes")
+        or PAGE
+    )
+    parallel_units = int(
+        profile.hardware.get("effective_parallel_units")
+        or profile.granularity.get("hbf_planes_per_core_die")
+        or 1
+    )
+    hbf_read_us = float(
+        profile.latency.get("hbf_read_us")
+        or profile.granularity.get("page_read_latency_us")
+        or 4.0
+    )
+    hbf_write_us = float(
+        profile.latency.get("hbf_write_us")
+        or profile.granularity.get("page_program_latency_us")
+        or 75.0
+    )
+    hbf_parallel = max(1, parallel_units)
+    hbf_physical = make_hbf_config(
+        capacity_bytes=hbf_capacity,
+        channels=hbf_parallel,
+        parallel_units=hbf_parallel,
+        blocks_per_plane=_capacity_geometry(
+            hbf_capacity,
+            channels=hbf_parallel,
+            page_bytes=page_bytes,
+        ),
+        pages_per_block=256,
+        page_bytes=page_bytes,
+        host_granularity_bytes=min(4096, page_bytes),
+        host_bandwidth_gb_s=max(hbf_read, hbf_write, 1.0),
+        host_read_bandwidth_gb_s=max(hbf_read, 1.0),
+        host_write_bandwidth_gb_s=max(hbf_write, 1.0),
+        page_read_ns=hbf_read_us * US,
+        page_program_ns=hbf_write_us * US,
+        front_ns=0.0,
+        write_buffer_bytes=0,
+    )
+    hbf_profile = HostMemoryProfile(
+        bandwidth_gb_s=max(hbf_read, hbf_write, 1.0),
+        efficiency=1.0,
+        read_bandwidth_gb_s=max(hbf_read, 1.0),
+        write_bandwidth_gb_s=max(hbf_write, 1.0),
+        resource_id="hbf0.memory",
+        name=f"{profile.profile_id}-hbf",
+        read_latency_ns=hbf_read_us * US,
+        write_latency_ns=hbf_write_us * US,
+        transaction_bytes=min(4096, page_bytes),
+        max_outstanding_requests=32,
+        parallel_lanes=hbf_parallel,
+    )
+    hbf = ComponentSpec(
+        component_id="hbf0",
+        kind="hbf",
+        cost_profile_id="calibrated-hbf",
+        ports=(PortSpec(
+            port_id="ucie0", protocol="UCIe", role="endpoint", version="1.1",
+            lanes=64, bandwidth_gbps=2048.0, payload="streaming",
+        ),),
+        package_id="package0",
+        die_id="hbf_die",
+        capacity_bytes=hbf_capacity,
+        bandwidth_gbps=max(hbf_read, hbf_write, 1.0) * 8.0,
+        read_bandwidth_gbps=max(hbf_read, 1.0) * 8.0,
+        write_bandwidth_gbps=max(hbf_write, 1.0) * 8.0,
+        metadata={
+            "physical_memory_config": hbf_physical,
+            # HBF is an active, writable, directly exposed device buffer in
+            # this probe.  This is what makes _add_kv_access use
+            # endpoint_service/PhysicalService rather than the DRAM-only
+            # aggregate planner path.
+            "access_mode": "memory",
+            "writable": True,
+            "read_only": False,
+            "write_buffer_bytes": 0,
+            "memory_service_owner": hbf_profile.resource_id,
+            "read_latency_ns": hbf_profile.read_latency_ns,
+            "write_latency_ns": hbf_profile.write_latency_ns,
+            "transfer_granularity_bytes": hbf_profile.transaction_bytes,
+            "max_outstanding_requests": hbf_profile.max_outstanding_requests,
+            "parallel_lanes": hbf_profile.parallel_lanes,
+        },
+    )
+    hardware = replace(
+        base.hardware,
+        components=tuple(
+            gpu0 if component.component_id == "gpu0" else
+            hbm0 if component.component_id == "hbm0" else component
+            for component in base.hardware.components
+        ) + (hbf,),
+        links=base.hardware.links + (LinkSpec(
+            link_id="gpu-hbf-ucie", source_component="gpu0", source_port="ucie_hbf",
+            target_component="hbf0", target_port="ucie0", protocol="UCIe",
+            version="1.1", lanes=64, bandwidth_gbps=2048.0, latency_ns=100.0,
+            payload="streaming",
+        ),),
+        require_connected=False,
+    )
+    component_profiles = {
+        kind: dict(registry)
+        for kind, registry in base.component_profiles.items()
+    }
+    component_profiles.setdefault("host_memory", {})["calibrated-hbf"] = hbf_profile
+    hbm_profile = component_profiles["hbm"]["legacy-hbm-0"]
+    component_profiles["hbm"]["legacy-hbm-0"] = replace(
+        hbm_profile,
+        bandwidth_gb_s=hbm_read,
+        read_bandwidth_gb_s=hbm_read,
+        write_bandwidth_gb_s=hbm_write,
+        measured_effective_bandwidth_gb_s=None,
+    )
+    requests = tuple(
+        RequestSpec(
+            request_id=f"{profile.profile_id}-full-{index}",
+            arrival_ns=float(index) * 100_000.0,
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            priority=0,
+        )
+        for index in range(max(1, int(request_count)))
+    )
+    scheduler = replace(
+        base.workload.scheduler,
+        mode="continuous",
+        max_num_seqs=max(1, int(request_count)),
+        max_num_batched_tokens=max(128, prompt_tokens),
+        max_num_ubatch_tokens=max(128, prompt_tokens),
+        prefill_chunk_tokens=max(1, prompt_tokens),
+        # The direct-cache probe is a capacity-sufficient single-pass trace;
+        # disabling scheduler swaps keeps the baseline and HBF runs identical
+        # and avoids introducing an unmeasured second offload tier.
+        preemption_enabled=False,
+        preemption_policy="auto",
+        slo_ttft_ns=None,
+        slo_tbt_ns=(
+            float(profile.slo.get("slo_tbt_s")) * 1e9
+            if profile.slo.get("slo_tbt_s") is not None
+            else float(profile.slo.get("threshold_s")) * 1e9
+            if profile.slo.get("threshold_s") is not None
+            else None
+        ),
+    )
+    workload = replace(
+        base.workload,
+        requests=requests,
+        request_count=len(requests),
+        scheduler=scheduler,
+        mtp=None,
+    )
+    # The direct HBF case keeps rank-local HBM for ordinary GPU traffic but
+    # exposes HBF as the writable KV endpoint.  _add_kv_access then prices the
+    # NAND page service and link instead of treating HBF as a DRAM profile.
+    # The paired baseline keeps the same GPU/model/request trace and uses HBM
+    # KV, so the difference is attributable to the memory placement.
+    cache_component = "hbf0" if use_hbf else "hbm0"
+    placement_metadata = dict(base.placement.metadata)
+    placement_metadata["llama_backend_memory"] = (
+        {
+            "hbf0": {
+                "device_id": "gpu0",
+                "buffer_kind": "HBF",
+                "access": "direct",
+                "priority": 1,
+            }
+        }
+        if use_hbf
+        else {}
+    )
+    policy = KVCachePolicy(
+        cache_component=cache_component,
+        offload_component=None,
+        tokens_per_page=16,
+        dtype="int8",
+        layout_mode="legacy_single",
+        prefetch_distance=0,
+        preemption_mode="auto",
+    )
+    return replace(
+        base,
+        hardware=hardware,
+        component_profiles=component_profiles,
+        placement=replace(
+            base.placement,
+            hardware_name=hardware.name,
+            kv_policy=policy,
+            metadata=placement_metadata,
+        ),
+        workload=workload,
+    )
+
+
+def _full_backend_summary(
+    profile: CalibratedProfile,
+    *,
+    use_hbf: bool = True,
+    request_count: int = 2,
+    prompt_tokens: int = 128,
+    output_tokens: int = 16,
+) -> dict[str, Any]:
+    """Run the calibrated profile through the full GPU/serving backend."""
+
+    scenario = _full_backend_scenario(
+        profile,
+        use_hbf=use_hbf,
+        request_count=request_count,
+        prompt_tokens=prompt_tokens,
+        output_tokens=output_tokens,
+    )
+    result = run_scenario(scenario)
+    report = report_dict(result)
+    summary = report["summary"]
+    gpu = scenario.resolve_component_profile("gpu0")
+    kv = report.get("kv_cache", {})
+    storage = report.get("storage_traffic", {})
+    dram = report.get("dram_traffic", {})
+    throughput = summary.get("throughput", {})
+    goodput = summary.get("goodput", {})
+    resource_utilization = report.get("resource_utilization", {})
+    return {
+        "full_backend_used": True,
+        "execution_mode": report.get("execution_mode"),
+        "retention_policy": report.get("retention_policy"),
+        "backend_model": "TopologyAwareBatchCostProvider + simulate_online",
+        "gpu_model": {
+            "name": gpu.name,
+            "sm_count": gpu.sm_count,
+            "peak_tops": gpu.peak_tops,
+            "attainable_tops": gpu.attainable_tops,
+            "source": "bundled reference GPU profile",
+        },
+        "paper_compute_pflops": profile.hardware.get("compute_pflops"),
+        "paper_compute_applied": False,
+        "hbm_control_label": (
+            "son_hbm4_reference_not_same_profile"
+            if profile.profile_id == "son_hbf_plus"
+            else "profile_near_hbm"
+        ),
+        "memory_placement": "hbf_direct_kv" if use_hbf else "hbm_local_kv",
+        "summary": {
+            "makespan_ns": summary.get("makespan_ns"),
+            "completed_requests": summary.get("completed_requests"),
+            "rejected_requests": summary.get("rejected_requests"),
+            "throughput_visible_output_tokens_per_s": throughput.get("visible_output_tokens_per_s"),
+            "requests_per_s": throughput.get("requests_per_s"),
+            "goodput_visible_output_tokens_per_s": goodput.get("visible_output_tokens_per_s"),
+            "qualified_requests": goodput.get("qualified_requests"),
+            "ttft_ns": summary.get("ttft_ns"),
+            "tpot_ns": summary.get("tpot_ns"),
+            "e2e_ns": summary.get("e2e_ns"),
+            "bottleneck_resource": summary.get("bottleneck_resource"),
+        },
+        "resources": {
+            "resource_utilization": resource_utilization,
+            "gpu_resource_utilization": {
+                key: value for key, value in resource_utilization.items()
+                if key.startswith("gpu0.")
+            },
+            "dram_traffic": {
+                key: dram.get(key)
+                for key in ("task_count", "logical_read_bytes", "logical_write_bytes", "service_ns")
+            },
+            "storage_traffic": {
+                key: storage.get(key)
+                for key in ("task_count", "logical_read_bytes", "logical_write_bytes", "service_ns")
+                if key in storage
+            },
+        },
+        "kv": {
+            key: kv.get(key)
+            for key in (
+                "layout_mode", "capacity_bytes_by_component", "peak_bytes_by_component",
+                "offload_events", "offload_bytes", "swap_events", "swap_bytes",
+                "prefetch_events", "prefetch_bytes",
+            )
+            if key in kv
+        },
+        "trace": {
+            "request_count": len(result.serving.request_metrics),
+            "batch_count": len(result.serving.batches),
+            "scheduler": report.get("scheduler", {}),
+        },
+        "comparability": {
+            "paper_tps_comparable": False,
+            "reason": "full GPU/serving path is used, but paper-specific model, trace, multi-GPU topology and SLO workload are not fully public or matched",
+        },
+    }
+
+
 def run_profile(profile: CalibratedProfile, *, thermal: bool = False,
                 kv_pages: int = 8, steps: int = 4,
                 latency_override_us: Optional[tuple[float, float]] = None) -> dict[str, Any]:
@@ -618,6 +1004,41 @@ def _comparison_matrix(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "variant": result.get("variant", "nominal"),
             "sim_hbf_vs_hbm_service_ratio": _ratio(all_hbf, hbm),
             "sim_hot_cold_vs_hbm_service_ratio": _ratio(hot, hbm),
+            "full_backend": {
+                "visible_output_tokens_per_s": (
+                    result.get("full_backend", {})
+                    .get("summary", {})
+                    .get("throughput_visible_output_tokens_per_s")
+                ),
+                "goodput_visible_output_tokens_per_s": (
+                    result.get("full_backend", {})
+                    .get("summary", {})
+                    .get("goodput_visible_output_tokens_per_s")
+                ),
+                "ttft_ns": result.get("full_backend", {}).get("summary", {}).get("ttft_ns"),
+                "tpot_ns": result.get("full_backend", {}).get("summary", {}).get("tpot_ns"),
+                "hbm_visible_output_tokens_per_s": (
+                    result.get("full_backend", {})
+                    .get("hbm_baseline", {})
+                    .get("summary", {})
+                    .get("throughput_visible_output_tokens_per_s")
+                ),
+                "hbf_vs_hbm_visible_tps_ratio": result.get("full_backend", {})
+                .get("comparison", {})
+                .get("hbf_vs_hbm_visible_tps_ratio"),
+                "hbf_storage_task_count": result.get("full_backend", {})
+                .get("resources", {})
+                .get("storage_traffic", {})
+                .get("task_count"),
+                "hbm_storage_task_count": result.get("full_backend", {})
+                .get("hbm_baseline", {})
+                .get("resources", {})
+                .get("storage_traffic", {})
+                .get("task_count"),
+                "paper_tps_comparable": result.get("full_backend", {})
+                .get("comparability", {})
+                .get("paper_tps_comparable", False),
+            },
             "paper_reference": {
                 "son_hbf": {"metric": "per-GPU batch gain", "reported_range": "1.3–4.5x", "status": "not_comparable"},
                 "son_hbf_plus": {"metric": "per-GPU batch gain", "reported_range": "1.7–5.3x", "status": "not_comparable"},
@@ -632,7 +1053,49 @@ def build_report() -> dict[str, Any]:
     profiles = _profile_specs()
     results = []
     for profile in profiles:
-        results.append(run_profile(profile))
+        nominal = run_profile(profile)
+        # Keep the physical memory stream and the full serving run separate:
+        # the former isolates HBF service, while this run exercises the real
+        # GPU/operator/scheduler path and reports its own comparability.
+        direct_backend = _full_backend_summary(profile, use_hbf=True)
+        hbm_backend = _full_backend_summary(profile, use_hbf=False)
+        direct_summary = direct_backend.get("summary", {})
+        hbm_summary = hbm_backend.get("summary", {})
+        direct_backend["hbm_baseline"] = hbm_backend
+        direct_backend["comparison"] = {
+            "hbf_vs_hbm_visible_tps_ratio": (
+                float(direct_summary.get("throughput_visible_output_tokens_per_s"))
+                / float(hbm_summary.get("throughput_visible_output_tokens_per_s"))
+                if hbm_summary.get("throughput_visible_output_tokens_per_s")
+                else None
+            ),
+            "hbf_vs_hbm_goodput_ratio": (
+                float(direct_summary.get("goodput_visible_output_tokens_per_s"))
+                / float(hbm_summary.get("goodput_visible_output_tokens_per_s"))
+                if hbm_summary.get("goodput_visible_output_tokens_per_s")
+                else None
+            ),
+            "hbf_vs_hbm_ttft_p50_ratio": (
+                float((direct_summary.get("ttft_ns") or {}).get("p50"))
+                / float((hbm_summary.get("ttft_ns") or {}).get("p50"))
+                if (hbm_summary.get("ttft_ns") or {}).get("p50")
+                else None
+            ),
+            "hbf_vs_hbm_tpot_p50_ratio": (
+                float((direct_summary.get("tpot_ns") or {}).get("p50"))
+                / float((hbm_summary.get("tpot_ns") or {}).get("p50"))
+                if (hbm_summary.get("tpot_ns") or {}).get("p50")
+                else None
+            ),
+        }
+        nominal["full_backend"] = direct_backend
+        nominal["comparability"] = {
+            **nominal["comparability"],
+            "full_backend_used": True,
+            "full_backend_metric": "visible output TPS, TTFT, TPOT, SLO goodput",
+            "full_backend_paper_tps_comparable": False,
+        }
+        results.append(nominal)
         if profile.profile_id == "hbf_sucks_hbf2_b200":
             results.append(run_profile(profile, thermal=True))
             latency_sweep = []
@@ -680,16 +1143,16 @@ def build_report() -> dict[str, Any]:
     })
     return {
         "schema_version": 1,
-        "description": "Paper-parameterized physical memory profiles; not full paper simulator reproduction.",
+        "description": "Paper-parameterized physical memory profiles plus a separate full V4 GPU/serving probe; not full paper simulator reproduction.",
         "unit_conventions": {"bandwidth": "decimal GB/s", "latency": "ns", "capacity": "bytes/decimal GB unless profile says GiB/TiB"},
         "profiles": [profile.as_dict() for profile in profiles],
         "results": results,
         "comparison_matrix": _comparison_matrix([row for row in results if "profile_id" in row and "hbm_only" in row]),
         "limitations": [
-            "Son GPU compute, continuous batching and KV-write overlap are not implemented by this physical micro-profile.",
+            "The physical micro-profile does not include GPU compute or continuous batching; the separate full_backend result does use the V4 GPU/operator/scheduler path.",
             "HBF Sucks TokenSim traces, near-tier capacity tradeoff, queueing and SLO goodput are not reproduced.",
             "Hot-Cold original agent trajectories and simulator are not public; the block-fetch run is a mechanism check only.",
-            "No absolute TPS, TTFT, TPOT or SLO-goodput error is reported from these memory-only runs.",
+            "Full-backend TPS/TTFT/TPOT/SLO-goodput are reported for a small synthetic trace, but are not paper-comparable without the paper model, trace and topology.",
         ],
     }
 
@@ -715,6 +1178,35 @@ def _markdown(report: dict[str, Any]) -> str:
                 continue
             gate = item.get("memory_service_slo_met")
             lines.append(f"| {row['profile_id']} | {row.get('variant', 'nominal')} | {name} | {item['service_us']:.3f} | {item['useful_bandwidth_gb_s']:.3f} | {ratio:.3f} | {gate} |" if name == "all_hbf" and ratio is not None else f"| {row['profile_id']} | {row.get('variant', 'nominal')} | {name} | {item['service_us']:.3f} | {item['useful_bandwidth_gb_s']:.3f} | — | {gate} |")
+    lines.extend([
+        "",
+        "## Full V4 backend probe",
+        "",
+        "This table uses the repository's GPU/operator cost model, continuous scheduler, HBM resource queue and SLO projection. The request trace is synthetic and intentionally small.",
+        "",
+        "| profile | variant | visible TPS | SLO goodput TPS | TTFT p50 (us) | TPOT p50 (us) | storage tasks | bottleneck |",
+        "|---|---|---:|---:|---:|---:|---:|---|",
+    ])
+    for row in report["results"]:
+        full = row.get("full_backend")
+        if not full:
+            continue
+        variants = (("hbm_control", full.get("hbm_baseline")), ("hbf_direct", full))
+        for variant, data in variants:
+            if not data:
+                continue
+            summary = data.get("summary", {})
+            ttft = (summary.get("ttft_ns") or {}).get("p50")
+            tpot = (summary.get("tpot_ns") or {}).get("p50")
+            bottleneck = summary.get("bottleneck_resource") or {}
+            storage_tasks = (data.get("resources", {}).get("storage_traffic", {}) or {}).get("task_count", 0)
+            lines.append(
+                f"| {row['profile_id']} | {variant} | "
+                f"{float(summary.get('throughput_visible_output_tokens_per_s') or 0):.2f} | "
+                f"{float(summary.get('goodput_visible_output_tokens_per_s') or 0):.2f} | "
+                f"{float(ttft or 0) / 1e3:.3f} | {float(tpot or 0) / 1e3:.3f} | "
+                f"{int(storage_tasks or 0)} | {bottleneck.get('resource_id', 'unknown')} |"
+            )
     lines.extend([
         "",
         "## Paper comparison",
