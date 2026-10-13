@@ -1254,6 +1254,56 @@ def check_hbm_hbf_ratio() -> dict[str, Any]:
     }
 
 
+def check_backend_policy_sensitivity() -> dict[str, Any]:
+    """Verify non-memory controls change execution through the real backend."""
+    script = ROOT / "scripts" / "calibrated_hbf_profiles.py"
+    spec = importlib.util.spec_from_file_location("calibrated_hbf_profiles_acceptance", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    profile = module._profile_by_id("son_hbf")
+    baseline = module._full_backend_summary(
+        profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4
+    )
+    gpu = module._full_backend_summary(
+        profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
+        gpu_compute_pflops=0.06,
+    )
+    host = module._full_backend_summary(
+        profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
+        host_control_scale=10.0,
+    )
+    link = module._full_backend_summary(
+        profile, use_hbf=True, request_count=1, prompt_tokens=32, output_tokens=4,
+        interconnect_bandwidth_gbps=8.0,
+    )
+    require(gpu["summary"]["makespan_ns"] != baseline["summary"]["makespan_ns"],
+            "GPU compute override must change full-backend makespan")
+    require(gpu["resources"]["dram_traffic"]["logical_read_bytes"] == baseline["resources"]["dram_traffic"]["logical_read_bytes"],
+            "GPU compute override must not change logical DRAM traffic")
+    require(host["summary"]["makespan_ns"] > baseline["summary"]["makespan_ns"],
+            "host control scaling must increase full-backend makespan")
+    physical = module._full_backend_summary(
+        profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
+        hbm_execution_mode="physical",
+    )
+    require(physical["resources"]["dram_traffic"]["task_count"] > baseline["resources"]["dram_traffic"]["task_count"],
+            "physical HBM diagnostic mode must expose more DRAM tasks than aggregate mode")
+    require(link["summary"]["makespan_ns"] > module._full_backend_summary(
+        profile, use_hbf=True, request_count=1, prompt_tokens=32, output_tokens=4
+    )["summary"]["makespan_ns"], "link bandwidth override must affect HBF makespan")
+    return {
+        "aggregate_hbm_mode": baseline["hbm_execution_mode"],
+        "gpu_reference_makespan_ns": baseline["summary"]["makespan_ns"],
+        "gpu_override_makespan_ns": gpu["summary"]["makespan_ns"],
+        "host_scaled_makespan_ns": host["summary"]["makespan_ns"],
+        "hbf_slow_link_makespan_ns": link["summary"]["makespan_ns"],
+        "physical_hbm_task_count": physical["resources"]["dram_traffic"]["task_count"],
+        "aggregate_hbm_task_count": baseline["resources"]["dram_traffic"]["task_count"],
+    }
+
+
 def run_acceptance() -> dict[str, Any]:
     checks = []
     tasks: list[tuple[str, Callable[[], dict[str, Any]]]] = [
@@ -1266,6 +1316,7 @@ def run_acceptance() -> dict[str, Any]:
         ("physical_kv_migration", check_physical_kv_migration),
         ("core_invariants", check_core_invariants),
         ("hbm_hbf_ratio", check_hbm_hbf_ratio),
+        ("backend_policy_sensitivity", check_backend_policy_sensitivity),
         ("package_budget_sweep", check_package_budget),
         ("fixed_workload_scan", check_fixed_workload_scan),
         ("serving_paged_swap", check_serving_paged_swap),
@@ -1358,7 +1409,7 @@ def run_acceptance() -> dict[str, Any]:
         {
             "stage": "2_simplified_hardware_execution",
             "status": "passed",
-            "evidence": ["shared_physical_contention", "physical_kv_migration", "core_invariants"],
+            "evidence": ["shared_physical_contention", "physical_kv_migration", "core_invariants", "backend_policy_sensitivity"],
         },
         {
             "stage": "3_capacity_lifecycle_and_write_buffer",
@@ -1377,8 +1428,9 @@ def run_acceptance() -> dict[str, Any]:
         },
         {
             "stage": "6_acceptance_and_question_matrix",
-            "status": "passed",
+            "status": "partial",
             "evidence": [item["id"] for item in checks],
+            "remaining": ["external_named_GPU_HBM_validation", "paper_trace_level_comparison"],
             "external_validation": "pending_external_measurements",
         },
     ]

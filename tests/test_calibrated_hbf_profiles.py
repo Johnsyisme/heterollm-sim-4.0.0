@@ -100,8 +100,73 @@ class CalibratedHbfProfileTests(unittest.TestCase):
             result["resources"]["storage_traffic"].get("task_count", 0), 0
         )
         self.assertIn("gpu0.tensor_core", result["resources"]["gpu_resource_utilization"])
+        breakdown = result["resources"]["resource_breakdown"]
+        self.assertGreater(breakdown["gpu"]["max_utilization"], 0.0)
+        self.assertGreater(breakdown["cpu"]["max_utilization"], 0.0)
+        self.assertEqual(breakdown["cim"]["resource_count"], 0)
+        self.assertEqual(result["backend_policy"]["cim_mode"], "disabled")
         self.assertEqual(result["gpu_model"]["source"], "bundled reference GPU profile")
         self.assertIn("bottleneck_resource", result["summary"])
+
+    def test_backend_policy_parameters_change_only_their_intended_path(self):
+        profile = profiles._profile_by_id("son_hbf")
+        baseline = profiles._full_backend_summary(
+            profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4
+        )
+        slower_gpu = profiles._full_backend_summary(
+            profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
+            gpu_compute_pflops=0.06,
+        )
+        slower_host = profiles._full_backend_summary(
+            profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
+            host_control_scale=100.0,
+        )
+        slow_link = profiles._full_backend_summary(
+            profile, use_hbf=True, request_count=1, prompt_tokens=32, output_tokens=4,
+            interconnect_bandwidth_gbps=8.0,
+        )
+        self.assertNotEqual(
+            baseline["summary"]["makespan_ns"], slower_gpu["summary"]["makespan_ns"]
+        )
+        self.assertEqual(
+            baseline["resources"]["dram_traffic"]["logical_read_bytes"],
+            slower_gpu["resources"]["dram_traffic"]["logical_read_bytes"],
+        )
+        self.assertGreater(
+            slower_host["summary"]["makespan_ns"], baseline["summary"]["makespan_ns"]
+        )
+        self.assertGreater(
+            slow_link["summary"]["makespan_ns"],
+            profiles._full_backend_summary(
+                profile, use_hbf=True, request_count=1, prompt_tokens=32, output_tokens=4
+            )["summary"]["makespan_ns"],
+        )
+
+    def test_paper_compute_is_applied_only_when_published(self):
+        son = profiles._full_backend_summary(
+            profiles._profile_by_id("son_hbf"), request_count=1, prompt_tokens=32, output_tokens=4
+        )
+        hot_cold = profiles._full_backend_summary(
+            profiles._profile_by_id("hot_cold_b200"), request_count=1, prompt_tokens=32, output_tokens=4
+        )
+        self.assertFalse(son["paper_compute_applied"])
+        self.assertTrue(hot_cold["paper_compute_applied"])
+
+    def test_hbm_full_backend_defaults_to_aggregate_service_mode(self):
+        profile = profiles._profile_by_id("son_hbf")
+        aggregate = profiles._full_backend_summary(
+            profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4
+        )
+        physical = profiles._full_backend_summary(
+            profile, use_hbf=False, request_count=1, prompt_tokens=32, output_tokens=4,
+            hbm_execution_mode="physical",
+        )
+        self.assertEqual(aggregate["hbm_execution_mode"], "aggregate")
+        self.assertGreater(aggregate["summary"]["throughput_visible_output_tokens_per_s"], 0.0)
+        self.assertGreater(
+            physical["resources"]["dram_traffic"]["task_count"],
+            aggregate["resources"]["dram_traffic"]["task_count"],
+        )
 
 
 if __name__ == "__main__":

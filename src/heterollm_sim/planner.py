@@ -4314,6 +4314,20 @@ def _attach_direct_backing_physical_task(task: TaskSpec, scenario: ScenarioConfi
         metadata=local_metadata)
     local_task = _attach_gddr_physical_task(local_task, scenario)
     local_accesses = local_task.metadata.get("memory_accesses", ())
+    local_component = next(
+        (
+            item for item in scenario.hardware.components
+            if str(item.metadata.get("memory_execution_mode", "physical")).strip().lower() == "aggregate"
+            and local_resource in {
+                str(item.component_id + ".access"),
+                str(item.metadata.get("memory_service", {}).get("resource_id") or ""),
+                str(item.metadata.get("memory_service", {}).get("physical_owner") or ""),
+                str(item.metadata.get("memory_service_owner") or ""),
+            }
+        ),
+        None,
+    )
+    local_is_aggregate = local_component is not None
     configs = {remote_owner: remote_config}
     local_config = local_task.metadata.get("physical_memory_config")
     # Direct HBF is an active memory endpoint too.  Its authored coefficient
@@ -4325,7 +4339,10 @@ def _attach_direct_backing_physical_task(task: TaskSpec, scenario: ScenarioConfi
         configs[str(local_task.metadata["physical_owner"])] = local_config
         energy_by_owner[str(local_task.metadata["physical_owner"])] = local_task.metadata["physical_energy_pj_per_byte"]
     accesses = tuple(local_accesses) + remote_accesses
-    expected = (local_reads + int(direct["read_bytes"]), local_writes + int(direct["write_bytes"]))
+    expected = (
+        int(direct["read_bytes"]) + (0 if local_is_aggregate else local_reads),
+        int(direct["write_bytes"]) + (0 if local_is_aggregate else local_writes),
+    )
     actual = tuple(sum(int(row["byte_count"]) for row in accesses if row["operation"] == direction)
                    for direction in ("read", "write"))
     if actual != expected:
@@ -4346,6 +4363,13 @@ def _attach_direct_backing_physical_task(task: TaskSpec, scenario: ScenarioConfi
             "logical_write_bytes": expected[1], "descriptor_read_bytes": actual[0],
             "descriptor_write_bytes": actual[1]},
     }
+    if local_is_aggregate:
+        metadata["physical_placeholder_resource_ids"] = tuple(
+            dict.fromkeys(
+                tuple(task.metadata.get("physical_placeholder_resource_ids", ()))
+                + (local_resource,)
+            )
+        )
     bound = replace(task, metadata=metadata)
     _assert_physical_memory_demands(bound, scenario)
     return bound
@@ -4391,12 +4415,56 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
     Addresses come from stable buffer/tensor identities and declared offsets.
     """
 
+    aggregate_resources = set()
+    nonaggregate_resources = set()
+    aggregate_components = set()
+    phase_metadata = task.metadata.get("phase_metadata", {})
+    direct_access = phase_metadata.get("direct_memory_access") if isinstance(phase_metadata, Mapping) else None
+    if isinstance(direct_access, Mapping):
+        direct_component = scenario.hardware.component_map().get(str(direct_access.get("component_id")))
+        if direct_component is not None and str(direct_component.metadata.get("memory_execution_mode", "physical")).strip().lower() != "aggregate":
+            direct_task = _attach_direct_backing_physical_task(task, scenario)
+            if direct_task is not None:
+                return direct_task
+    for component in scenario.hardware.components:
+        if str(component.metadata.get("memory_execution_mode", "physical")).strip().lower() != "aggregate":
+            continue
+        aggregate_components.add(component.component_id)
+        service = component.metadata.get("memory_service", {})
+        aggregate_resources.update({
+            str(service.get("resource_id") or ""),
+            str(service.get("physical_owner") or ""),
+            str(component.metadata.get("memory_service_owner") or ""),
+            str(component.component_id + ".access"),
+        })
+    for component in scenario.hardware.components:
+        if component.component_id in aggregate_components or not component.is_storage:
+            continue
+        service = component.metadata.get("memory_service", {})
+        profile = _resolve_component_profile(scenario, component.component_id)
+        nonaggregate_resources.update({
+            str(service.get("resource_id") or ""),
+            str(service.get("physical_owner") or ""),
+            str(component.metadata.get("memory_service_owner") or ""),
+            str(component.component_id + ".access"),
+            str(getattr(profile, "resource_id", "") or ""),
+        })
+    if aggregate_components and any(
+        demand.bytes_moved > 0 and str(demand.resource_id) in aggregate_resources
+        for demand in task.demands
+    ) and not any(
+        demand.bytes_moved > 0 and str(demand.resource_id) in nonaggregate_resources
+        for demand in task.demands
+    ):
+        # The aggregate execution mode already prices this resource through
+        # the shared analytical service envelope. Keep the planner's normal
+        # demand and skip the physical-address descriptor requirement; HBF
+        # and other physical resources on separate tasks still take the
+        # canonical physical path.
+        return task
     if task.metadata.get("physical_memory_config") is not None:
         _assert_physical_memory_demands(task, scenario)
         return _attach_physical_profile_energy(task, scenario)
-    direct_task = _attach_direct_backing_physical_task(task, scenario)
-    if direct_task is not None:
-        return direct_task
     target_id = task.metadata.get("target_component")
     target = scenario.hardware.component_map().get(target_id)
     target_kind = _kind(target) if target is not None else None
