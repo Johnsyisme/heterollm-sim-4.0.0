@@ -257,6 +257,18 @@ class DramConfig:
         object.__setattr__(self, "kind", kind)
         if generation:
             object.__setattr__(self, "generation", generation)
+        if kind is MemoryKind.HBM and self.control_mode == "jedec_hbm":
+            # Construction, deserialization and dataclasses.replace share the
+            # same dependency rules as the public configuration editor. Source
+            # declarations distinguish derived values from explicit experiments.
+            from ._hbm_dependencies import normalize_hbm_dependencies
+
+            if not isinstance(self.metadata, Mapping):
+                raise ValueError("metadata must be a mapping")
+            normalized = normalize_hbm_dependencies(vars(self))
+            for name, value in normalized.items():
+                object.__setattr__(self, name, value)
+            generation = self.generation
         if self.bank_geometry_scope not in {"per_die", "per_stack"}:
             raise ValueError("bank_geometry_scope must be per_die or per_stack")
         if self.stack_interface_mode not in {"shared", "independent"}:

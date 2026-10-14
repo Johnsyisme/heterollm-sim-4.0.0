@@ -43,6 +43,8 @@ def build_package_scenario(hbm_packages, hbf_packages, architecture, *, model_id
             physical = _hbm_physical_config(capacity_bytes=c.capacity_bytes,
                 read_gb_s=physical.directional_bandwidth_gb_s("read")*count,
                 write_gb_s=physical.directional_bandwidth_gb_s("write")*count,
+                interface_gb_s=physical.physical_interface_bandwidth_gb_s*count,
+                interface_input_scope=physical.metadata.get("interface_input_scope"),
                 stacks=count, profile_id=physical.metadata["physical_config_profile_id"])
             physical=reconfigure_physical_config(physical,
                 overrides={"max_outstanding_requests": outstanding})

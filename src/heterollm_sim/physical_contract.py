@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import asdict, fields, is_dataclass, replace
 from math import gcd
 from typing import Mapping
+from ._hbm_dependencies import normalize_hbm_dependencies
 
 from .memory_types import (
     DRAM_BANK_GROUP_TIMING_FIELDS, HBM_CONTROL_TIMING_FIELDS,
@@ -229,18 +230,15 @@ def reconfigure_physical_config(config, *, overrides=None, expand_geometry=False
             if old in updates:
                 for name in targets:
                     updates.setdefault(name, updates[old])
-        if ("minimum_active_ns" in updates or "precharge_to_activate_ns" in updates) and "activate_cycle_ns" not in updates:
-            updates["activate_cycle_ns"] = (updates.get("minimum_active_ns", parsed.minimum_active_ns)
-                                            + updates.get("precharge_to_activate_ns", parsed.precharge_to_activate_ns))
-        interval = updates.get("refresh_interval_ns")
-        if (isinstance(interval, (int, float)) and not isinstance(interval, bool) and interval > 0
-                and "maximum_active_ns" not in updates):
-            updates["maximum_active_ns"] = 9 * interval
     if "metadata" in updates:
         if not isinstance(updates["metadata"], Mapping):
             raise ValueError("physical config metadata must be a mapping")
         updates["metadata"] = {**payload["metadata"], **updates["metadata"]}
     payload.update(updates)
+    hbm_dependencies = isinstance(parsed, DramConfig) and payload.get("control_mode") == "jedec_hbm"
+    if hbm_dependencies:
+        payload = normalize_hbm_dependencies(payload, previous=asdict(parsed), explicit_fields=updates)
+    rows_before_expansion = payload.get("rows_per_bank")
     if expand_geometry:
         def positive(name):
             value = payload[name]
@@ -276,7 +274,10 @@ def reconfigure_physical_config(config, *, overrides=None, expand_geometry=False
                              "planes_per_lun", "pages_per_block", "page_bytes"):
                     stripe *= positive(name)
                 payload["blocks_per_plane"] = max(positive("blocks_per_plane"), (capacity + stripe - 1) // stripe)
-    if isinstance(parsed, DramConfig):
+    if hbm_dependencies and payload.get("rows_per_bank") != rows_before_expansion:
+        payload = normalize_hbm_dependencies(payload, previous=asdict(parsed),
+                                             explicit_fields=set(updates) | {"rows_per_bank"})
+    if isinstance(parsed, DramConfig) and not hbm_dependencies:
         geometry_fields = {
             "kind", "generation", "channels", "subchannels_per_channel",
             "pseudo_channels_per_channel", "stacks", "dies_per_stack",

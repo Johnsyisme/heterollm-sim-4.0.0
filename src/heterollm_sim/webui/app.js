@@ -5167,6 +5167,17 @@ function validatePhysicalMemoryConfig(value, component) {
   return { ...value, kind };
 }
 
+async function normalizePhysicalMemoryEdit(current, proposed, component) {
+  const previous = asObject(current);
+  const canUpdate = Object.keys(previous).length && Object.keys(previous).every((name) => Object.hasOwn(proposed, name));
+  const overrides = Object.fromEntries(Object.entries(proposed).filter(([name, value]) => !stableMappingEqual(previous[name], value)));
+  const normalized = await apiRequest("/physical-memory-config", {
+    method: "POST",
+    body: JSON.stringify(canUpdate ? { config: previous, overrides } : { config: proposed }),
+  });
+  return validatePhysicalMemoryConfig(normalized, component);
+}
+
 function hbmGeometryMarkup(config) {
   if (!config || String(config.kind || "").toUpperCase() !== "HBM") return "";
   const metadata = asObject(config.metadata);
@@ -5182,6 +5193,11 @@ function hbmGeometryMarkup(config) {
     four_activate_window_ns: "四次激活窗口", read_to_precharge_ns: "读取至预充电间隔",
     write_to_read_same_group_ns: "同组写转读间隔", write_to_read_different_group_ns: "跨组写转读间隔",
     read_to_write_command_ns: "读转写命令间隔", refresh_cycle_ns: "刷新持续时间",
+    activate_to_read_ns: "激活至读取的器件时延", activate_to_write_ns: "激活至写入的器件时延",
+    minimum_active_ns: "最短激活时间", precharge_to_activate_ns: "预充电恢复时间",
+    activate_cycle_ns: "同 bank 再次激活的周期",
+    write_to_precharge_ns: "写恢复时间", column_different_sid_ns: "跨 SID 读取间隔",
+    read_latency_ns: "器件读延迟", write_latency_ns: "器件写延迟",
   };
   const unknown = asArray(metadata.unknown_parameters).map((name) => labels[name] || name);
   const raw = metadata.raw_capacity_bytes;
@@ -5203,7 +5219,9 @@ function dramBankGroupTimingMarkup(config) {
     <div class="inspector-section-body">
       <p class="muted">${uiText("作用域是同一 stack / die / lane / rank。同方向列命令只约束 READ→READ 和 WRITE→WRITE 的命令起点；ACT 是打开行的命令，窗口内最多允许四次 ACT。写转读约束从最后写数据结束算到读命令起点，与数据总线的方向切换时间分别生效。", "Scope is one stack / die / lane / rank. Column intervals constrain READ→READ and WRITE→WRITE command starts. ACT opens a row; its window allows at most four ACTs. Write-to-read intervals run from the last write-data end to the read-command start, separately from data-bus turnaround.")}</p>
       <div class="field-grid-2">${DRAM_BANK_GROUP_TIMING_FIELDS.map(([field, zh, en]) => `<label class="field"><span>${escapeHtml(uiText(zh, en))}（ns）</span><input type="number" min="0" step="any" data-inspector-bank-group-timing="${field}" aria-label="${field}" value="${escapeHtml(config[field] ?? 0)}"></label>`).join("")}</div>
-      <p class="muted">${uiText("每项 0 表示关闭该项约束，旧配置省略时仍为 0。这里不填入任何厂商默认时序；数值需由用户提供。启用这些约束仍不代表完整 JEDEC 模型，刷新等机制未包括在内。", "Zero disables each constraint; omitted legacy fields remain zero. No vendor timing defaults are supplied; provide values explicitly. These constraints do not make the model a complete JEDEC implementation; refresh and other mechanisms remain outside its scope.")}</p>
+      <p class="muted">${config.control_mode === "jedec_hbm"
+        ? uiText("标准可确定的间隔会随几何与接口频率更新。在此手动填写的数值会标记为实验假设；0 表示停用该项约束，不代表器件允许零间隔。未知器件时序仍须由厂商资料确定。", "Known standard intervals follow geometry and interface frequency. Values entered here are experimental assumptions; zero disables a constraint, not a device guarantee. Unknown device timings still require manufacturer data.")
+        : uiText("每项 0 表示关闭该项约束，旧配置省略时仍为 0。这里不填入任何厂商默认时序；数值需由用户提供。启用这些约束仍不代表完整 JEDEC 模型，刷新等机制未包括在内。", "Zero disables each constraint; omitted legacy fields remain zero. No vendor timing defaults are supplied; provide values explicitly. These constraints do not make the model a complete JEDEC implementation; refresh and other mechanisms remain outside its scope.")}</p>
     </div>
   </details>`;
 }
@@ -9310,7 +9328,7 @@ function renderComponentInspector(componentId) {
   bindGpuDenseThroughputControl(component);
   bindHbfMediaFields(component);
   const physicalConfigControl = $("[data-inspector-physical-config]", dom.inspectorContent);
-  physicalConfigControl?.addEventListener("change", () => {
+  physicalConfigControl?.addEventListener("change", async () => {
     const raw = physicalConfigControl.value.trim();
     const historyBefore = topologyHistorySnapshot();
     component.metadata = asObject(component.metadata);
@@ -9325,6 +9343,7 @@ function renderComponentInspector(componentId) {
     let parsed;
     try {
       parsed = validatePhysicalMemoryConfig(JSON.parse(raw), component);
+      parsed = await normalizePhysicalMemoryEdit(component.metadata.physical_memory_config, parsed, component);
     } catch (error) {
       toast("物理配置无效", chineseMessage(error), "error", 7000);
       renderComponentInspector(component.component_id);
@@ -9336,7 +9355,7 @@ function renderComponentInspector(componentId) {
     markScenarioChanged("", { mappingImpact: true, mappingReason: "physical_memory_config 已更新，映射需要重新生成。" });
     renderComponentInspector(component.component_id);
   });
-  $$('[data-inspector-bank-group-timing]', dom.inspectorContent).forEach((control) => control.addEventListener("change", () => {
+  $$('[data-inspector-bank-group-timing]', dom.inspectorContent).forEach((control) => control.addEventListener("change", async () => {
     const field = control.dataset.inspectorBankGroupTiming;
     const value = Number(control.value);
     if (!control.value.trim() || !Number.isFinite(value) || value < 0) {
@@ -9348,6 +9367,7 @@ function renderComponentInspector(componentId) {
     let parsed;
     try {
       parsed = validatePhysicalMemoryConfig({ ...current, [field]: value }, component);
+      parsed = await normalizePhysicalMemoryEdit(current, parsed, component);
     } catch (error) {
       toast("物理配置无效", chineseMessage(error), "error", 7000);
       renderComponentInspector(component.component_id);

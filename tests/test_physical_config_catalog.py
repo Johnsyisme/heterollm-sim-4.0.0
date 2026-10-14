@@ -99,12 +99,27 @@ class PhysicalConfigCatalogTests(unittest.TestCase):
             resolve_physical_config("research_hbm_sessions",
                 overrides={"capacity_bytes": 64 * 1024 ** 3 + 32}, expand_geometry=True)
 
-    def test_micro_profiles_reject_script_geometry_overrides(self):
-        for name, value in (("channels", 4), ("stacks", 2), ("rows_per_bank", 65536),
-                            ("row_bytes", 8192), ("burst_bytes", 64), ("data_lanes", 4),
-                            ("pseudo_channels_per_channel", 1), ("generation", "HBM4")):
+    def test_micro_profiles_share_standard_height_and_stack_dependencies(self):
+        base = resolve_physical_config("research_hbm_package")
+        taller = resolve_physical_config("research_hbm_package", overrides={"dies_per_stack": 8})
+        self.assertEqual((base.dies_per_stack, taller.dies_per_stack), (4, 8))
+        self.assertEqual(taller.bank_count, 32)
+        self.assertEqual(taller.bank_groups_per_rank, 8)
+        self.assertEqual(taller.rows_per_bank, base.rows_per_bank)
+        self.assertEqual(taller.refresh_cycle_ns, 260.)
+        self.assertEqual(taller.metadata["geometry_status"], "standard_organization")
+        stacked = resolve_physical_config("research_hbm_package", overrides={"stacks": 2})
+        self.assertEqual(stacked.stacks, 2)
+        self.assertEqual(stacked.lane_count, 2 * base.lane_count)
+        self.assertEqual(stacked.computed_capacity_bytes, 2 * base.computed_capacity_bytes)
+        self.assertEqual(stacked.command_clock_ns, 2 * base.command_clock_ns)
+        self.assertEqual(stacked.capacity_bytes, base.capacity_bytes)
+
+    def test_micro_profiles_reject_invalid_protocol_geometry(self):
+        for name, value in (("row_bytes", 8192), ("burst_bytes", 64), ("data_lanes", 4),
+                            ("pseudo_channels_per_channel", 1)):
             with self.subTest(name=name):
-                with self.assertRaisesRegex(ValueError, "micro HBM geometry"):
+                with self.assertRaises(ValueError):
                     resolve_physical_config("research_hbm_package", overrides={name: value})
 
     def test_micro_timing_bandwidth_and_queue_axes_remain_configurable(self):

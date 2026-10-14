@@ -24,6 +24,7 @@ import calibrated_hbf_profiles as profiles
 import hbf_hbm_invariants as invariants
 import hbf_hbm_metrics as study_metrics
 from hbf_hbm_core_audit import CoreExecutionAudit
+from hbf_hbm_serving_study import POINT_RESULT_VERSION
 from heterollm_sim.ir import LayerSpec, ModelSpec, RequestSpec, build_model_graph_from_layer_specs
 from heterollm_sim.memory_types import AccessRequest, Operation, parse_physical_memory_config
 from heterollm_sim.physical_contract import reconfigure_physical_config
@@ -40,6 +41,7 @@ PAGE = 16384
 def group(identifier, title, rows, checks, supported, limitations, **extra):
     passed = bool(checks) and all(checks.values())
     return dict(id=identifier, title=title, status="passed" if passed else "failed",
+                point_result_version=POINT_RESULT_VERSION,
                 rows=rows, checks=checks, capability={"supported": supported if passed else [],
                 "unsupported": limitations}, limitations=limitations, **extra)
 
@@ -103,6 +105,8 @@ def scenario(*, hbf=False, prompt=128, count=4, output=8, slots=None,
             profiles._hbm_physical_config(capacity_bytes=kv_budget,
                 read_gb_s=physical.directional_bandwidth_gb_s("read"),
                 write_gb_s=physical.directional_bandwidth_gb_s("write"),
+                interface_gb_s=physical.physical_interface_bandwidth_gb_s,
+                interface_input_scope=physical.metadata.get("interface_input_scope"),
                 profile_id=hbm_timing_profile))
         if not hbf:
             metadata["memory_service_owner"]="hbm_kv.hbm_fabric"
@@ -180,6 +184,7 @@ def serving_row(s, row_id, *, placement=None, result_observer=None):
                   for e in events if e.event_type == "kv_pool_transfer_complete"]
     return {
         "id": row_id, "mode": "full_operator_serving", "model": s.model.name,
+        "point_result_version": POINT_RESULT_VERSION,
         "core_execution_audit": core_execution_audit,
         "hbm_protocol": {owner: profiles.hbm_protocol_summary(item["physical_config"])
                          for owner, item in core_execution_audit.get("executed_physical_configurations", {}).items()
@@ -546,7 +551,7 @@ def main():
     parser.add_argument('--output-dir',type=Path,default=ROOT/'artifacts'/'hbf_hbm')
     parser.add_argument('--groups',default=','.join(str(n) for n in range(1,21)),help='comma-separated group numbers')
     parser.add_argument('--render-only',action='store_true',help='render already saved group results without rerunning simulations')
-    parser.add_argument('--reuse-groups',default='',help='explicitly reuse these already saved groups; caller must ensure their code and assumptions remain applicable')
+    parser.add_argument('--reuse-groups',default='',help='reuse selected saved groups only when their physical-execution version matches')
     parser.add_argument('--resume-study',action='store_true',help='reuse completed study points with matching parameters from this output directory; only use if their code remains applicable')
     parser.add_argument('--workers',type=int,default=1,help='independent named-model worker processes; adaptive SLO search stays serial')
     args=parser.parse_args(); args.output_dir.mkdir(parents=True,exist_ok=True)
@@ -570,6 +575,8 @@ def main():
         if len(files)!=1: parser.error(f'expected one saved result for group {number}, found {len(files)}')
         cached=json.loads(files[0].read_text(encoding='utf-8'))
         if int(cached['id'][:2])!=number: parser.error(f'saved group {number} has wrong id')
+        if cached.get('point_result_version') != POINT_RESULT_VERSION:
+            parser.error(f'saved group {number} uses an older or unknown physical-execution version; rerun it without --reuse-groups')
         groups.append(cached)
     active=selected-reused
     for number,func in ((1,ideal_group),(2,fixed_workload_group),(3,capacity_group),(8,weights_group)):
@@ -614,7 +621,8 @@ def main():
             (args.output_dir/(g['id']+'.json')).write_text(json.dumps(g,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
     groups.sort(key=lambda g:g['id'])
     for g in groups:g['title']=TITLES[int(g['id'][:2])]
-    report={'schema_version':2,'scope':'mechanism microbenchmarks plus full-operator placement/model/tier studies and explicitly conditional economics',
+    report={'schema_version':2,'point_result_version':POINT_RESULT_VERSION,
+        'scope':'mechanism microbenchmarks plus full-operator placement/model/tier studies and explicitly conditional economics',
         'all_selected_checks_passed':all(g['status']=='passed' for g in groups),'groups':groups,
         'external_prediction_accuracy_validated':False,'overall_research_program_complete':False,
         'external_calibration_required':False,'output_directory':args.output_dir.as_posix(),
@@ -635,16 +643,22 @@ def main():
     if set(range(1,9)) <= selected:
         if set(range(1,9))<=reused and all((args.output_dir/name).exists() for name in ('acceptance.json','profiles.json')):
             a=json.loads((args.output_dir/'acceptance.json').read_text(encoding='utf-8'))
+            p=json.loads((args.output_dir/'profiles.json').read_text(encoding='utf-8'))
+            if any(saved.get('point_result_version') != POINT_RESULT_VERSION for saved in (a, p)):
+                parser.error('saved acceptance/profiles use an older or unknown physical-execution version; rerun groups 1-8 without --reuse-groups')
         else:
             print('Running backend acceptance and paper-parameterized profiles',flush=True)
             a=acceptance.run_acceptance()
+            a['point_result_version']=POINT_RESULT_VERSION
             (args.output_dir/'acceptance.json').write_text(json.dumps(a,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
             p=profiles.build_report()
+            p['point_result_version']=POINT_RESULT_VERSION
             (args.output_dir/'profiles.json').write_text(json.dumps(p,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
         report['backend_acceptance_passed']=a['passed']
         report['all_selected_checks_passed'] &= a['passed']
     report['internal_experiment_matrix_complete'] &= report['all_selected_checks_passed']
     for g in groups:
+        g['point_result_version'] = POINT_RESULT_VERSION
         (args.output_dir/(g['id']+'.json')).write_text(json.dumps(g,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
     # Keep the combined machine-readable bundle compact; individual group
     # files above retain indentation for inspection and review.

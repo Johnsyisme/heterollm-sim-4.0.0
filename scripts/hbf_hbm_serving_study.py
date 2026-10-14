@@ -19,9 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-# Version 6 executes JEDEC normal-operation commands and bills CA/DQ occupancy
-# separately. Results from the old controller must be recomputed on resume.
-POINT_RESULT_VERSION = 6
+# Version 7 synchronizes HBM organization, interface clock and dependent timing
+# through the shared configuration contract; old derived values must not resume.
+POINT_RESULT_VERSION = 7
 
 from heterollm_sim.config import model_from_dict
 from heterollm_sim.control_plane_planner import _derive_requirements
@@ -113,6 +113,8 @@ agent-session API or a static hot-hit probability.
                 physical = experiments.profiles._hbm_physical_config(
                     capacity_bytes=capacity, read_gb_s=source.directional_bandwidth_gb_s("read"),
                     write_gb_s=source.directional_bandwidth_gb_s("write"),
+                    interface_gb_s=source.physical_interface_bandwidth_gb_s,
+                    interface_input_scope=source.metadata.get("interface_input_scope"),
                     profile_id=hbm_timing_profile)
             else:
                 physical = reconfigure_physical_config(metadata["physical_memory_config"],

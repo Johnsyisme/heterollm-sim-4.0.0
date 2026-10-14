@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from hbf_hbm_serving_study import build_study_scenario, run_case
+from hbf_hbm_serving_study import build_study_scenario, run_case, POINT_RESULT_VERSION
 from heterollm_sim.serving import RequestStatus
 
 
@@ -135,6 +135,8 @@ def run_sustained_study(*, progress=True, reuse_rows=None):
     # Explicit caller-provided observations from the same study contract can
     # be reclassified when measurement rules change; no timing is fabricated.
     for original in reuse_rows or ():
+        if original.get("point_result_version") != POINT_RESULT_VERSION:
+            raise ValueError("reused sustained row has an older or unknown physical-execution version; rerun without --reuse-existing")
         row = copy.deepcopy(original)
         parameters = row.get("parameters", {})
         if ("sustained" in row and parameters.get("prompt") == 32
@@ -256,6 +258,7 @@ def run_sustained_study(*, progress=True, reuse_rows=None):
     }
     passed = all(checks.values())
     return {"id": "16_sustained", "status": "passed" if passed else "failed", "rows": rows,
+        "point_result_version": POINT_RESULT_VERSION,
         "checks": checks, "arrival_boundaries": boundaries, "concurrency_boundaries": concurrent_boundaries,
         "capability": {"supported": ["full_operator_arrival_backlog_measurement", "warmup_exclusion",
             "three_horizon_finite_sustainability_bracket", "adjacent_concurrency_local_boundary"] if passed else [],

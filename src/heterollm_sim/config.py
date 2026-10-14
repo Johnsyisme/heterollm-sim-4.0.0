@@ -1071,7 +1071,13 @@ def hardware_from_dict(data: Mapping[str, Any]) -> HardwareSpec:
         from .physical_contract import PHYSICAL_MEMORY_COMPONENT_KINDS, parse_required_physical_config
         component_kind = normalize_component_kind(str(values.get("kind", "")))
         if component_kind in PHYSICAL_MEMORY_COMPONENT_KINDS:
-            parse_required_physical_config(component_id, component_kind, metadata.get("physical_memory_config"))
+            physical = parse_required_physical_config(component_id, component_kind, metadata.get("physical_memory_config"))
+            if getattr(physical, "control_mode", None) == "jedec_hbm":
+                from dataclasses import asdict
+
+                # Store the same geometry/timing values that execution uses,
+                # including when only hardware is loaded without a scenario.
+                metadata = {**metadata, "physical_memory_config": asdict(physical)}
         if (
             metadata.get("bandwidth_mode") is None
             and read_bandwidth > 0.0

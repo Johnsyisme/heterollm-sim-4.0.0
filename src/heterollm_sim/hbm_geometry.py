@@ -13,6 +13,8 @@ import math
 from typing import Any
 
 from .memory_types import DRAM_BANK_GROUP_TIMING_FIELDS, DramConfig
+from ._hbm_dependencies import (organization_for, refresh_cycle_ns_for, clock_ns_for,
+                                reference_timings, normalize_hbm_dependencies)
 
 
 HBM_GENERATIONS = frozenset({"HBM2", "HBM2E", "HBM3", "HBM3E", "HBM4"})
@@ -126,13 +128,14 @@ def make_hbm_geometry_config(
             "a supported die density and stack height; rows are not expanded."
         )
     raw_stack_capacity, _, density, height = min(candidates)
+    organization = organization_for(generation, density, height)
     sid_count = height // 4
     # 16 BA values per SID. Each PC independently addresses this bank space.
     banks_per_pc = 16 * sid_count
-    banks_per_group = 8 if hbm4 else 4
-    groups_per_pc = banks_per_pc // banks_per_group
-    rows = density * (512 if hbm4 else 1024 if hbm3 else 2048)
-    pc_width = 32 if hbm3 or hbm4 else 64
+    banks_per_group = organization["banks_per_group"]
+    groups_per_pc = organization["bank_groups_per_rank"]
+    rows = organization["rows_per_bank"]
+    pc_width = organization["data_width_bits"]
     lanes = stacks * physical_channels * 2
     interface_gb_s = (_positive_bandwidth("interface_bandwidth_gbps", interface_bandwidth_gbps)
                       if interface_bandwidth_gbps is not None else
@@ -140,7 +143,7 @@ def make_hbm_geometry_config(
     lane_gb_s = interface_gb_s / lanes
     # HBM2: 64 DQ * 2 transfers/CK; HBM3/4: 32 DQ * 4 transfers/CK.
     # Every PC therefore transfers 16 bytes/CK; a 32-byte burst takes 2 CK.
-    clock_ns = 16.0 / lane_gb_s
+    clock_ns = clock_ns_for(generation, pc_width, lanes, interface_gb_s)
     if read_latency_ns is not None and read_latency_cycles is not None:
         raise ValueError("choose read_latency_ns or read_latency_cycles, not both")
     if write_latency_ns is not None and write_latency_cycles is not None:
@@ -153,16 +156,10 @@ def make_hbm_geometry_config(
     write_latency_ns = wl * clock_ns if write_latency_ns is None else write_latency_ns
     # These values occur in the standards' IDD measurement EXAMPLE tables.
     # They are a named reference operating condition, not vendor AC limits.
-    reference_ras = math.ceil(33.0 / clock_ns) * clock_ns
-    reference_rp = math.ceil(15.0 / clock_ns) * clock_ns
-    if hbm4:
-        refresh_ns = {24: {4: 360., 8: 410., 12: 450., 16: 490.},
-                      32: {4: 400., 8: 450., 12: 490., 16: 530.}}[density][height]
-    elif hbm3:
-        refresh_ns = {(8, 8): 260., (8, 12): 310., (8, 16): 350.,
-                      (16, 4): 260., (16, 8): 350., (16, 12): 410., (16, 16): 450.}.get((density, height))
-    else:
-        refresh_ns = {4: 350., 8: 450.}[height]
+    timing_reference = reference_timings(generation, clock_ns)
+    reference_ras = timing_reference["minimum_active_ns"]
+    reference_rp = timing_reference["precharge_to_activate_ns"]
+    refresh_ns = refresh_cycle_ns_for(generation, density, height)
     if hbm4:
         organization_source = JESD270_4A_SOURCE
         standard = "JESD270-4A"
@@ -291,10 +288,10 @@ def make_hbm_geometry_config(
         minimum_active_ns=reference_ras, maximum_active_ns=9 * 3900.0,
         activate_cycle_ns=reference_ras + reference_rp,
         read_to_precharge_ns=0.0, write_to_precharge_ns=15.0,
-        precharge_to_precharge_ns=2 * clock_ns,
-        column_same_group_ns=max(4 * clock_ns, 2.5 if hbm3 or hbm4 else 2.8),
-        column_different_group_ns=2 * clock_ns,
-        column_different_sid_ns=4 * clock_ns,
+        precharge_to_precharge_ns=timing_reference["precharge_to_precharge_ns"],
+        column_same_group_ns=timing_reference["column_same_group_ns"],
+        column_different_group_ns=timing_reference["column_different_group_ns"],
+        column_different_sid_ns=timing_reference["column_different_sid_ns"],
         refresh_policy="all_bank" if refresh_ns is not None else "disabled",
         refresh_interval_ns=3900.0 if refresh_ns is not None else 0.0,
         refresh_cycle_ns=refresh_ns or 0.0,
@@ -352,6 +349,9 @@ def make_hbm_geometry_config(
     for name, supplied in (("read_latency_ns", supplied_read_latency), ("write_latency_ns", supplied_write_latency)):
         record((name,), "caller_supplied" if supplied else "selected_reference", organization_source,
                "legal whole-CK MR encoding; actual device support and operating speed bin remain unverified; defaults choose RL32/WL8")
+        explicit_ns = read_latency_cycles is None and supplied_read_latency if name == "read_latency_ns" else write_latency_cycles is None and supplied_write_latency
+        provenance[name].update(input_unit="ns" if explicit_ns else "cycles",
+                                cycles=(read_latency_ns if name == "read_latency_ns" else write_latency_ns) / clock_ns)
     record(("column_same_group_ns", "column_different_group_ns", "precharge_to_precharge_ns"),
            "standard_minimum", organization_source,
            "AC table: tCCDS=2CK; tCCDL=max(4CK,2.8ns) for HBM2 or max(4CK,2.5ns) for HBM3/4; tPPD=2CK")
@@ -392,4 +392,6 @@ def make_hbm_geometry_config(
     if refresh_ns is None:
         metadata["unknown_parameters"].append("refresh_cycle_ns")
     metadata["parameter_provenance"] = provenance
-    return asdict(config)
+    payload = asdict(config)
+    payload["metadata"] = metadata
+    return normalize_hbm_dependencies(payload)

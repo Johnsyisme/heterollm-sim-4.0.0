@@ -406,6 +406,8 @@ def _profile_by_id(profile_id: str) -> CalibratedProfile:
 
 def _hbm_physical_config(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
                          stacks: Optional[int] = None,
+                         interface_gb_s: Optional[float] = None,
+                         interface_input_scope: Optional[str] = None,
                          profile_id: str = "hbm3e_reference"):
     """Apply a paper/user capacity budget to an explicitly selected reference.
 
@@ -414,7 +416,8 @@ def _hbm_physical_config(*, capacity_bytes: int, read_gb_s: float, write_gb_s: f
     let the shared catalog select and label a covering reference organization.
     """
     overrides = {"capacity_bytes": capacity_bytes,
-        "interface_bandwidth_gb_s": max(read_gb_s, write_gb_s),
+        "interface_bandwidth_gb_s": (max(read_gb_s, write_gb_s)
+                                      if interface_gb_s is None else interface_gb_s),
         "read_bandwidth_gb_s": read_gb_s, "write_bandwidth_gb_s": write_gb_s,
         "metadata": {
             "capacity_input_scope": "paper_or_user_usable_capacity_budget",
@@ -422,18 +425,22 @@ def _hbm_physical_config(*, capacity_bytes: int, read_gb_s: float, write_gb_s: f
             "source_stack_count": stacks,
             "source_stack_count_status": "declared_input" if stacks is not None else "unknown_reference_selected",
             "source_device_geometry_known": False,
+            "interface_input_scope": interface_input_scope or (
+                "assumed_peak_equals_max_directional_budget"
+                if interface_gb_s is None else "declared_physical_interface_budget"),
         }}
     if stacks is not None:
         overrides["stacks"] = stacks
-    return resolve_physical_config(profile_id, overrides=overrides, expand_geometry=True)
+    return resolve_physical_config(profile_id, overrides=overrides)
 
 
 def _hbm_core(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
               stacks: Optional[int] = None,
+              interface_gb_s: Optional[float] = None,
               profile_id: str = "hbm3e_reference") -> DramCore:
     return DramCore(_hbm_physical_config(capacity_bytes=capacity_bytes,
         read_gb_s=read_gb_s, write_gb_s=write_gb_s, stacks=stacks,
-        profile_id=profile_id), capture_details=False)
+        interface_gb_s=interface_gb_s, profile_id=profile_id), capture_details=False)
 
 
 def _hbf_core(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
@@ -464,10 +471,13 @@ def hbm_protocol_summary(config) -> dict[str, Any]:
         **{key: values.get(key) for key in (
             "generation", "control_mode", "command_clock_ns", "maximum_active_ns",
             "read_latency_ns", "write_latency_ns", "refresh_policy",
-            "refresh_interval_ns", "refresh_cycle_ns")},
+            "refresh_interval_ns", "refresh_cycle_ns", "bandwidth_input_mode",
+            "interface_bandwidth_gb_s", "data_rate_mt_s", "effective_pin_data_rate_gbps",
+            "read_bandwidth_gb_s", "write_bandwidth_gb_s")},
         **{key: metadata.get(key) for key in (
             "geometry_status", "control_status", "timing_validation", "timing_basis",
-            "unknown_parameters", "unconfigured_timing_parameters", "control_limitations", "accounting_basis")},
+            "unknown_parameters", "unconfigured_timing_parameters", "control_limitations", "accounting_basis",
+            "interface_input_scope", "operating_point_basis", "directional_cap_basis")},
     }
 
 
@@ -572,6 +582,7 @@ def _profile_hardware(profile: CalibratedProfile, *,
             capacity_bytes=max(PAGE * 64, int(float(hbm_cap) * GB)),
             read_gb_s=hbm_read,
             write_gb_s=hbm_write or hbm_read,
+            interface_gb_s=bw.get("hbm_interface_gb_s"),
             stacks=int(p.hardware["hbm_stacks"]) if p.hardware.get("hbm_stacks") else None,
         )
     hbf_cap = p.hardware.get("hbf_capacity_gb")
@@ -685,10 +696,11 @@ def _full_backend_scenario(
                   else 8 if profile.profile_id == "son_hbf_plus" else None)
     physical_hbm = _hbm_physical_config(capacity_bytes=hbm_capacity,
         read_gb_s=hbm_read, write_gb_s=hbm_write, stacks=hbm_stacks,
+        interface_gb_s=bw.get("hbm_interface_gb_s"),
         profile_id=hbm_timing_profile or (
             "hbm4_reference" if profile.profile_id == "son_hbf_plus" else "hbm3e_reference"))
     hbm0 = base.hardware.get_component("hbm0")
-    hbm_link_gbps = max(hbm_read, hbm_write, 1.0) * 8.0
+    hbm_link_gbps = physical_hbm.physical_interface_bandwidth_gb_s * 8.0
     hbm_link_version = "4.0" if physical_hbm.generation == "HBM4" else "3.0"
     hbm0 = replace(
         hbm0,
@@ -829,7 +841,7 @@ def _full_backend_scenario(
     hbm_profile = component_profiles["hbm"]["legacy-hbm-0"]
     component_profiles["hbm"]["legacy-hbm-0"] = replace(
         hbm_profile,
-        bandwidth_gb_s=hbm_read,
+        bandwidth_gb_s=physical_hbm.physical_interface_bandwidth_gb_s,
         read_bandwidth_gb_s=hbm_read,
         write_bandwidth_gb_s=hbm_write,
         measured_effective_bandwidth_gb_s=None,

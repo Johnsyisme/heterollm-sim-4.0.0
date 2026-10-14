@@ -446,6 +446,7 @@ class HeteroLLMRequestHandler(BaseHTTPRequestHandler):
             if path in {
                 "/api/validate",
                 "/api/normalize",
+                "/api/physical-memory-config",
                 "/api/run",
                 "/api/simulate-score",
                 "/api/run-estimate",
@@ -502,6 +503,9 @@ class HeteroLLMRequestHandler(BaseHTTPRequestHandler):
                     payload, model_artifact_dir=model_artifact_dir
                 )
                 self._send_json(200, scenario_to_payload(scenario))
+                return
+            if path == "/api/physical-memory-config":
+                self._send_json(200, physical_memory_config_payload(self._read_json_object()))
                 return
             if path == "/api/run":
                 payload = self._read_json_object()
@@ -1384,6 +1388,23 @@ def validation_payload_for_scenario(scenario: ScenarioConfig) -> Dict[str, Any]:
             ],
         },
     }
+
+
+def physical_memory_config_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Apply inspector edits through the same dependency rules as experiments."""
+    from .physical_contract import parse_execution_physical_config, reconfigure_physical_config
+
+    try:
+        unexpected = set(payload) - {"config", "overrides"}
+        if unexpected:
+            raise ValueError("unknown physical config request fields: " + ", ".join(sorted(unexpected)))
+        config = payload.get("config")
+        parsed = (reconfigure_physical_config(config, overrides=payload["overrides"])
+                  if "overrides" in payload else parse_execution_physical_config(config))
+        return to_primitive(parsed)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HttpError(422, "invalid_physical_memory_config", "物理内存配置无效：" + str(exc),
+                        message_en=str(exc)) from exc
 
 
 def scenario_or_http_error(

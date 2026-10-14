@@ -16,7 +16,7 @@ from math import ceil, isfinite
 from typing import Any, Dict, Mapping
 
 from .memory_types import DramConfig, NandConfig, DRAM_BANK_GROUP_TIMING_FIELDS, HBM_CONTROL_TIMING_FIELDS
-from .hbm_geometry import make_hbm_geometry_config
+from .hbm_geometry import make_hbm_geometry_config, normalize_hbm_generation
 from .physical_contract import parse_execution_physical_config, reconfigure_physical_config
 
 
@@ -178,8 +178,8 @@ _PHYSICAL_CONFIG_CATALOG["research_hbf_ablation"] = _preset(
 
 # One physical stack per non-ideal microbenchmark Core. Small capacity values
 # remain visible budgets over a standard covering part, not invented small
-# DRAM dies. Capacity/bandwidth and timing/queue experiment variables may vary;
-# the geometry is selected centrally and cannot be replaced by caller fields.
+# DRAM dies. Explicit overrides use the same dependency rules as every other
+# HBM reference; the single-stack defaults are not a second validation policy.
 _HBM_MICRO_TIMING_AND_QUEUE = {
     "max_outstanding_requests": 64, "max_expanded_segments": 1000000,
 }
@@ -190,13 +190,6 @@ _HBM_MICRO_REFERENCE_DEFAULTS = {
     "research_hbm_package": {"capacity_bytes": 33554432, "interface_bandwidth_gb_s": 256.0},
     "research_hbm_path_relay": {"capacity_bytes": 16777216, "interface_bandwidth_gb_s": 128.0},
 }
-_HBM_MICRO_SELECTED_GEOMETRY = frozenset({
-    "kind", "generation", "channels", "subchannels_per_channel", "pseudo_channels_per_channel",
-    "stacks", "dies_per_stack", "ranks_per_channel", "bank_groups_per_rank", "banks_per_group",
-    "rows_per_bank", "row_bytes", "burst_bytes", "data_width_bits", "data_lanes", "interleave_bytes",
-    "bank_geometry_scope", "stack_interface_mode",
-})
-
 # Old published_* names remain readable, but no longer select the legacy
 # 8-channel / 8 KiB equivalent array. These are standard-organization research
 # references, not evidence of a particular GPU's undisclosed memory parts.
@@ -218,54 +211,55 @@ _HBM_REFERENCE_PROFILES = {
 
 
 def _hbm_reference(profile_id, updates, expand_geometry=False):
+    if "kind" in updates and str(getattr(updates["kind"], "value", updates["kind"])).upper() != "HBM":
+        raise ValueError("physical config profile kind cannot be changed by overrides")
     requested_fields = sorted(updates)
     micro_reference = profile_id in _HBM_MICRO_REFERENCE_DEFAULTS
     values = {}
     if micro_reference:
-        blocked = _HBM_MICRO_SELECTED_GEOMETRY.intersection(updates)
-        if blocked:
-            raise ValueError("micro HBM geometry is selected by the standard single-stack catalog; "
-                             "experiment overrides cannot include " + ", ".join(sorted(blocked)))
         values.update(deepcopy(_HBM_MICRO_TIMING_AND_QUEUE))
         values.update(deepcopy(_HBM_MICRO_REFERENCE_DEFAULTS[profile_id]))
         values.update(generation="HBM3E", stacks=1)
     values.update(deepcopy(dict(updates)))
     capacity = values.pop("capacity_bytes", 512 * 1024 ** 3)
-    generation = values.pop("generation", "HBM4" if profile_id.startswith("hbm4_") else "HBM3E")
+    generation = normalize_hbm_generation(values.pop(
+        "generation", "HBM4" if profile_id.startswith("hbm4_") else "HBM3E"))
     stacks = values.pop("stacks", None)
     if stacks is None:
-        max_stack_bytes = (16 if generation.upper() in {"HBM2", "HBM2E"} else 64) * 1024 ** 3
+        max_stack_bytes = (16 if generation in {"HBM2", "HBM2E"} else 64) * 1024 ** 3
         stacks = max(8, (capacity + max_stack_bytes - 1) // max_stack_bytes)
     interface = values.pop("interface_bandwidth_gb_s", 4000.0)
-    read = values.pop("read_bandwidth_gb_s", interface)
-    write = values.pop("write_bandwidth_gb_s", interface)
-    read = interface if read is None else read
-    write = interface if write is None else write
+    # A rate-mode caller may clear the old bandwidth field. The seed only
+    # establishes a complete organization; the public contract applies the
+    # explicit None and rate/clock together below.
+    if interface is None:
+        interface = _HBM_MICRO_REFERENCE_DEFAULTS.get(profile_id, {}).get(
+            "interface_bandwidth_gb_s", 4000.0)
+    values.pop("read_bandwidth_gb_s", None)
+    values.pop("write_bandwidth_gb_s", None)
     channels = values.pop("channels", None)
     height = values.pop("dies_per_stack", None)
+    density = values.pop("die_density_gbits", None)
     metadata = values.pop("metadata", {})
     if not isinstance(metadata, Mapping):
         raise ValueError("physical config metadata must be a mapping")
     payload = make_hbm_geometry_config(
         generation=generation, capacity_bytes=capacity, stacks=stacks,
-        dies_per_stack=height, channels=channels,
-        read_bandwidth_gbps=read * 8.0, write_bandwidth_gbps=write * 8.0,
+        dies_per_stack=height, die_density_gbits=density, channels=channels,
+        read_bandwidth_gbps=interface * 8.0, write_bandwidth_gbps=interface * 8.0,
         interface_bandwidth_gbps=interface * 8.0,
         scope="research_hbm_standard_organization",
     )
     mode = _HBM_REFERENCE_PROFILES[profile_id]
-    changes = {"interface_bandwidth_gb_s": interface}
+    # The builder selected the initial operating point. Reapply only caller
+    # inputs here: passing its default interface as an override would conflict
+    # with a clock-only input, and forgetting explicit caps could retime them.
+    changes = {name: updates[name] for name in (
+        "interface_bandwidth_gb_s", "read_bandwidth_gb_s", "write_bandwidth_gb_s")
+        if name in updates}
     if mode == "flat":
         changes.update(bank_groups_per_rank=1,
                        banks_per_group=payload["bank_groups_per_rank"] * payload["banks_per_group"])
-    elif mode == "timed":
-        changes.update({name: max(payload[name], _SYNTHETIC_BANK_GROUPS[name])
-                        for name in DRAM_BANK_GROUP_TIMING_FIELDS})
-    # The interface rate follows the total across independent stacks; it is
-    # a derived operating point, never a measured device speed bin.
-    total_dq = (stacks * payload["channels"] * payload["pseudo_channels_per_channel"]
-                * payload["data_width_bits"])
-    changes["data_rate_mt_s"] = interface * 8000 / total_dq
     changes.update(values)
     changes["metadata"] = {
         **metadata,
@@ -279,20 +273,45 @@ def _hbm_reference(profile_id, updates, expand_geometry=False):
         "profile_name_basis": "legacy flat_zero/zero aliases no longer disable known JEDEC timing minima; inspect actual fields",
     }
     if micro_reference:
-        provenance = deepcopy(payload["metadata"]["parameter_provenance"])
+        provenance = {**deepcopy(payload["metadata"]["parameter_provenance"]),
+                      **deepcopy(metadata.get("parameter_provenance", {}))}
         for name in _HBM_MICRO_TIMING_AND_QUEUE:
             provenance[name] = {
                 "status": "explicit_assumption", "source": "physical_config_override" if name in updates else "physical_presets",
                 "basis": "authored microbenchmark timing or queue control, retained separately from the standard HBM organization; not vendor calibration",
             }
         changes["metadata"].update(
-            configuration_scope="single_stack_hbm_microbenchmark",
-            reference_profile_id="hbm3e_reference",
+            configuration_scope="hbm_microbenchmark",
+            reference_profile_id="hbm4_reference" if generation == "HBM4" else "hbm3e_reference"
+                if generation in {"HBM3", "HBM3E"} else "JESD235B_reference",
             timing_basis=payload["metadata"]["timing_basis"],
-            capacity_input_scope="microbenchmark visible capacity budget over one covering standard HBM3E stack",
+            capacity_input_scope="microbenchmark visible capacity budget over a covering standard HBM organization",
             parameter_provenance=provenance,
         )
-    return reconfigure_physical_config(payload, overrides=changes, expand_geometry=expand_geometry)
+    result = reconfigure_physical_config(payload, overrides=changes, expand_geometry=expand_geometry)
+    if mode == "timed":
+        # Unknown array timings remain fixed ns assumptions. Column spacing
+        # retains its max(standard minimum, analytical floor) dependency so
+        # later clock changes still use the current JEDEC minimum.
+        dependent = {"column_same_group_ns", "column_different_group_ns"}
+        synthetic = {name: max(getattr(result, name), _SYNTHETIC_BANK_GROUPS[name])
+                     for name in DRAM_BANK_GROUP_TIMING_FIELDS
+                     if name not in updates and name not in dependent}
+        synthetic = {name: value for name, value in synthetic.items()
+                     if value != getattr(result, name)}
+        if synthetic:
+            result = reconfigure_physical_config(result, overrides=synthetic)
+        provenance = deepcopy(result.metadata["parameter_provenance"])
+        for name in dependent - updates.keys():
+            provenance[name] = {
+                "status": "derived_from_input", "source": "physical_presets",
+                "rule": "max_standard_minimum_and_analytical_floor",
+                "analytical_floor_ns": float(_SYNTHETIC_BANK_GROUPS[name]),
+                "basis": "maximum of the current JEDEC column-spacing minimum and an authored synthetic ns floor; not vendor calibration",
+            }
+        result = reconfigure_physical_config(result,
+            overrides={"metadata": {"parameter_provenance": provenance}})
+    return result
 
 
 for _reference_id in _HBM_REFERENCE_PROFILES:
@@ -378,20 +397,23 @@ load_physical_config = resolve_physical_config
 def make_analytical_dram_config(
     *, kind: str, generation: str, capacity_bytes: int,
     read_bandwidth_gbps: float, write_bandwidth_gbps: float,
-    channels: int = 1, data_width_bits: int = 64,
+    channels: int | None = None, data_width_bits: int = 64,
+    interface_bandwidth_gbps: float | None = None,
     read_latency_ns: float = 35.0, write_latency_ns: float = 35.0,
     scope: str = "equivalent_memory_subsystem",
 ) -> Dict[str, Any]:
     """Select sourced HBM organization or an explicitly analytical DRAM array."""
-    if kind.upper() == "HBM" and generation.upper().replace("-", "") in {
+    normalized_generation = generation.strip().upper().replace("-", "").replace("_", "")
+    if kind.upper() == "HBM" and normalized_generation in {
         "HBM2", "HBM2E", "HBM3", "HBM3E", "HBM4",
     }:
-        max_stack_bytes = (16 if generation.upper() in {"HBM2", "HBM2E"} else 64) * 1024 ** 3
+        max_stack_bytes = (16 if normalized_generation in {"HBM2", "HBM2E"} else 64) * 1024 ** 3
         reference_stacks = max(1, (capacity_bytes + max_stack_bytes - 1) // max_stack_bytes)
         result = make_hbm_geometry_config(
-            generation=generation, capacity_bytes=capacity_bytes,
+            generation=normalized_generation, capacity_bytes=capacity_bytes,
             read_bandwidth_gbps=read_bandwidth_gbps,
             write_bandwidth_gbps=write_bandwidth_gbps, channels=channels,
+            interface_bandwidth_gbps=interface_bandwidth_gbps,
             stacks=reference_stacks,
             scope=scope,
         )
@@ -405,11 +427,13 @@ def make_analytical_dram_config(
                 "basis": "minimum reference stack count covering this aggregate budget; actual product stack count unverified",
             }
             result["metadata"]["unknown_parameters"].append("vendor_stack_count")
-        return result
+        return asdict(reconfigure_physical_config(result))
+    channels = 1 if channels is None else channels
     groups, banks, row_bytes, burst_bytes = 4, 4, 8192, 64
     bank_count = channels * groups * banks
     rows = (capacity_bytes + bank_count * row_bytes - 1) // (bank_count * row_bytes)
-    interface_gb_s = max(read_bandwidth_gbps, write_bandwidth_gbps) / 8.0
+    interface_gb_s = (max(read_bandwidth_gbps, write_bandwidth_gbps)
+                      if interface_bandwidth_gbps is None else interface_bandwidth_gbps) / 8.0
     lane_gb_s = interface_gb_s / channels
     payload = deepcopy(_DRAM_RESEARCH_BASE)
     payload.update(

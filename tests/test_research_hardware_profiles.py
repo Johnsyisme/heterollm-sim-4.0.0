@@ -1,7 +1,10 @@
 """Research inputs resolve through the same explicit physical catalog."""
 from dataclasses import asdict, replace
+import json
 from pathlib import Path
 import sys
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "src")]
@@ -154,7 +157,56 @@ def test_completion_matrix_requires_executed_group_twenty_rows():
     row = next(r for r in experiments.completion_matrix([
         {"id": "20_bank_group_decode", "status": "passed"}]) if r["groups"] == [20])
     assert row["status"] == "本次未完成"
-    assert study.POINT_RESULT_VERSION == 6
+    assert study.POINT_RESULT_VERSION == 7
+
+
+def test_script_directional_budgets_do_not_change_an_explicit_physical_interface():
+    configs = [profiles._hbm_physical_config(
+        capacity_bytes=1024**2, stacks=1, interface_gb_s=512.,
+        read_gb_s=read, write_gb_s=write)
+        for read, write in ((128., 64.), (64., 32.))]
+    for config in configs:
+        assert config.physical_interface_bandwidth_gb_s == 512.
+        assert config.command_clock_ns == 1.
+        assert config.column_different_group_ns == 2.
+        assert config.read_latency_ns == 32.
+        assert config.write_latency_ns == 8.
+        assert config.metadata["interface_input_scope"] == "declared_physical_interface_budget"
+    assert [(c.read_bandwidth_gb_s, c.write_bandwidth_gb_s) for c in configs] == [
+        (128., 64.), (64., 32.)]
+    inferred = profiles._hbm_physical_config(
+        capacity_bytes=1024**2, stacks=1, read_gb_s=128., write_gb_s=64.)
+    assert inferred.physical_interface_bandwidth_gb_s == 128.
+    assert inferred.command_clock_ns == 4.
+    assert inferred.metadata["interface_input_scope"] == "assumed_peak_equals_max_directional_budget"
+
+
+@pytest.mark.parametrize("version", [None, 6])
+def test_group_reuse_rejects_old_or_unknown_execution_versions_before_running(tmp_path, monkeypatch, capsys, version):
+    cached = {"id": "01_ideal", "status": "passed", "rows": []}
+    if version is not None:
+        cached["point_result_version"] = version
+    (tmp_path / "01_ideal.json").write_text(json.dumps(cached), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["hbf_hbm_experiments", "--output-dir", str(tmp_path),
+                                     "--groups", "1", "--reuse-groups", "1"])
+    monkeypatch.setattr(experiments, "ideal_group", lambda: pytest.fail("stale reuse must be rejected before simulation"))
+    with pytest.raises(SystemExit) as error:
+        experiments.main()
+    assert error.value.code == 2
+    assert "older or unknown physical-execution version" in capsys.readouterr().err
+    assert not (tmp_path / "results.json").exists()
+
+
+@pytest.mark.parametrize("version", [None, 6])
+def test_sustained_reuse_rejects_old_or_unknown_execution_versions_before_running(monkeypatch, version):
+    import hbf_hbm_sustained_study as sustained
+    cached = {"id": "old-observation"}
+    if version is not None:
+        cached["point_result_version"] = version
+    monkeypatch.setattr(sustained, "run_arrival_case", lambda *args, **kwargs:
+                        pytest.fail("stale reuse must be rejected before simulation"))
+    with pytest.raises(ValueError, match="older or unknown physical-execution version"):
+        sustained.run_sustained_study(progress=False, reuse_rows=[cached])
 
 
 def test_core_audit_retains_hbm_command_observations_separately_from_unknown_dram():
