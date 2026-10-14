@@ -264,61 +264,27 @@ def _subtract_recency_ranges(
     return _merge_recency_ranges(result)
 
 
-def _overwrite_consumer_range(
+def _retain_consumer_range(
     anchors: list[Tuple[int, int, str]],
     start: int,
     end: int,
     consumer_task_id: str,
 ) -> None:
-    """Overwrite one range in a sorted, non-overlapping consumer map.
+    """Retain every unfinished consumer, including overlapping readers.
 
-    Released residency leases form an interval map: the most recently
-    released consumer for a byte range is the dependency of its next
-    eviction.  The generic implementation rebuilt every existing interval
-    for every released lease.  A serving invocation releases thousands of
-    tensor-view leases, so that otherwise turns a bounded (roughly 122-range)
-    owner map into millions of Python-level range operations.
-
-    ``anchors`` is kept in exactly the same ``(start, end, task)`` order as
-    the former subtract-all-then-sort implementation.  Only intervals that
-    overlap the replacement are inspected; list splicing handles the
-    unaffected prefix and suffix in C.
+    Lease release happens during DAG construction, not at task completion.
+    Release order therefore proves no happens-before relation. Adjacent entries
+    for the same task can be merged, but a different consumer cannot replace it.
+    The serving runtime retires these anchors after a successful whole cohort.
     """
-
     if end <= start:
         return
-
-    # Non-overlapping intervals sorted by start also have monotonic ends.
-    # Find the first interval whose end is strictly beyond ``start`` so an
-    # interval ending exactly at the replacement boundary remains untouched.
-    low = 0
-    high = len(anchors)
-    while low < high:
-        middle = (low + high) // 2
-        if anchors[middle][1] <= start:
-            low = middle + 1
-        else:
-            high = middle
-    first = low
-
-    last = first
-    left_fragment: Optional[Tuple[int, int, str]] = None
-    right_fragment: Optional[Tuple[int, int, str]] = None
-    while last < len(anchors) and anchors[last][0] < end:
-        anchor_start, anchor_end, task_id = anchors[last]
-        if anchor_start < start:
-            left_fragment = (anchor_start, start, task_id)
-        if anchor_end > end:
-            right_fragment = (end, anchor_end, task_id)
-        last += 1
-
-    replacement: list[Tuple[int, int, str]] = []
-    if left_fragment is not None:
-        replacement.append(left_fragment)
-    replacement.append((start, end, consumer_task_id))
-    if right_fragment is not None:
-        replacement.append(right_fragment)
-    anchors[first:last] = replacement
+    if anchors and anchors[-1][2] == consumer_task_id:
+        old_start, old_end, _ = anchors[-1]
+        if start <= old_end and old_start <= end:
+            anchors[-1] = (min(start, old_start), max(end, old_end), consumer_task_id)
+            return
+    anchors.append((start, end, consumer_task_id))
 
 
 @dataclass
@@ -1184,34 +1150,26 @@ class AllocationResidencyManager:
         anchors = self._released_consumer_ranges.setdefault(
             lease.owner_id, []
         )
-        # ``acquire_lease`` always resolves one contiguous physical extent.
-        # Retain a generic fallback for defensive compatibility with any
-        # hand-built internal lease containing multiple ranges.
-        if len(lease.residency_ranges) <= 1:
-            for start, end in lease.residency_ranges:
-                _overwrite_consumer_range(
-                    anchors,
-                    start,
-                    end,
-                    lease.consumer_task_id,
-                )
-        else:
-            retained: list[Tuple[int, int, str]] = []
-            for start, end, task_id in anchors:
-                retained.extend(
-                    (fragment_start, fragment_end, task_id)
-                    for fragment_start, fragment_end in _subtract_ranges(
-                        [(start, end)], lease.residency_ranges
-                    )
-                )
-            retained.extend(
-                (start, end, lease.consumer_task_id)
-                for start, end in lease.residency_ranges
-            )
-            retained.sort(key=lambda item: (item[0], item[1], item[2]))
-            self._released_consumer_ranges[lease.owner_id] = retained
+        for start, end in lease.residency_ranges:
+            _retain_consumer_range(anchors, start, end, lease.consumer_task_id)
         self._validate_mutation_boundary()
         return lease
+
+    def retire_completed_consumers(self, consumer_task_ids: Iterable[str]) -> None:
+        """Remove anchors only after the caller proves those tasks completed."""
+        if isinstance(consumer_task_ids, (str, bytes)):
+            raise ResidencyValidationError("completed consumers must be a collection of task ids")
+        completed = set(consumer_task_ids)
+        if any(not isinstance(task_id, str) or not task_id for task_id in completed):
+            raise ResidencyValidationError("completed consumers require nonempty task ids")
+        if any(lease.consumer_task_id in completed for lease in self._leases.values()):
+            raise ResidencyValidationError("cannot retire a consumer with active residency leases")
+        for owner_id, anchors in tuple(self._released_consumer_ranges.items()):
+            retained = [row for row in anchors if row[2] not in completed]
+            if retained:
+                self._released_consumer_ranges[owner_id] = retained
+            else:
+                self._released_consumer_ranges.pop(owner_id, None)
 
     def release_consumer_leases(
         self, consumer_task_id: str

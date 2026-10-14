@@ -46,7 +46,7 @@ def _repeat_add(value: float, increment: float, count: int) -> float:
 
 
 @lru_cache(maxsize=128)
-def _mapping_cycle(lanes, banks, groups, banks_per_group, inner,
+def _mapping_cycle(lanes, banks, groups, banks_per_group,
                    bank_prefix, command_prefix, data_prefix, shared, stack, die):
     """Immutable resource IDs for one row-periodic address-mapping cycle.
 
@@ -62,7 +62,10 @@ def _mapping_cycle(lanes, banks, groups, banks_per_group, inner,
         for lane in range(lanes):
             entry = (f"{bank_prefix}:{stack}:{die}:{lane}:{rank}:{group}:{bank_index}",
                      shared or f"{command_prefix}:{lane}", f"{data_prefix}:{lane}")
-            entries.extend([entry] * inner)
+            # Inner bursts share exactly the same resources. Repeating the
+            # tuple once per burst can allocate gigabytes for a legal large
+            # interleave even when the request touches only a few bursts.
+            entries.append(entry)
     return tuple(entries)
 
 
@@ -97,6 +100,14 @@ class DramCore:
         self._banks: Dict[str, _BankState] = {}
         self._inflight: list[float] = []
         self._acceptance_ns = 0.0
+        self._largest_stage_ns = max(
+            config.open_ns, config.close_ns, config.read_latency_ns,
+            config.write_latency_ns, config.burst_interval_ns,
+            config.read_recovery_ns, config.write_recovery_ns,
+            config.read_to_write_ns, config.write_to_read_ns,
+            config.burst_bytes / config.directional_lane_bandwidth_gb_s(Operation.READ),
+            config.burst_bytes / config.directional_lane_bandwidth_gb_s(Operation.WRITE),
+        )
 
     def _bank_id(self, mapping) -> str:
         prefix = str(self.config.metadata.get("bank_resource_prefix", "dram:bank"))
@@ -104,7 +115,7 @@ class DramCore:
 
     def _data_id(self, mapping) -> str:
         prefix = str(self.config.metadata.get("data_resource_prefix", "dram:data"))
-        return f"{prefix}:{mapping.lane}"
+        return self.timeline.canonical_resource_id(f"{prefix}:{mapping.lane}")
 
     def _command_id(self, mapping) -> str:
         # HBM pseudo-channels may share a command/address path.  Callers can
@@ -112,7 +123,7 @@ class DramCore:
         # per lane.
         shared = self.config.metadata.get("shared_command_resource")
         prefix = str(self.config.metadata.get("command_resource_prefix", "dram:command"))
-        return str(shared) if shared else f"{prefix}:{mapping.lane}"
+        return self.timeline.canonical_resource_id(str(shared) if shared else f"{prefix}:{mapping.lane}")
 
     def execute(self, request: AccessRequest) -> TransactionResult:
         """Submit one request through the same admission gate as batches."""
@@ -120,6 +131,38 @@ class DramCore:
 
     def submit(self, request: AccessRequest) -> TransactionResult:
         validate_dram_request(request, self.config)
+        if self._finite_guard_required(request):
+            # Ordinary requests need no extra state copies. At extreme
+            # float64 magnitudes, validate the actual transitions privately
+            # rather than returning inf or partially modifying live banks.
+            # A conservative bound selects the check; it does not reject a
+            # request whose actual timing still fits in finite float64.
+            import copy
+            # Config and the scheduler's alias map are read-only contracts;
+            # the latter can be MappingProxyType, which is not pickleable.
+            shadow = copy.deepcopy(self, {
+                id(self.config): self.config,
+                id(self.timeline.resource_aliases): self.timeline.resource_aliases,
+            })
+            result = shadow._submit_validated(request)
+            if (not math.isfinite(result.completion_ns)
+                    or any(not math.isfinite(bank.ready_ns) for bank in shadow._banks.values())
+                    or any(not math.isfinite(value) for value in shadow.timeline.busy_ns.values())):
+                raise ValueError("DRAM request exceeds finite timing range")
+        return self._submit_validated(request)
+
+    def _finite_guard_required(self, request: AccessRequest) -> bool:
+        burst = self.config.burst_bytes
+        count = (request.address + request.byte_count - 1) // burst - request.address // burst + 1
+        try:
+            # Below half an ULP near float64's maximum, additions cannot
+            # overflow; seven serial stage/turnaround costs per burst bound
+            # all timing increases, with an extra factor for rounding.
+            return self._largest_stage_ns * count * 16 >= float.fromhex("0x1p+970")
+        except OverflowError:
+            return True
+
+    def _submit_validated(self, request: AccessRequest) -> TransactionResult:
         effective_arrival = max(request.arrival_ns, self._acceptance_ns)
         inflight = [end for end in self._inflight if end > effective_arrival]
         if len(inflight) >= self.config.max_outstanding_requests:
@@ -149,7 +192,8 @@ class DramCore:
         items = tuple(requests)
         for request in items:
             validate_dram_request(request, self.config)
-        if len(items) > 1 and self._can_accelerate():
+        if (len(items) > 1 and self._can_accelerate()
+                and not any(self._finite_guard_required(request) for request in items)):
             from ._compiled_dram import execute_compiled_many
             results = execute_compiled_many(self, items)
             if results is not None:
@@ -203,12 +247,12 @@ class DramCore:
                 if bank.open_row is not None:
                     row_conflicts += 1
                     pre = self.timeline.reserve(bank_id, max(dependency, bank.ready_ns), self.config.close_ns)
-                    record(StageTiming("PRECHARGE", pre.start_ns, pre.end_ns, bank_id))
+                    record(StageTiming("PRECHARGE", pre.start_ns, pre.end_ns, pre.resource_id))
                     dependency = pre.end_ns
                 else:
                     row_misses += 1
                 act = self.timeline.reserve(bank_id, max(dependency, bank.ready_ns), self.config.open_ns)
-                record(StageTiming("ACTIVATE", act.start_ns, act.end_ns, bank_id))
+                record(StageTiming("ACTIVATE", act.start_ns, act.end_ns, act.resource_id))
                 dependency = act.end_ns
                 bank.open_row = m.row
                 bank.ready_ns = act.end_ns
@@ -225,10 +269,11 @@ class DramCore:
                 command.start_ns, data_ready, self._command_id(m),
             ))
             data_id = self._data_id(m)
-            previous = self.timeline.directions.get(data_id)
-            switch = 0.0
-            if previous and previous != request.operation.value:
-                switch = self.config.read_to_write_ns if previous == Operation.READ.value else self.config.write_to_read_ns
+            # A resource may have several execution slots with different
+            # histories. The timeline decides whether the selected slot
+            # switches direction; the scalar last direction is insufficient.
+            switch = (self.config.write_to_read_ns if request.operation is Operation.READ
+                      else self.config.read_to_write_ns)
             transfer = self.timeline.transfer(
                 data_id, segment.transfer_bytes, data_ready,
                 self.config.directional_lane_bandwidth_gb_s(request.operation),
@@ -266,7 +311,8 @@ class DramCore:
         """Use the closed form only for a single-slot, row-periodic calendar."""
         config = self.config
         interleave = config.interleave_bytes or config.burst_bytes
-        if (self.capture_details or interleave > config.row_bytes
+        if (self.capture_details or config.lane_count * config.bank_count > 8192
+                or interleave > config.row_bytes
                 or config.row_bytes % interleave
                 or type(self.timeline) is not ResourceTimeline):
             return False
@@ -277,6 +323,11 @@ class DramCore:
         external_ids = {f"{prefix}:{lane}" for prefix in (command, data) for lane in range(config.lane_count)}
         if shared:
             external_ids.add(str(shared))
+        if any(source != target and (source in external_ids or source.startswith(bank + ":"))
+               for source, target in self.timeline.resource_aliases.items()):
+            # Folded/native recurrences use unaliased IDs. Only aliases that
+            # touch this core's resources require the exact burst fallback.
+            return False
         if any(len(slots) != 1 and (resource_id in external_ids or resource_id.startswith(bank + ":"))
                for resource_id, slots in self.timeline.lane_available.items()):
             return False
@@ -352,10 +403,14 @@ class DramCore:
             if transfer:
                 previous = timeline.directions.get(resource_id)
                 if previous and previous != direction:
-                    previous_end += config.read_to_write_ns if previous == "read" else config.write_to_read_ns
+                    previous_end += config.write_to_read_ns if read else config.read_to_write_ns
             start = max(earliest, previous_end)
             end = start + duration
             lane_slots[0] = ready[resource_id] = end
+            # This path only admits one slot. Match ResourceTimeline.reserve
+            # when a caller contracts a previously multi-slot calendar: old
+            # per-slot history must not revive if it is expanded again.
+            timeline.lane_directions.pop(resource_id, None)
             busy[resource_id] = busy.get(resource_id, 0.0) + duration
             last[resource_id] = (start, end)
             touched.add(resource_id)
@@ -368,7 +423,7 @@ class DramCore:
         def execute_until(target):
             nonlocal cursor, completion, hits, misses, conflicts
             while cursor < target:
-                bank_id, command_id, data_id = cycle_table[cursor % period]
+                bank_id, command_id, data_id = cycle_table[(cursor % period) // inner]
                 bank = self._banks.get(bank_id)
                 if bank is None:
                     bank = _BankState()
@@ -395,7 +450,7 @@ class DramCore:
             device, row = divmod(cursor // row_span, config.rows_per_bank)
             stack, die = divmod(device, config.dies_per_stack)
             cycle_table = _mapping_cycle(lanes, banks, config.bank_groups_per_rank, config.banks_per_group,
-                                   inner, bank_prefix, command_prefix, data_prefix,
+                                   bank_prefix, command_prefix, data_prefix,
                                    str(shared) if shared else None, stack, die)
             row_stop = min(stop, (cursor // row_span + 1) * row_span)
             aligned = cursor % period == 0

@@ -87,7 +87,9 @@ def physical_workspace_bound(tasks):
                 line = int(contract["line_bytes"])
                 extent = ((extent + line - 1) // line) * line
             config = configurations.get(owner, task.metadata["physical_memory_config"])
-            alignment = int(config.get("burst_bytes", 64))
+            # Match PhysicalRuntimeContext's allocator: DRAM uses bursts,
+            # NAND uses full pages even for a subpage-sized declaration.
+            alignment = int(config.get("burst_bytes", config.get("page_bytes", 64)))
             extent = ((extent + alignment - 1) // alignment) * alignment
             registry = residents if generation == 0 else buffers
             previous = registry.get(key)

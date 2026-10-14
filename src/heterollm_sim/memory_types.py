@@ -350,6 +350,12 @@ class NandThermalConfig:
                 raise ValueError(name + " must be positive")
         for name in ("active_power_w", "idle_power_w"):
             _nonnegative(name, getattr(self, name))
+        tau_ns = self.resistance_k_per_w * self.capacitance_j_per_k * 1e9
+        if not math.isfinite(tau_ns) or tau_ns <= 0:
+            raise ValueError("thermal RC time constant must be finite and positive")
+        equilibrium = self.ambient_c + self.active_power_w * self.resistance_k_per_w
+        if not math.isfinite(equilibrium):
+            raise ValueError("thermal equilibrium temperature must be finite")
         for name in ("throttled_service_rate", "throttled_power_fraction"):
             if not 0 < _nonnegative(name, getattr(self, name)) <= 1:
                 raise ValueError(name + " must be in (0, 1]")
@@ -594,6 +600,7 @@ class StageTiming:
     end_ns: float
     resource_id: Optional[str] = None
     bytes: int = 0
+    energy_pj: float = 0.0
 
 
 @dataclass(frozen=True)

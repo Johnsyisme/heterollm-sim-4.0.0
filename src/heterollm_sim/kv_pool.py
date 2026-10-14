@@ -544,7 +544,11 @@ class DynamicKVPool:
             raise KvPoolUnsupported(
                 "transfer_executor must expose both snapshot() and restore(state)"
             )
-        return copy.deepcopy(snapshot())
+        # The executor owns its snapshot representation. Physical snapshots
+        # deliberately retain live Core handles alongside copied mutable
+        # state; deepcopy would clone those handles and detach observers and
+        # other owners of the shared runtime on restore.
+        return snapshot()
 
     def restore_transfer_executor(self, state: Any) -> None:
         """Restore optional external queue state captured above."""
@@ -557,7 +561,7 @@ class DynamicKVPool:
             raise KvPoolUnsupported(
                 "transfer_executor does not support restoring queue state"
             )
-        restore(copy.deepcopy(state))
+        restore(state)
 
     def _bytes_for_layer(self, layer_group: str) -> int:
         value = self.page_bytes_by_layer.get(str(layer_group), self.default_page_bytes)
@@ -1021,6 +1025,9 @@ class DynamicKVPool:
         result = []
         for access in accesses:
             page = by_id[int(access.buffer_id.rsplit(":", 1)[1])]
+            if access.operation == "write" and page.ref_count > 1:
+                raise KvPoolUnsupported(
+                    "shared KV page writes require explicit copy-on-write; the pool only reuses read-only prefixes")
             identity = (f"{page.owner_component}:{self._cache_namespace}:"
                         f"generation:{page.allocation_generation}:page:{page.logical_page_id}")
             result.append((page.owner_component, replace(access, buffer_id=identity)))
@@ -1045,6 +1052,8 @@ class DynamicKVPool:
             page_id = value.logical_page_id if isinstance(value, KvPage) else int(value)
             if page_id not in self._pages:
                 raise KvPoolError("cannot register unknown page {}".format(page_id))
+            if page_id in ids:
+                raise KvPoolError("a prefix cannot contain the same physical page twice")
             ids.append(page_id)
         for page_id in ids:
             page = self._pages[page_id]
@@ -1069,6 +1078,12 @@ class DynamicKVPool:
                 # separate or freeing the next page also consumes pending,
                 # skipping a reference (or popping an empty list).
                 self._prefixes[key] = list(pending)
+            if page_id in self._pages:
+                # A page may belong to several registered prefixes. Keep a
+                # representative live key, and clear it after its last prefix
+                # reference goes away so exclusive handoff becomes legal.
+                self._pages[page_id].prefix_key = next(
+                    (other for other, ids in self._prefixes.items() if page_id in ids), None)
         self._prefixes.pop(key, None)
 
     def prefix_pages(self, prefix_key: str) -> Tuple[KvPage, ...]:
@@ -1257,9 +1272,14 @@ class DynamicKVPool:
         """Undo a just-prepared restore; callers abort a batch in reverse order."""
         page = self.page(logical_page_id)
         _source, target, _generation, _kind = self._pending_moves[logical_page_id]
-        self._run_transfer_hook(plan, "rollback")
         if not self._ledger.adjust(target, -page.bytes):
             raise KvPoolError("could not release asynchronous restore reservation")
+        try:
+            self._run_transfer_hook(plan, "rollback")
+        except BaseException:
+            if not self._ledger.adjust(target, page.bytes):
+                raise KvPoolUnsupported("could not restore failed KV abort reservation")
+            raise
         del self._pending_moves[logical_page_id]
 
     def complete_prepared_restore(
@@ -1268,13 +1288,19 @@ class DynamicKVPool:
         """Publish a completed copy and release only its original source."""
         page = self.page(logical_page_id)
         source, target, generation, kind = self._pending_moves[logical_page_id]
-        if plan.advance is not None or plan.completion_ns is None or now_ns < plan.completion_ns:
+        if (not isfinite(now_ns) or now_ns < 0 or plan.advance is not None
+                or plan.completion_ns is None or now_ns < plan.completion_ns):
             raise KvPoolError("cannot consume a KV transfer before its completion")
         if page.owner_component != source or page.allocation_generation != generation:
             raise KvPoolError("in-flight KV source identity changed")
-        self._run_transfer_hook(plan, "commit")
         if not self._ledger.adjust(source, -page.bytes):
             raise KvPoolError("could not release completed KV transfer source")
+        try:
+            self._run_transfer_hook(plan, "commit")
+        except BaseException:
+            if not self._ledger.adjust(source, page.bytes):
+                raise KvPoolUnsupported("could not restore failed KV transfer source reservation")
+            raise
         self._owned_bytes[source] -= page.bytes
         self._owned_bytes[target] += page.bytes
         page.owner_component = target
@@ -1291,15 +1317,21 @@ class DynamicKVPool:
         """Drain the submitted phase, retain source ownership, discard target."""
         page = self.page(logical_page_id)
         source, target, generation, _kind = self._pending_moves[logical_page_id]
-        if plan.completion_ns is None or now_ns < plan.completion_ns:
+        if (not isfinite(now_ns) or now_ns < 0
+                or plan.completion_ns is None or now_ns < plan.completion_ns):
             raise KvPoolError("cancellation must drain the currently submitted physical phase")
         if page.owner_component != source or page.allocation_generation != generation:
             raise KvPoolError("in-flight KV source identity changed")
         if plan.cancel is None:
             raise KvPoolUnsupported("executor does not support cost-preserving cancellation")
-        billed = plan.cancel()
         if not self._ledger.adjust(target, -page.bytes):
             raise KvPoolError("could not release cancelled restore reservation")
+        try:
+            billed = plan.cancel()
+        except BaseException:
+            if not self._ledger.adjust(target, page.bytes):
+                raise KvPoolUnsupported("could not restore failed KV cancellation reservation")
+            raise
         del self._pending_moves[logical_page_id]
         return billed
 

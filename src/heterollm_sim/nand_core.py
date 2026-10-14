@@ -23,8 +23,10 @@ class _StagedPage:
     mapping: object
     host_bytes: int = 0
     logical_bytes: int = 0
+    merged_host_bytes: int = 0
     request_count: int = 0
     ready_ns: float = 0.0
+    reader_completion_ns: float = 0.0
     ranges: tuple[tuple[int, int], ...] = ()
 
 
@@ -69,6 +71,7 @@ class NandCore:
         self._buffered_write_mode = config.buffered_write_mode
         self._staged_pages: Dict[tuple[int, ...], _StagedPage] = {}
         self._buffer_merge_bytes = 0
+        self._media_drain_completion_ns = 0.0
         self._plane_thermal_state: Dict[str, dict] = {}
         self._block_wear_state: Dict[str, dict] = {}
         self._observation_events: list[dict] = []
@@ -94,7 +97,7 @@ class NandCore:
 
     @property
     def inflight_write_buffer_bytes(self) -> int:
-        """Draining bytes at the last admission or explicit flush timestamp."""
+        """Bytes retained by a media drain or staging reader at the last clock observation."""
 
         return sum(byte_count for _release_ns, byte_count in self._write_buffer_pending) if self._buffered_write_mode else 0
 
@@ -109,16 +112,16 @@ class NandCore:
         """Return the execution slot, without changing physical mapping."""
         array_id = self._array_id(mapping)
         if self.config.parallel_units is None:
-            return array_id
+            return self.timeline.canonical_resource_id(array_id)
         prefix = str(self.config.metadata.get("parallel_resource_prefix", "nand:parallel"))
-        return f"{prefix}:{mapping.unit % self.config.parallel_units}"
+        return self.timeline.canonical_resource_id(f"{prefix}:{mapping.unit % self.config.parallel_units}")
 
     def _channel_id(self, mapping) -> str:
         prefix = str(self.config.metadata.get("channel_resource_prefix", "nand:channel"))
-        return f"{prefix}:{mapping.channel}"
+        return self.timeline.canonical_resource_id(f"{prefix}:{mapping.channel}")
 
     def _host_id(self) -> str:
-        return str(self.config.metadata.get("host_resource_id", "nand:host"))
+        return self.timeline.canonical_resource_id(str(self.config.metadata.get("host_resource_id", "nand:host")))
 
     def _bandwidth_ceiling_gb_s(self, operation: Optional[Operation | str] = None) -> float:
         """Return the end-to-end payload ceiling for the NAND data path.
@@ -157,9 +160,20 @@ class NandCore:
         wear = self._block_wear_state.get(block, {"programs": 0, "erases": 0})
         pe_before = (wear_config.initial_pe_cycles if wear_config else 0)+wear["erases"]
         wear_scale = 1.
-        if name == "PAGE_PROGRAM" and wear_config:
-            wear_scale = min(wear_config.max_program_latency_scale,
-                1.+wear_config.program_latency_growth_at_rated_pe*pe_before/wear_config.rated_pe_cycles)
+        if name == "PAGE_PROGRAM" and wear_config and wear_config.program_latency_growth_at_rated_pe:
+            growth = wear_config.program_latency_growth_at_rated_pe
+            try:
+                extra = growth*pe_before/wear_config.rated_pe_cycles
+            except OverflowError:
+                extra = None
+            if extra is None or not isfinite(extra):
+                # Counts are integers without a float-sized bound. Compute
+                # the rare oversized ratio exactly before applying its finite
+                # authored cap; even zero growth must not coerce a huge count.
+                from fractions import Fraction
+                extra = min(Fraction.from_float(float(wear_config.max_program_latency_scale-1.)),
+                    Fraction.from_float(float(growth))*pe_before/wear_config.rated_pe_cycles)
+            wear_scale = min(wear_config.max_program_latency_scale, 1.+float(extra))
         work = float(duration)*wear_scale
         thermal = {}
         if self.config.dynamic_thermal:
@@ -210,6 +224,16 @@ class NandCore:
             for segment in split_nand_request(request, self.config)
         )
 
+    def _validate_request(self, request: AccessRequest) -> None:
+        """Reject invalid geometry or admission size before mutating calendars."""
+        validate_nand_request(request, self.config)
+        payload_bytes = self._write_buffer_payload_bytes(request)
+        if payload_bytes > self.config.write_buffer_bytes:
+            raise ValueError(
+                "write request requires {} write-buffer bytes, exceeds configured capacity {}"
+                .format(payload_bytes, self.config.write_buffer_bytes)
+            )
+
     @staticmethod
     def _staged_key(mapping) -> tuple[int, ...]:
         """Build a stable physical-page key from an address mapping."""
@@ -233,6 +257,7 @@ class NandCore:
             self._staged_pages[key] = page
         page.host_bytes += int(segment.host_transfer_bytes)
         page.logical_bytes += int(segment.logical_bytes)
+        page.merged_host_bytes += merge_bytes
         page.request_count += 1
         page.ready_ns = max(page.ready_ns, ready_ns)
         start = max(request.address, segment.address) - segment.address
@@ -331,6 +356,50 @@ class NandCore:
         self._write_buffer_pending.append((completion_ns, payload_bytes))
         self._write_buffer_occupancy += payload_bytes
 
+    def discard_staged_pages(self, address: int, byte_count: int, *, now_ns: Optional[float] = None) -> dict:
+        """Discard dirty pages from a caller-owned complete physical-page range.
+
+        The caller must own every addressed page exclusively. Already scheduled
+        media work is never cancelled here. Prior host traffic remains billed,
+        and its staging source is retained until both host arrival and any read
+        of that source finish. No replacement program or device-wide flush is
+        introduced. The returned release time concerns the discarded sources.
+        """
+        page_bytes = self.config.page_bytes
+        if (type(address) is not int or address < 0 or address % page_bytes
+                or type(byte_count) is not int or byte_count <= 0 or byte_count % page_bytes
+                or address + byte_count > self.config.effective_capacity_bytes):
+            raise ValueError("discard range must cover whole aligned NAND pages within capacity")
+        if now_ns is not None and (isinstance(now_ns, bool) or not isinstance(now_ns, (int, float))
+                                   or not isfinite(now_ns) or now_ns < 0):
+            raise ValueError("now_ns must be finite and non-negative")
+        if now_ns is not None:
+            self._acceptance_ns = max(self._acceptance_ns, float(now_ns))
+        self._release_write_buffer(self._acceptance_ns)
+        selected = [(key, staged) for key, staged in self._staged_pages.items()
+                    if address <= staged.mapping.address < address + byte_count]
+        released_at = self._acceptance_ns
+        host_bytes = logical_bytes = merge_bytes = 0
+        for key, staged in selected:
+            del self._staged_pages[key]
+            host_bytes += staged.host_bytes
+            logical_bytes += staged.logical_bytes
+            merge_bytes += staged.merged_host_bytes
+            release = max(staged.ready_ns, staged.reader_completion_ns)
+            released_at = max(released_at, release)
+            if release > self._acceptance_ns:
+                self._write_buffer_pending.append((release, staged.host_bytes))
+        self._write_buffer_occupancy -= host_bytes
+        self._buffer_merge_bytes -= merge_bytes
+        return {
+            "buffered_write_mode": self._buffered_write_mode,
+            "discarded_pages": len(selected), "discarded_host_bytes": host_bytes,
+            "discarded_logical_bytes": logical_bytes, "discarded_merge_bytes": merge_bytes,
+            "write_buffer_release_completion_ns": released_at,
+            "physical_programs": 0, "physical_read_bytes": 0, "physical_write_bytes": 0,
+            "host_transfer_bytes": 0, "internal_transfer_bytes": 0,
+        }
+
     def flush_write_buffer(self, *, now_ns: Optional[float] = None) -> dict:
         """Program all dirty staged pages and return drain accounting.
 
@@ -355,13 +424,13 @@ class NandCore:
                 "merge_bytes": 0,
                 "physical_programs": 0,
                 "physical_write_bytes": 0,
-                "media_drain_start_ns": float(now_ns or 0.0),
-                "media_drain_completion_ns": float(now_ns or 0.0),
+                "media_drain_start_ns": self._acceptance_ns,
+                "media_drain_completion_ns": self._acceptance_ns,
                 "write_completion": "media_program_complete",
             }
         if not self._staged_pages:
             value = float(
-                now_ns if now_ns is not None else max(
+                max(now_ns, self._acceptance_ns) if now_ns is not None else max(
                     self._acceptance_ns, max(self.timeline.ready_ns.values(), default=0.0)
                 )
             )
@@ -372,12 +441,13 @@ class NandCore:
                 "physical_programs": 0,
                 "physical_write_bytes": 0,
                 "media_drain_start_ns": value,
-                "media_drain_completion_ns": max(value, max(
+                "media_drain_completion_ns": max(value, self._media_drain_completion_ns),
+                "write_buffer_release_completion_ns": max(value, max(
                     (end for end, _count in self._write_buffer_pending), default=value)),
                 "write_completion": "media_program_complete",
             }
         cursor = float(
-            now_ns if now_ns is not None else max(
+            max(now_ns, self._acceptance_ns) if now_ns is not None else max(
                 self._acceptance_ns, max(self.timeline.ready_ns.values(), default=0.0)
             )
         )
@@ -421,13 +491,17 @@ class NandCore:
             physical_write_bytes += self.config.page_bytes
             internal_transfer_bytes += internal.bytes
             host_bytes += staged.host_bytes
-            self._write_buffer_pending.append((program.end_ns, staged.host_bytes))
+            # A read can still be sending this host copy through another host
+            # lane after programming finishes. Keep its source allocation until
+            # both users finish, without charging that reader time as media work.
+            self._write_buffer_pending.append((max(program.end_ns, staged.reader_completion_ns), staged.host_bytes))
         merge_bytes = int(self._buffer_merge_bytes)
         flushed_pages = len(self._staged_pages)
         self._staged_pages.clear()
         self._buffer_merge_bytes = 0
         self._write_buffer_occupancy = 0
-        cursor = max(cursor, max((end for end, _count in self._write_buffer_pending), default=cursor))
+        cursor = max(cursor, self._media_drain_completion_ns)
+        self._media_drain_completion_ns = cursor
         return {
             "buffered_write_mode": True,
             "flushed_pages": flushed_pages,
@@ -441,6 +515,8 @@ class NandCore:
             "internal_transfer_bytes": internal_transfer_bytes,
             "media_drain_start_ns": float(start_ns if start_ns is not None else cursor),
             "media_drain_completion_ns": float(cursor),
+            "write_buffer_release_completion_ns": max(cursor, max(
+                (end for end, _count in self._write_buffer_pending), default=cursor)),
             "write_completion": "media_program_complete",
             **self._observations(observation_start),
         }
@@ -460,7 +536,7 @@ class NandCore:
         return self.submit(request)
 
     def submit(self, request: AccessRequest) -> TransactionResult:
-        validate_nand_request(request, self.config)
+        self._validate_request(request)
         self._observation_events = []
         effective_arrival = max(request.arrival_ns, self._acceptance_ns)
         inflight = [end for end in self._inflight if end > effective_arrival]
@@ -650,6 +726,7 @@ class NandCore:
                         direction="read",
                     )
                     record(StageTiming("STAGING_READ", host.start_ns, host.end_ns, host.resource_id, host.bytes))
+                    staged.reader_completion_ns = max(staged.reader_completion_ns, host.end_ns)
                     completion = max(completion, host.end_ns)
                     staging_read_hits += 1
                     continue
@@ -665,8 +742,9 @@ class NandCore:
                 )
                 record(StageTiming("INTERNAL_TRANSFER", internal.start_ns, internal.end_ns, internal.resource_id, internal.bytes))
                 host_ready = internal.end_ns
-                if staged is not None and any(left < logical_end and logical_start < right
-                                              for left, right in staged.ranges):
+                staging_overlay = staged is not None and any(left < logical_end and logical_start < right
+                                                             for left, right in staged.ranges)
+                if staging_overlay:
                     # A partial staging hit still reads old media for the
                     # untouched bytes, then overlays dirty host bytes. With
                     # multiple host lanes, bus contention alone cannot enforce
@@ -679,6 +757,8 @@ class NandCore:
                     direction="read",
                 )
                 record(StageTiming("HOST_TRANSFER", host.start_ns, host.end_ns, host.resource_id, host.bytes))
+                if staging_overlay:
+                    staged.reader_completion_ns = max(staged.reader_completion_ns, host.end_ns)
                 completion = max(completion, host.end_ns)
                 self._array_ready[array_id] = read.end_ns
                 self._buffer_ready[array_id] = internal.end_ns
@@ -698,7 +778,9 @@ class NandCore:
                     direction="write",
                 )
                 record(StageTiming("INTERNAL_TRANSFER", internal.start_ns, internal.end_ns, internal.resource_id, internal.bytes))
-                program = self._media_stage("PAGE_PROGRAM", m, internal.end_ns, self.config.page_program_ns,
+                program = self._media_stage("PAGE_PROGRAM", m,
+                                            max(internal.end_ns, self._array_ready.get(array_id, 0.0)),
+                                            self.config.page_program_ns,
                                             eligible_ns=internal.end_ns)
                 record(program)
                 pages_programmed += 1
@@ -807,6 +889,12 @@ class NandCore:
         )
 
     def execute_batch(self, requests: Iterable[AccessRequest]) -> tuple[TransactionResult, ...]:
+        requests = tuple(requests)
+        # Match scalar submission's pre-admission validation for the whole
+        # public batch. Unexpected execution failures still require the owning
+        # PhysicalRuntimeContext transaction for rollback.
+        for request in requests:
+            self._validate_request(request)
         return tuple(self.submit(request) for request in requests)
 
     def run(self, requests: Iterable[AccessRequest]):
@@ -881,8 +969,13 @@ def summarize_nand_observations(observations):
             if old is None or event["end_ns"] >= old["end_ns"]:
                 blocks[event["block_id"]] = {key: event[key] for key in
                     ("end_ns", "pe_cycles_after", "block_programs_after", "block_erases_after", "rated_pe_cycles")}
+                try:
+                    endurance_fraction = event["pe_cycles_after"]/event["rated_pe_cycles"]
+                except OverflowError:
+                    endurance_fraction = None
                 blocks[event["block_id"]].update(
-                    authored_endurance_fraction_consumed=event["pe_cycles_after"]/event["rated_pe_cycles"],
+                    authored_endurance_fraction_consumed=endurance_fraction,
+                    authored_endurance_fraction_status=("outside_float_range" if endurance_fraction is None else "finite"),
                     authored_pe_cycles_remaining=max(0,event["rated_pe_cycles"]-event["pe_cycles_after"]),
                     at_or_above_authored_endurance=event["pe_cycles_after"]>=event["rated_pe_cycles"],
                     endurance_scope="assumption budget only; reaching this value does not simulate data loss or failure")

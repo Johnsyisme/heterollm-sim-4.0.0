@@ -599,6 +599,8 @@ class FusedAttentionWorkload:
             "softmax_transcendental_ops_per_score",
             self.softmax_transcendental_ops_per_score,
         )
+        if self.hidden_size % self.score_heads:
+            raise ValueError("attention hidden_size must be divisible by score_heads")
         if self.kv_hidden_size is not None:
             _require_positive_int("kv_hidden_size", self.kv_hidden_size)
         if self.kv_input_bits is not None:
@@ -2920,7 +2922,10 @@ def _gemm_tensor_dtype(workload: GemmWorkload) -> str:
     if workload.activation_bits <= 8 and workload.weight_bits <= 8:
         return "int8"
     if workload.activation_bits <= 16 and workload.weight_bits <= 16:
-        return "fp16"
+        # Equal storage widths do not make BF16 and FP16 the same execution
+        # type. Quantized capabilities may still select an explicit internal
+        # dtype later; this is the ordinary source operand contract.
+        return "bf16" if workload.activation_dtype == "bf16" else "fp16"
     return "fp32"
 
 
@@ -3872,7 +3877,7 @@ def _estimate_gpu_fused_attention_analytical(
     if workload.input_bits <= 8:
         dtype_name = "int8"
     elif workload.input_bits <= 16:
-        dtype_name = "fp16"
+        dtype_name = "bf16" if workload.activation_dtype == "bf16" else "fp16"
     else:
         dtype_name = "fp32"
     if dtype_name not in tensor_core.supported_dtypes:
@@ -3882,14 +3887,19 @@ def _estimate_gpu_fused_attention_analytical(
             )
         )
 
+    head_dim = workload.hidden_size // workload.score_heads
+    # Heads are independent batched products. Padding one head's reduction
+    # or output dimension cannot be filled with another head's elements.
     qk_tiles = (
-        _ceil_div(workload.batch_tokens, tensor_core.mma_m)
+        workload.score_heads
+        * _ceil_div(workload.batch_tokens, tensor_core.mma_m)
         * _ceil_div(workload.context_tokens, tensor_core.mma_n)
-        * _ceil_div(workload.hidden_size, tensor_core.mma_k)
+        * _ceil_div(head_dim, tensor_core.mma_k)
     )
     pv_tiles = (
-        _ceil_div(workload.batch_tokens, tensor_core.mma_m)
-        * _ceil_div(workload.hidden_size, tensor_core.mma_n)
+        workload.score_heads
+        * _ceil_div(workload.batch_tokens, tensor_core.mma_m)
+        * _ceil_div(head_dim, tensor_core.mma_n)
         * _ceil_div(workload.context_tokens, tensor_core.mma_k)
     )
     issued_tensor_operations = (
@@ -4009,6 +4019,7 @@ def _estimate_gpu_fused_attention_analytical(
             else {}
         ),
         "score_heads": workload.score_heads,
+        "head_dim": head_dim,
         "score_elements": workload.score_elements,
         "qk_scale": workload.qk_scale,
         "query_read_bytes": workload.query_read_bytes,
@@ -4196,7 +4207,8 @@ def _estimate_typed_roofline(
 
     bytes_moved = read_bytes + write_bytes
     has_pipeline_service = float(compute_service_override_ns or 0.0) > 0.0
-    if operations == 0 and bytes_moved == 0 and not has_pipeline_service:
+    if (operations == 0 and special_function_operations == 0
+            and bytes_moved == 0 and not has_pipeline_service):
         raise ValueError("typed workload must declare operations or bytes")
     if (
         operations > 0
@@ -5233,10 +5245,12 @@ def estimate_cpu_gemm(
         }
     if source_dot_row_totals is not None:
         instruction_metadata["source_dot_rows"] = source_dot_rows
-    auxiliary_compute_energy_pj = 0.0
+    # Bill the same dequant/unpack work that entered the instruction schedule,
+    # including generic fallback and any declared panel-reuse adjustment.
+    auxiliary_equivalent_operations = transform_operations
     if quantized_dot_capability is not None:
         auxiliary_equivalent_operations = (
-            workload.packed_weight_transform_operations
+            transform_operations
             + int(
                 instruction_metadata[
                     "activation_quantization_instructions"
@@ -5249,10 +5263,10 @@ def estimate_cpu_gemm(
                 instruction_metadata["auxiliary_instructions"]
                 * quantized_dot_capability.auxiliary_ops_per_instruction
             )
-        auxiliary_compute_energy_pj = (
-            auxiliary_equivalent_operations
-            * cpu.elementwise_energy_pj_per_op
-        )
+    auxiliary_compute_energy_pj = (
+        auxiliary_equivalent_operations * cpu.elementwise_energy_pj_per_op
+    )
+    instruction_metadata["auxiliary_energy_equivalent_operations"] = auxiliary_equivalent_operations
     return _estimate_typed_roofline(
         device_kind="cpu",
         profile_name=cpu.name,
@@ -6178,6 +6192,10 @@ def estimate_cim_gemm(
 ) -> CostEstimate:
     """Estimate an ADC-free weight-stationary digital SRAM-CIM GEMM."""
 
+    if workload.epilogue_operations or workload.epilogue_transcendental_operations:
+        raise ValueError(
+            "CIM GEMM does not execute activation epilogues; lower an explicit peripheral operator"
+        )
     if workload.mmq_work is not None or workload.mmvq_work is not None:
         raise ValueError("MMQ/MMVQ source work is GPU-only")
     if profile.weight_conversion_mode == "packed_to_fp16_tiled_cold":

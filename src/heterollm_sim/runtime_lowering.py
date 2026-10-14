@@ -494,7 +494,11 @@ class RuntimeDispatcher:
                 "transfer_byte_count",
             )
             if payload["page_cache_hit"]:
-                payload["byte_count"] = transfer_bytes
+                payload["byte_count"] = (
+                    transfer_bytes if transfer_bytes > 0 else
+                    _non_negative_int(payload.get("control_byte_count", payload.get("byte_count")),
+                                      "control_byte_count")
+                )
                 next_action = (
                     RuntimeAction.IOMMU_TRANSLATE
                     if transfer_bytes > 0
@@ -525,7 +529,11 @@ class RuntimeDispatcher:
                 payload.get("transfer_byte_count", required_bytes),
                 "transfer_byte_count",
             )
-            payload["byte_count"] = transfer_bytes
+            payload["byte_count"] = (
+                transfer_bytes if transfer_bytes > 0 else
+                _non_negative_int(payload.get("control_byte_count", payload.get("byte_count")),
+                                  "control_byte_count")
+            )
             next_action = (
                 RuntimeAction.IOMMU_TRANSLATE
                 if transfer_bytes > 0
@@ -576,11 +584,12 @@ class RuntimeDispatcher:
             raw_targets = self.profile.get("gpu_command_targets")
             if raw_targets is not None:
                 targets = tuple(raw_targets)
+                continuations = self._continuations(completion, context)
                 if any(not isinstance(target, Mapping) for target in targets):
                     raise RuntimeDispatchError(
                         "profile.gpu_command_targets must contain mappings"
                     )
-                if not targets:
+                if not targets and not continuations:
                     return self._result(
                         completion,
                         (
@@ -601,8 +610,7 @@ class RuntimeDispatcher:
                     RuntimeAction.MMU_TLB_LOOKUP,
                     RuntimeAction.L2_LOOKUP,
                     RuntimeAction.VRAM_CONTROLLER,
-                    RuntimeAction.COMPUTE,
-                )
+                ) + (() if continuations else (RuntimeAction.COMPUTE,))
                 for target in targets:
                     component_id = str(target.get("component_id", "")).strip()
                     if not component_id:
@@ -613,6 +621,10 @@ class RuntimeDispatcher:
                     branch_payload.update(
                         {
                             "gpu_component_id": component_id,
+                            "byte_count": _non_negative_int(
+                                target.get("control_byte_count", payload.get("byte_count")),
+                                "GPU control_byte_count",
+                            ),
                             "service_ns_by_action": dict(
                                 target.get("service_ns", {})
                             ),
@@ -638,6 +650,16 @@ class RuntimeDispatcher:
                         branch_tasks.append(branch_task)
                         dependency = branch_task.task_id
                     compute_task_ids.append(dependency)
+                if continuations:
+                    # The supplied body replaces synthetic compute, just as
+                    # on the single-target path. Join all controller branches
+                    # before submitting it once; replicating it per target
+                    # would duplicate both task identities and useful work.
+                    boundaries = tuple(compute_task_ids) or (completion.task.task_id,)
+                    attached = tuple(replace(task, dependencies=tuple(dict.fromkeys(
+                        (*boundaries, *task.dependencies)))) for task in continuations)
+                    branch_tasks.extend(attached)
+                    compute_task_ids = [task.task_id for task in attached]
                 interrupt = self._make_task(
                     completion,
                     RuntimeAction.INTERRUPT,
@@ -819,10 +841,10 @@ def build_initial_control_tasks(
                 demands=tuple(
                     ResourceDemand(
                         resource_id=resource_id,
-                        service_ns=dispatcher._service_ns(action),
+                        service_ns=dispatcher._service_ns(action, payload),
                         bytes_moved=byte_count,
                     )
-                    for resource_id in dispatcher._resources(action)
+                    for resource_id in dispatcher._resources(action, payload)
                 ),
                 payload=payload,
                 instruction_batch=InstructionBatch(

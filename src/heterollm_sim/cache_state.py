@@ -698,13 +698,13 @@ class ExplicitCacheState:
                 continue
             flushed_lines += 1
             writeback_bytes += line.size_bytes
-            self._lines[key] = CacheLine(
+            self._set_line(key, CacheLine(
                 line.buffer_id,
                 line.line_index,
                 line.size_bytes,
                 False,
                 line.allocation_generation,
-            )
+            ))
         self._flush_writeback_bytes += writeback_bytes
         return CacheFlushResult(normalized, flushed_lines, writeback_bytes)
 

@@ -439,7 +439,20 @@ class _CriticalPathIndex:
             )
             indegree[target] += 1
 
-        interval_nodes: Dict[Tuple[str, str], _CriticalPathNode] = {}
+        interval_nodes: Dict[Tuple[str, str, float], _CriticalPathNode] = {}
+        resource_ends: Dict[Tuple[str, str], float] = {}
+
+        def release_node(task, resource_id, end_ns):
+            # A resource release can follow ACT/CAS/internal transfers inside
+            # a physical task. Busy duration alone loses that causal prefix.
+            key = (task.task_id, resource_id, end_ns)
+            if key not in interval_nodes:
+                node = _critical_path_interval_node(task.task_id, resource_id + "@" + float(end_ns).hex())
+                interval_nodes[key] = node
+                add_edge(_critical_path_start_node(task.task_id), node,
+                         end_ns - task.start_ns, task.category,
+                         "{}@{}".format(task.task_id, resource_id))
+            return interval_nodes[key]
         for task in tasks:
             start = _critical_path_start_node(task.task_id)
             end = _critical_path_end_node(task.task_id)
@@ -452,17 +465,9 @@ class _CriticalPathIndex:
                 task.task_id,
             )
             for interval in task.resource_intervals:
-                node = _critical_path_interval_node(
-                    task.task_id, interval.resource_id
-                )
-                interval_nodes[(task.task_id, interval.resource_id)] = node
-                add_edge(
-                    start,
-                    node,
-                    interval.end_ns - interval.start_ns,
-                    task.category,
-                    "{}@{}".format(task.task_id, interval.resource_id),
-                )
+                release_node(task, interval.resource_id, interval.end_ns)
+                key = (task.task_id, interval.resource_id)
+                resource_ends[key] = max(resource_ends.get(key, task.start_ns), interval.end_ns)
 
         for task in tasks:
             start = _critical_path_start_node(task.task_id)
@@ -491,10 +496,15 @@ class _CriticalPathIndex:
                     predecessor_id = str(raw_info.get("task_id", ""))
                     if predecessor_id not in task_by_id:
                         continue
-                    predecessor_node = interval_nodes.get(
-                        (predecessor_id, str(raw_info.get("resource_id", resource_id))),
-                        _critical_path_end_node(predecessor_id),
-                    )
+                    predecessor_resource = str(raw_info.get("resource_id", resource_id))
+                    release = raw_info.get("end_ns", resource_ends.get((predecessor_id, predecessor_resource)))
+                    if release is not None and float(release) > task.start_ns:
+                        # This blocks an internal Core stage, not task start.
+                        # Its wait is already inside the physical task span.
+                        continue
+                    predecessor_node = (
+                        release_node(task_by_id[predecessor_id], predecessor_resource, float(release))
+                        if release is not None else _critical_path_end_node(predecessor_id))
                     add_edge(predecessor_node, start)
 
         self._distances: Dict[_CriticalPathNode, float] = {

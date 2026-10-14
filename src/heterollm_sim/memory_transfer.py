@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 
 from .memory_types import BatchResult, TransactionResult
 
@@ -72,30 +72,68 @@ class ResourceTimeline:
     # shared mapping makes ordinary kernel demands and physical reservations
     # consult one authority while preserving the scalar ``ready_ns`` API.
     lane_available: Dict[str, list[float]] = field(default_factory=dict, repr=False)
+    lane_directions: Dict[str, list[Optional[str]]] = field(default_factory=dict, repr=False)
+    resource_aliases: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+    def canonical_resource_id(self, resource_id: str) -> str:
+        """Resolve a wire name idempotently, rejecting cyclic aliases."""
+        if resource_id not in self.resource_aliases:
+            return resource_id
+        seen = set()
+        while resource_id in self.resource_aliases:
+            target = self.resource_aliases[resource_id]
+            if not isinstance(target, str) or not target:
+                raise ValueError("physical resource alias must be a non-empty string")
+            if target == resource_id:
+                break
+            if resource_id in seen:
+                raise ValueError("physical resource aliases must not form a cycle")
+            seen.add(resource_id)
+            resource_id = target
+        return resource_id
 
     def available_ns(self, resource_id: str) -> float:
+        resource_id = self.canonical_resource_id(resource_id)
+        lanes = self.lane_available.get(resource_id)
+        if lanes:
+            return float(min(lanes))
         return float(self.ready_ns.get(resource_id, 0.0))
 
     def reserve(self, resource_id: str, earliest_ns: float, duration_ns: float, *, direction: Optional[str] = None, switch_ns: float = 0.0) -> Transfer:
         if not isinstance(resource_id, str) or not resource_id:
             raise ValueError("resource_id must be a non-empty string")
+        resource_id = self.canonical_resource_id(resource_id)
         earliest_ns = _number("earliest_ns", earliest_ns)
         duration_ns = _number("duration_ns", duration_ns)
         switch_ns = _number("switch_ns", switch_ns)
         lanes = self.lane_available.get(resource_id)
         if lanes is None:
             lanes = [self.available_ns(resource_id)]
-            self.lane_available[resource_id] = lanes
-        lane_index = min(range(len(lanes)), key=lambda index: (lanes[index], index))
-        previous_end = float(lanes[lane_index])
+        if not lanes:
+            raise ValueError("resource must have at least one execution lane")
+        # Single-lane accelerators maintain the scalar direction. Multiple
+        # execution slots need their own history: another slot's last write
+        # must neither erase nor invent this slot's read-to-write penalty.
         previous = self.directions.get(resource_id)
-        if direction and previous and previous != direction:
-            previous_end += switch_ns
-        start = max(earliest_ns, previous_end)
+        histories = self.lane_directions.get(resource_id)
+        if len(lanes) == 1 or histories is None or len(histories) != len(lanes):
+            histories = [previous] * len(lanes)
+        def eligible(index):
+            ready = _number("lane readiness", lanes[index])
+            if direction and histories[index] and histories[index] != direction:
+                ready += switch_ns
+            return max(earliest_ns, ready)
+        starts = [eligible(index) for index in range(len(lanes))]
+        lane_index = min(range(len(lanes)), key=lambda index: (starts[index], lanes[index], index))
+        start = starts[lane_index]
         end = start + duration_ns
+        busy = self.busy_ns.get(resource_id, 0.0) + duration_ns
+        if not math.isfinite(end) or not math.isfinite(busy):
+            raise ValueError("resource reservation exceeds finite timing range")
+        self.lane_available[resource_id] = lanes
         lanes[lane_index] = end
         self.ready_ns[resource_id] = min(lanes)
-        self.busy_ns[resource_id] = self.busy_ns.get(resource_id, 0.0) + duration_ns
+        self.busy_ns[resource_id] = busy
         self.last_intervals[resource_id] = (start, end)
         self._touched.add(resource_id)
         if self._interval_count < self._interval_limit:
@@ -105,9 +143,15 @@ class ResourceTimeline:
             self._intervals_truncated = True
         if direction:
             self.directions[resource_id] = direction
+            histories[lane_index] = direction
+        if len(lanes) > 1:
+            self.lane_directions[resource_id] = histories
+        else:
+            self.lane_directions.pop(resource_id, None)
         return Transfer(resource_id, 0, 0.0, start, end)
 
     def transfer(self, resource_id: str, bytes: int, earliest_ns: float, bandwidth_gb_s: float, *, direction: Optional[str] = None, switch_ns: float = 0.0) -> Transfer:
+        resource_id = self.canonical_resource_id(resource_id)
         if isinstance(bytes, bool) or not isinstance(bytes, int) or bytes < 0:
             raise ValueError("bytes must be a non-negative integer")
         bandwidth_gb_s = _number("bandwidth_gb_s", bandwidth_gb_s, positive=True)

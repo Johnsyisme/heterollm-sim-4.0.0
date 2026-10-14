@@ -213,9 +213,9 @@ class PhysicalRuntimeContext:
         deep-copied every runtime, allocator and the complete timeline before
         each task; once burst interval detail accumulated this duplicated the
         whole run for every in-flight transaction.  Core state and allocator
-        entries are small mutable indexes, while timeline interval payloads
-        are replaced at ``metrics_snapshot`` and can therefore be retained by
-        reference for rollback.
+        entries are small mutable indexes. Only the current request's bounded
+        interval recorder is copied; direct link transfers can append to it
+        without a Core submission first replacing it.
         """
         from .dram_core import _BankState
 
@@ -281,16 +281,19 @@ class PhysicalRuntimeContext:
             "busy_ns": dict(timeline.busy_ns),
             "bytes_moved": dict(timeline.bytes_moved),
             "last_intervals": dict(timeline.last_intervals),
-            # submit() replaces these containers before appending details.
-            "_intervals": timeline._intervals,
+            "_intervals": {rid: list(items) for rid, items in timeline._intervals.items()},
             "_interval_limit": timeline._interval_limit,
             "_interval_count": timeline._interval_count,
             "_intervals_truncated": timeline._intervals_truncated,
-            "_touched": timeline._touched,
-            "_interval_payloads": timeline._interval_payloads,
+            "_touched": set(timeline._touched),
+            "_interval_payloads": {rid: list(items) for rid, items in timeline._interval_payloads.items()},
             "lane_available": {
                 resource: tuple(lanes)
                 for resource, lanes in timeline.lane_available.items()
+            },
+            "lane_directions": {
+                resource: tuple(directions)
+                for resource, directions in timeline.lane_directions.items()
             },
         }
         return {
@@ -342,6 +345,11 @@ class PhysicalRuntimeContext:
         timeline.lane_available.update({
             resource: list(lanes)
             for resource, lanes in timeline_state["lane_available"].items()
+        })
+        timeline.lane_directions.clear()
+        timeline.lane_directions.update({
+            resource: list(directions)
+            for resource, directions in timeline_state.get("lane_directions", {}).items()
         })
         self._committed_owners.clear()
         self._committed_owners.update(snapshot.get("committed_owners", ()))
@@ -804,14 +812,14 @@ def _resolve_physical_task(
     counters = dict(result.counters)
     resource_busy = {}
     resource_bytes = {}
-    resource_owners = {}
+    resource_owner_sets = {}
     resource_intervals = {}
     resource_interval_payloads = {}
     resource_last = {}
     for (access, _operation, _address, _byte_count, owner, _config), item in zip(validated, results):
         for resource_id, value in item.counters.get("resource_busy_ns", {}).items():
             resource_busy[resource_id] = resource_busy.get(resource_id, 0.0) + value
-            resource_owners[resource_id] = owner
+            resource_owner_sets.setdefault(resource_id, set()).add(owner)
         for resource_id, value in item.counters.get("resource_bytes", {}).items():
             resource_bytes[resource_id] = resource_bytes.get(resource_id, 0) + value
         for resource_id, value in item.counters.get("resource_intervals", {}).items():
@@ -819,11 +827,25 @@ def _resolve_physical_task(
         for resource_id, value in item.counters.get("resource_interval_payloads", {}).items():
             resource_interval_payloads.setdefault(resource_id, []).extend(value)
         resource_last.update(item.counters.get("resource_last_intervals", {}))
+    resource_owners = {
+        resource: next(iter(owners)) if len(owners) == 1 else resource
+        for resource, owners in resource_owner_sets.items()
+    }
     counters.update({"resource_busy_ns": resource_busy, "resource_bytes": resource_bytes,
                      "resource_owners": resource_owners,
+                     "resource_owner_sets": {resource: tuple(sorted(owners))
+                                             for resource, owners in resource_owner_sets.items()},
                      "resource_intervals": resource_intervals, "resource_last_intervals": resource_last,
                      "resource_interval_payloads": resource_interval_payloads,
                      "operation_count": len(results)})
+    # These describe the whole task, not whichever request finished last.
+    for key in ("details_truncated", "intervals_truncated"):
+        counters[key] = any(item.counters.get(key, False) for item in results)
+    observations = [item.counters["nand_observations"] for item in results
+                    if item.counters.get("nand_observations") is not None]
+    if observations:
+        from .nand_core import summarize_nand_observations
+        counters["nand_observations"] = summarize_nand_observations(observations)
     execution_by_owner = {}
     operations_by_owner = {}
     for (_access, operation, _address, _byte_count, owner, access_config), item in zip(validated, results):
@@ -840,6 +862,7 @@ def _resolve_physical_task(
                 "physical_write_bytes": 0,
                 "energy_pj": 0.0,
                 "resource_busy_ns": {},
+                "resource_bytes": {},
                 "resource_owners": {},
                 "completion_ns": float(arrival_ns),
             }
@@ -855,6 +878,8 @@ def _resolve_physical_task(
         row["completion_ns"] = max(row["completion_ns"], item.completion_ns)
         if item.counters.get("nand_observations") is not None:
             row.setdefault("_nand_observations", []).append(item.counters["nand_observations"])
+        for resource_id, value in item.counters.get("resource_bytes", {}).items():
+            row["resource_bytes"][resource_id] = row["resource_bytes"].get(resource_id, 0) + value
         for resource_id, value in item.counters.get("resource_busy_ns", {}).items():
             row["resource_busy_ns"][resource_id] = (
                 row["resource_busy_ns"].get(resource_id, 0.0) + value
@@ -904,9 +929,13 @@ def _resolve_physical_task(
         elif key == "logical_bytes":
             counters[key] = sum(item.logical_bytes for item in results)
         else:
-            values = [item.counters.get(key) for item in results]
-            if any(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
-                counters[key] = sum(float(value or 0) for value in values)
+            values = [item.counters[key] for item in results
+                      if isinstance(item.counters.get(key), (int, float))
+                      and not isinstance(item.counters[key], bool)]
+            if values:
+                # Preserve integer counters in the combined compatibility
+                # view as well as each owner ledger. Timing remains float.
+                counters[key] = sum(values)
     for key in ("write_buffer_peak_bytes", "host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
                 "host_write_outstanding_at_admission_peak"):
         values = [item.counters[key] for item in results if key in item.counters]
@@ -918,9 +947,9 @@ def _resolve_physical_task(
     # would double count. Apportion that one bill by each resource's bytes;
     # this is an accounting split, not a claim of measured per-hop power.
     energy_rates = dict(owner_energy)
+    resource_energy = {}
     for owner, execution in execution_by_owner.items():
-        moved = sum(int(value) for resource, value in resource_bytes.items()
-                    if resource_owners.get(resource) == owner)
+        moved = sum(execution["resource_bytes"].values())
         physical = execution["physical_bytes"]
         if physical and not moved and owner_energy[owner]:
             raise ValueError("physical memory energy requires resource byte accounting")
@@ -932,18 +961,28 @@ def _resolve_physical_task(
                 "resource_distribution": "transfer_byte_fraction",
                 "resource_transfer_bytes": moved,
             }
+        execution["energy_pj"] = physical * owner_energy[owner]
+        execution["resource_energy_pj"] = {}
+        for resource, count in execution["resource_bytes"].items():
+            energy = count * energy_rates[owner]
+            execution["resource_energy_pj"][resource] = energy
+            resource_energy[resource] = resource_energy.get(resource, 0.0) + energy
+    counters["resource_energy_pj"] = resource_energy
+    # Detailed traces use the same bill as aggregate demands. Keep each
+    # contributor's coefficient even when several owners share one wire.
+    resource_interval_payloads.clear()
+    for (_access, _op, _addr, _count, owner, _config), item in zip(validated, results):
+        for resource, payloads in item.counters.get("resource_interval_payloads", {}).items():
+            resource_interval_payloads.setdefault(resource, []).extend(
+                (start, end, moved, moved * energy_rates[owner])
+                for start, end, moved, _energy in payloads
+            )
     demands = tuple(ResourceDemand(str(resource_id), float(duration),
                     bytes_moved=int(resource_bytes.get(resource_id, 0)),
-                    energy_pj=int(resource_bytes.get(resource_id, 0))
-                    * energy_rates[resource_owners[str(resource_id)]])
+                    energy_pj=resource_energy.get(resource_id, 0.0))
                     for resource_id, duration in sorted(resource_busy.items()) if float(duration) > 0)
-    if not demands:
+    if not demands and not all(item.operation is Operation.ERASE for item in results):
         raise ValueError("physical memory core returned no resource timing for a positive-byte access")
-    for row in execution_by_owner.values():
-        row["energy_pj"] = 0.0
-    for demand in demands:
-        owner = resource_owners[demand.resource_id]
-        execution_by_owner[owner]["energy_pj"] += demand.energy_pj
     metadata.update({
         "memory_access": resolved_accesses[0] if len(resolved_accesses) == 1 else tuple(resolved_accesses),
         "memory_accesses": tuple(resolved_accesses),
@@ -963,7 +1002,9 @@ def _resolve_physical_task(
         "physical_arrival_ns": float(arrival_ns),
         "physical_completion_ns": completion_ns,
         "physical_resource_intervals": tuple(
-            item for result in results for item in result.stages
+            replace(item, energy_pj=item.bytes * energy_rates[owner])
+            for (_access, _op, _addr, _count, owner, _config), result in zip(validated, results)
+            for item in result.stages
             if item.name not in {"READ_PIPELINE", "WRITE_PIPELINE"}
         ),
         "physical_resource_last_intervals": resource_last,
@@ -973,9 +1014,68 @@ def _resolve_physical_task(
     # Keep unrelated compute/link demands. Only preview demands for resources
     # identified by this transaction are replaced by core-owned reservations.
     memory_ids = set(metadata["physical_demands_resource_ids"]) | placeholder_ids
-    preserved = tuple(d for d in task.demands if d.resource_id not in memory_ids)
+    canonical_memory_ids = {runtime.timeline.canonical_resource_id(rid) for rid in memory_ids}
+    preserved = tuple(d for d in task.demands
+                      if runtime.timeline.canonical_resource_id(d.resource_id) not in canonical_memory_ids)
     metadata["physical_nonmemory_demand_ids"] = tuple(d.resource_id for d in preserved)
-    return replace(task, demands=preserved + demands, metadata=metadata)
+    resolved = replace(task, demands=preserved + demands, metadata=metadata)
+    return _recost_physical_kernel_envelope(resolved)
+
+
+def _recost_physical_kernel_envelope(task: TaskSpec) -> TaskSpec:
+    """Replace a native kernel's backing estimate with its actual Core span.
+
+    The stream is an execution envelope, not another hardware service. Compute
+    resource demands (including a declared calibration correction) stay intact;
+    the removed memory estimate must not survive as a stream-duration floor.
+    """
+    metadata = task.metadata
+    audit = metadata.get("phase_metadata", {}).get("kernel_model")
+    if not isinstance(audit, Mapping):
+        audit = metadata.get("cost_model", {}).get("kernel_model")
+    contract = audit.get("physical_memory_envelope") if isinstance(audit, Mapping) else None
+    if not isinstance(contract, Mapping):
+        return task
+    suffix = str(contract["resource_suffix"])
+    stream_ids = {d.resource_id for d in task.demands if d.resource_id.endswith(suffix)}
+    if not stream_ids:
+        return task
+    dependency_ns = contract["dependency_ns"]
+    _non_negative(dependency_ns, "physical kernel dependency_ns")
+    l2 = metadata.get("stateful_l2", {})
+    excluded = (stream_ids | set(metadata["physical_demands_resource_ids"])
+                | set(l2.get("envelope_resources", ())))
+    other_span = max((d.service_ns for d in task.demands if d.resource_id not in excluded), default=0.)
+    # A cache miss is submitted after its aggregate lookup. Restore that
+    # prefix when expressing the completion relative to the kernel start.
+    lookup_prefix = metadata.get("l2_execution", {}).get("backing_arrival_offset_ns", 0.)
+    memory_span = metadata["physical_completion_ns"] - metadata["physical_arrival_ns"] + lookup_prefix
+    duration = max(other_span, memory_span) + dependency_ns
+    demands = tuple(replace(d, service_ns=duration) if d.resource_id in stream_ids else d
+                    for d in task.demands)
+    def updated(value):
+        return {**value, "analytical_service_ns": duration,
+                "resource_service_ns": {d.resource_id: d.service_ns for d in demands},
+                "pipeline_timing_scope": "descriptor_before_physical_dispatch",
+                "prediction": {**value.get("prediction", {}),
+                    "prediction_ns": duration,
+                    "physical_memory_recost": {
+                        "memory_completion_span_ns": memory_span,
+                        "other_resource_span_ns": other_span,
+                        "dependency_ns": dependency_ns,
+                        "scope": "Core memory plus existing compute resource model; not measured whole-kernel replay",
+                    }}}
+    changes = {"analytical_service_ns": duration,
+               "analytical_energy_pj": sum(d.energy_pj for d in demands)}
+    for key in ("phase_metadata", "cost_model"):
+        value = metadata.get(key)
+        if isinstance(value, Mapping) and isinstance(value.get("kernel_model"), Mapping):
+            changes[key] = {**value, "kernel_model": updated(value["kernel_model"])}
+            if key == "cost_model" and "prediction" in value:
+                changes[key]["prediction"] = changes[key]["kernel_model"]["prediction"]
+    if isinstance(metadata.get("kernel_prediction"), Mapping):
+        changes["kernel_prediction"] = updated(metadata["kernel_prediction"])
+    return replace(task, demands=demands, metadata={**metadata, **changes})
 
 
 def is_physical_task(task: TaskSpec) -> bool:
@@ -1295,6 +1395,26 @@ class PhysicalService:
         return min(self.read_bandwidth_gb_s, self.write_bandwidth_gb_s)
 
     def price(
+        self, kind: AccessKind, byte_count: int, *,
+        transaction_bytes: Optional[int] = None, service_model: Optional[str] = None,
+        page_offset_bytes: Optional[int] = None,
+        runtime: Optional[PhysicalRuntimeContext] = None,
+        arrival_ns: Optional[float] = None, preview: bool = False,
+        summary_only: bool = False,
+    ) -> Mapping[str, object]:
+        """Price one access; a failed explicit submission leaves no state."""
+        saved = runtime.snapshot() if runtime is not None and not preview else None
+        try:
+            return self._price(kind, byte_count, transaction_bytes=transaction_bytes,
+                               service_model=service_model, page_offset_bytes=page_offset_bytes,
+                               runtime=runtime, arrival_ns=arrival_ns, preview=preview,
+                               summary_only=summary_only)
+        except Exception:
+            if saved is not None:
+                runtime.restore(saved)
+            raise
+
+    def _price(
         self,
         kind: AccessKind,
         byte_count: int,
@@ -1409,6 +1529,20 @@ class PhysicalService:
         return float(self.price(kind, byte_count)["service_ns"])
 
     def price_batch(
+        self, requests, *, start_ns=0.0, state=None,
+        runtime: Optional[PhysicalRuntimeContext] = None,
+    ):
+        """Price a batch atomically when an explicit runtime is supplied."""
+        context = runtime if runtime is not None else state if isinstance(state, PhysicalRuntimeContext) else None
+        saved = context.snapshot() if context is not None else None
+        try:
+            return self._price_batch(requests, start_ns=start_ns, state=state, runtime=runtime)
+        except Exception:
+            if saved is not None:
+                context.restore(saved)
+            raise
+
+    def _price_batch(
         self,
         requests,
         *,
@@ -1416,7 +1550,8 @@ class PhysicalService:
         state=None,
         runtime: Optional[PhysicalRuntimeContext] = None,
     ):
-        """Price an explicit NAND request batch and return its next queue state."""
+        """Price an explicit DRAM/NAND request batch."""
+        _non_negative(start_ns, "start_ns")
         if self.component is None:
             raise ValueError("price_batch requires a physical memory component")
         from .physical_contract import require_physical_memory_config
@@ -1447,7 +1582,7 @@ class PhysicalService:
                 parsed.append(AccessRequest(
                     str(item.get("request_id", f"request-{index}")),
                     Operation(op), int(address), int(item["byte_count"]),
-                    float(item.get("arrival_ns", max(start_ns, active_runtime.clock_ns))),
+                    item.get("arrival_ns", max(start_ns, active_runtime.clock_ns)),
                 ))
             batch = active_runtime.core.run(parsed)
             if explicit_context is not None:
@@ -1521,7 +1656,7 @@ class LinkService:
         return {self.physical_owner + ".inflight": self.queue_depth}
 
     def bill(self, byte_count: int) -> float:
-        return max(demand.service_ns for demand in self.demands(byte_count))
+        return max((demand.service_ns for demand in self.demands(byte_count)), default=0.0)
 
 
 @dataclass(frozen=True)
@@ -1926,6 +2061,7 @@ def endpoint_service(
             "resource_last_intervals",
             "physical_resource_intervals",
             "physical_resource_last_intervals",
+            "physical_resource_lane_completions",
         }
         billed = {
             key: value for key, value in billed.items() if key not in heavy_keys

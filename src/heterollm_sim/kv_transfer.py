@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import copy
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from .data_motion import AccessKind, PhysicalRuntimeContext, PhysicalService, resolve_service
@@ -52,6 +54,7 @@ class PhysicalKVTransferExecutor:
         relay_components: Sequence[str] = (),
         arrival_ns: Optional[float | Callable[[KvPoolTransferRequest], float]] = 0.0,
         namespace: str = "kv-pool",
+        energy_pj_per_byte_by_component: Optional[Mapping[str, float]] = None,
     ) -> None:
         self.runtime = runtime or PhysicalRuntimeContext()
         self.topology = topology
@@ -60,6 +63,11 @@ class PhysicalKVTransferExecutor:
         if not self.namespace:
             raise ValueError("namespace must be non-empty")
         self.components = self._component_map(hardware)
+        self.energy_pj_per_byte_by_component = {
+            str(key): float(value) for key, value in (energy_pj_per_byte_by_component or {}).items()}
+        if any(not math.isfinite(value) or value < 0
+               for value in self.energy_pj_per_byte_by_component.values()):
+            raise ValueError("physical memory energy rates must be finite and non-negative")
         self.relay_components = tuple(str(value) for value in relay_components)
         unknown = [value for value in self.relay_components if value not in self.components]
         if unknown:
@@ -67,7 +75,18 @@ class PhysicalKVTransferExecutor:
         self.services: dict[str, PhysicalService] = {}
         self._configs: dict[str, DramConfig | NandConfig] = {}
         self._bindings: dict[int, _PageBinding] = {}
+        # Plan/phase ownership belongs to snapshot-restorable executor state,
+        # including synchronous plans whose commit is retained by the pool.
+        self._async_plan_states: dict[int, dict[str, Any]] = {}
+        # IDs deliberately do not rewind on restore: stale callbacks from a
+        # discarded future must never name a newly prepared transfer.
+        self._next_async_plan_id = 0
+        self._next_async_phase_token = 0
+        self._async_restore_epoch = 0
         self.events: list[dict[str, Any]] = []
+        # Submitted work survives cancellation and detail-event retention. Rows
+        # are immutable after append; snapshots need not clone the full history.
+        self._cost_phases: list[dict[str, Any]] = []
         self.counters = {"read_bytes": 0, "write_bytes": 0, "link_bytes": 0,
                          "relay_bytes": 0, "transfer_count": 0,
                          "service_ns": 0.0, "link_ns": 0.0}
@@ -197,10 +216,25 @@ class PhysicalKVTransferExecutor:
 
     def release_page(self, page: Any) -> None:
         page_id = self._page_id(page)
-        binding = self._bindings.pop(page_id, None)
+        binding = self._bindings.get(page_id)
         if binding is None:
             return
-        self._allocator(binding.owner).release(binding.allocation.buffer_id, binding.generation)
+        self._release_allocation(binding.owner, binding.allocation.buffer_id, binding.generation)
+        self._bindings.pop(page_id)
+
+    def _release_allocation(self, owner: str, buffer_id: str, generation: int) -> None:
+        allocator = self._allocator(owner)
+        allocation = allocator.get_allocation(buffer_id, generation)
+        active = self.runtime.runtimes[owner]
+        if allocation is not None and isinstance(active.core.config, NandConfig):
+            # NAND allocations start on page boundaries; their rounded tail
+            # is also exclusively owned. Never leave dirty staging data that
+            # could later program this address after the allocation is reused.
+            page_bytes = active.core.config.page_bytes
+            rounded_bytes = ((allocation.size_bytes + page_bytes - 1) // page_bytes) * page_bytes
+            active.core.discard_staged_pages(allocation.base_address, rounded_bytes,
+                                            now_ns=active.clock_ns)
+        allocator.release(buffer_id, generation)
 
     def _arrival(self, request: Optional[KvPoolTransferRequest], value: Optional[float]) -> float:
         if value is not None:
@@ -218,10 +252,18 @@ class PhysicalKVTransferExecutor:
     @staticmethod
     def _sum_counters(total: dict[str, Any], result: Mapping[str, Any]) -> None:
         for key, value in result.items():
+            if key == "nand_observations" and value is not None:
+                from .nand_core import summarize_nand_observations
+                # Raw Core observations and an already summarized prefix both
+                # retain their events and per-owner geometry. Recompute the
+                # derived queue/plane statistics over their joint population.
+                total[key] = summarize_nand_observations((total.get(key), value))
+                continue
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if key == "arrival_ns":
                     total[key] = min(total.get(key, value), value)
                 elif key in {"completion_ns", "host_ack_completion_ns", "media_drain_completion_ns", "write_buffer_peak_bytes",
+                             "write_buffer_release_completion_ns",
                              "host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
                              "host_write_outstanding_at_admission_peak"}:
                     total[key] = max(total.get(key, value), value)
@@ -241,9 +283,167 @@ class PhysicalKVTransferExecutor:
             else:
                 total[key] = value
 
+    @contextmanager
+    def _io_transaction(self):
+        """Roll back one logical access/phase without copying event history."""
+        saved_runtime = self.runtime.snapshot()
+        saved_counters = dict(self.counters)
+        cost_count = len(self._cost_phases)
+        try:
+            yield
+        except Exception:
+            self.runtime.restore(saved_runtime)
+            self.counters = saved_counters
+            del self._cost_phases[cost_count:]
+            raise
+
+    def _record_memory_cost(self, component_id, kind, bill):
+        owner = self.services[component_id].physical_owner
+        raw = dict(bill)
+        raw["logical_read_bytes"] = int(raw.get("logical_bytes", 0)) if kind is AccessKind.READ else 0
+        raw["logical_write_bytes"] = int(raw.get("logical_bytes", 0)) if kind is AccessKind.WRITE else 0
+        rate = self.energy_pj_per_byte_by_component.get(component_id, 0.0)
+        energy = float(raw.get("physical_bytes", 0)) * rate
+        moved = raw.get("resource_bytes", {})
+        wire_bytes = sum(moved.values())
+        if energy and not wire_bytes:
+            raise ValueError("physical memory energy requires resource byte accounting")
+        resource_energy = {resource: energy * amount / wire_bytes if wire_bytes else 0.0
+                           for resource, amount in moved.items()}
+        raw["resource_interval_payloads"] = {
+            resource: tuple((start, end, size, resource_energy.get(resource, 0.0) * size / moved[resource]
+                             if moved.get(resource) else 0.0)
+                            for start, end, size, _old_energy in intervals)
+            for resource, intervals in raw.get("resource_interval_payloads", {}).items()}
+        direction = "read" if kind is AccessKind.READ else "write"
+        raw.update({"phase_id": "paged-kv-physical-" + str(len(self._cost_phases)),
+            "kind": "memory", "component_id": component_id, "owner": owner,
+            "memory_kind": self._configs[component_id].kind.value,
+            "energy_pj": energy, "energy_pj_per_byte": rate,
+            "energy_rate_configured": component_id in self.energy_pj_per_byte_by_component,
+            "resource_energy_pj": resource_energy,
+            "resource_owners": {resource: owner for resource in raw.get("resource_busy_ns", {})},
+            "resource_busy_by_direction_ns": {direction: dict(raw.get("resource_busy_ns", {}))},
+            "direction_semantics": "attributed to the submitted transaction direction; a NAND write may include RMW reads"})
+        self._cost_phases.append(raw)
+
+    def _submit_link_phase(self, hop, size, arrival_ns):
+        """Use the same payload-wire and inflight-credit contract as DAG hops."""
+        timeline = self.runtime.timeline
+        rate = float(getattr(hop, "energy_pj_per_byte", 0.0))
+        if not math.isfinite(rate) or rate < 0:
+            raise ValueError("link energy rate must be finite and non-negative")
+        demand_factory = getattr(hop, "demands", None)
+        demands = tuple(demand_factory(size)) if callable(demand_factory) else (
+            SimpleNamespace(resource_id=hop.resource_id, service_ns=hop.transfer_ns(size),
+                            bytes_moved=size, energy_pj=size * rate),)
+        for resource, capacity in getattr(hop, "resource_capacities", {}).items():
+            resource = timeline.canonical_resource_id(resource)
+            existing = timeline.lane_available.get(resource)
+            if existing is None:
+                timeline.lane_available[resource] = [timeline.available_ns(resource)] * capacity
+            elif len(existing) != capacity:
+                raise KvPoolError("link inflight capacity conflicts with the shared resource calendar")
+        combined = {}
+        for demand in demands:
+            resource = timeline.canonical_resource_id(demand.resource_id)
+            row = combined.setdefault(resource, {"busy": 0., "bytes": 0, "energy": 0.})
+            row["busy"] += demand.service_ns
+            row["bytes"] += demand.bytes_moved
+            row["energy"] += demand.energy_pj
+        start = max((arrival_ns, *(timeline.available_ns(resource) for resource in combined)))
+        busy, moved, energy, intervals, payloads = {}, {}, {}, {}, {}
+        end = start
+        for resource, cost in combined.items():
+            reservation = timeline.reserve(resource, start, cost["busy"], direction="read_write")
+            end = max(end, reservation.end_ns)
+            busy[resource], moved[resource], energy[resource] = cost["busy"], cost["bytes"], cost["energy"]
+            timeline.bytes_moved[resource] = timeline.bytes_moved.get(resource, 0) + cost["bytes"]
+            intervals[resource] = ((reservation.start_ns, reservation.end_ns),)
+            payloads[resource] = ((reservation.start_ns, reservation.end_ns, cost["bytes"], cost["energy"]),)
+        phase = {
+            "phase_id": "paged-kv-physical-" + str(len(self._cost_phases)),
+            "kind": "link", "link_id": hop.link_id, "operation": "copy",
+            "resource_id": timeline.canonical_resource_id(hop.resource_id), "bytes": size,
+            "arrival_ns": arrival_ns, "start_ns": start, "completion_ns": end,
+            "duration_ns": end - start,
+            "logical_bytes": size, "physical_bytes": size, "energy_pj": sum(energy.values()),
+            "energy_pj_per_byte": rate,
+            "resource_busy_ns": busy, "resource_bytes": moved,
+            "resource_energy_pj": energy, "resource_intervals": intervals,
+            "resource_interval_payloads": payloads,
+            "resource_busy_by_direction_ns": {"read_write": busy},
+            "intervals_truncated": False}
+        self._cost_phases.append(phase)
+        self.counters["link_bytes"] += size
+        self.counters["link_ns"] += end - start
+        return phase
+
+    def cost_ledger(self) -> Mapping[str, Any]:
+        """Summarize already submitted Core/link work, without executing it again.
+
+        Times are admission/completion envelopes, not occupied-time sums. Busy
+        time is summed per resource and may exceed elapsed time for parallel
+        slots. Core interval detail can be truncated independently of totals.
+        """
+        from .planner import _summarize_dram_task_traffic, _summarize_nand_task_traffic
+        result = {"schema": "heterollm.paged-kv-physical-cost/v1",
+            "phase_count": len(self._cost_phases), "energy_pj": 0.0,
+            "resource_accounted_bytes": 0, "resource_busy_ns": {},
+            "resource_bytes": {}, "resource_energy_pj": {},
+            "resource_busy_by_direction_ns": {}, "owners": {}, "links": {},
+            "first_arrival_ns": None, "last_completion_ns": None}
+        adapters = []
+        for phase in self._cost_phases:
+            result["energy_pj"] += phase["energy_pj"]
+            start, end = phase["arrival_ns"], phase["completion_ns"]
+            result["first_arrival_ns"] = start if result["first_arrival_ns"] is None else min(start, result["first_arrival_ns"])
+            result["last_completion_ns"] = end if result["last_completion_ns"] is None else max(end, result["last_completion_ns"])
+            for key in ("resource_busy_ns", "resource_bytes", "resource_energy_pj"):
+                for resource, value in phase.get(key, {}).items():
+                    result[key][resource] = result[key].get(resource, 0) + value
+            for direction, values in phase["resource_busy_by_direction_ns"].items():
+                target = result["resource_busy_by_direction_ns"].setdefault(direction, {})
+                for resource, value in values.items():
+                    target[resource] = target.get(resource, 0) + value
+            if phase["kind"] == "memory":
+                owner = phase["owner"]
+                row = result["owners"].setdefault(owner, {"component_ids": [],
+                    "memory_kind": phase["memory_kind"], "transaction_count": 0,
+                    "energy_pj": 0.0, "energy_rate_configured": True})
+                if phase["component_id"] not in row["component_ids"]:
+                    row["component_ids"].append(phase["component_id"])
+                row["transaction_count"] += 1
+                row["energy_rate_configured"] &= phase["energy_rate_configured"]
+                for key in ("logical_bytes", "logical_read_bytes", "logical_write_bytes",
+                            "physical_bytes", "physical_read_bytes", "physical_write_bytes",
+                            "host_transfer_bytes", "internal_transfer_bytes", "energy_pj"):
+                    # Unknown counters must not become measured zero.
+                    value = phase.get(key)
+                    row[key] = None if value is None or (key in row and row[key] is None) else row.get(key, 0) + value
+                raw = {**phase, "kind": phase["memory_kind"]}
+                adapters.append(SimpleNamespace(task_id=phase["phase_id"],
+                    metadata={"physical_execution_by_owner": {owner: raw}},
+                    demands=tuple(SimpleNamespace(resource_id=resource)
+                                  for resource in phase.get("resource_busy_ns", {}))))
+            else:
+                row = result["links"].setdefault(phase["link_id"], {"phase_count": 0, "bytes": 0, "energy_pj": 0.0})
+                row["phase_count"] += 1
+                row["bytes"] += phase["physical_bytes"]
+                row["energy_pj"] += phase["energy_pj"]
+        result["resource_accounted_bytes"] = sum(result["resource_bytes"].values())
+        result["storage_traffic"] = _summarize_nand_task_traffic(adapters)
+        result["dram_traffic"] = _summarize_dram_task_traffic(adapters)
+        for key in ("storage_traffic", "dram_traffic"):
+            result[key] = {**result[key], "count_semantics": "task_count here counts submitted migration memory phases, not kernel tasks"}
+        result["phases"] = tuple(copy.deepcopy(self._cost_phases))
+        return result
+
     def _price_chunks(self, component_id: str, kind: AccessKind, address: int,
-                      size: int, *, arrival_ns: float) -> tuple[dict[str, Any], ...]:
+                      size: int, *, arrival_ns: float,
+                      caller_managed_transaction: bool = False) -> tuple[dict[str, Any], ...]:
         service = self._ensure_service(component_id)
+        price = service._price if caller_managed_transaction else service.price
         config = self._configs[component_id]
         limit = int(getattr(config, "write_buffer_bytes", 0)) if kind is AccessKind.WRITE else 0
         granularity = int(getattr(config, "host_granularity_bytes", 0) or getattr(config, "burst_bytes", 0) or 1)
@@ -263,8 +463,9 @@ class PhysicalKVTransferExecutor:
                 # End chunks on a granule boundary so rounding cannot exceed
                 # the finite staging capacity.
                 amount = min(amount, chunk - (address + offset) % granularity)
-            bill = service.price(kind, amount, page_offset_bytes=address + offset,
-                                 runtime=self.runtime, arrival_ns=current)
+            bill = price(kind, amount, page_offset_bytes=address + offset,
+                         runtime=self.runtime, arrival_ns=current)
+            self._record_memory_cost(component_id, kind, bill)
             results.append(dict(bill))
             current = float(bill.get("completion_ns", current))
             offset += amount
@@ -279,33 +480,31 @@ class PhysicalKVTransferExecutor:
 
     def read_page(self, page: Any, *, arrival_ns: Optional[float] = None,
                   offset_bytes: int = 0, size_bytes: Optional[int] = None) -> Mapping[str, Any]:
-        binding = self._binding(page)
-        size = binding.bytes - int(offset_bytes) if size_bytes is None else int(size_bytes)
-        address = binding.allocation.address(int(offset_bytes), size)
-        total: dict[str, Any] = {"operation": "READ", "logical_bytes": 0}
-        for bill in self._price_chunks(binding.component_id, AccessKind.READ, address, size,
-                                       arrival_ns=self._arrival(None, arrival_ns)):
-            self._sum_counters(total, bill)
-        if total.get("completion_ns") is None:
-            total["completion_ns"] = total.get("arrival_ns", 0.0)
-        total["service_ns"] = total["completion_ns"] - total.get("arrival_ns", 0.0)
-        total["actual_bandwidth_gb_s"] = total["logical_bytes"] / total["service_ns"] if total["service_ns"] else 0.0
-        return total
+        return self._page_access(page, AccessKind.READ, arrival_ns=arrival_ns,
+                                 offset_bytes=offset_bytes, size_bytes=size_bytes)
 
     def write_page(self, page: Any, *, arrival_ns: Optional[float] = None,
                    offset_bytes: int = 0, size_bytes: Optional[int] = None) -> Mapping[str, Any]:
-        binding = self._binding(page)
-        size = binding.bytes - int(offset_bytes) if size_bytes is None else int(size_bytes)
-        address = binding.allocation.address(int(offset_bytes), size)
-        total: dict[str, Any] = {"operation": "WRITE", "logical_bytes": 0}
-        for bill in self._price_chunks(binding.component_id, AccessKind.WRITE, address, size,
-                                       arrival_ns=self._arrival(None, arrival_ns)):
-            self._sum_counters(total, bill)
-        if total.get("completion_ns") is None:
-            total["completion_ns"] = total.get("arrival_ns", 0.0)
-        total["service_ns"] = total["completion_ns"] - total.get("arrival_ns", 0.0)
-        total["actual_bandwidth_gb_s"] = total["logical_bytes"] / total["service_ns"] if total["service_ns"] else 0.0
-        return total
+        return self._page_access(page, AccessKind.WRITE, arrival_ns=arrival_ns,
+                                 offset_bytes=offset_bytes, size_bytes=size_bytes)
+
+    def _page_access(self, page: Any, kind: AccessKind, *, arrival_ns,
+                     offset_bytes, size_bytes) -> Mapping[str, Any]:
+        # A caller observes one logical page operation. A rejected final chunk
+        # or failed statistics reduction must not publish its successful prefix.
+        with self._io_transaction():
+            binding = self._binding(page)
+            size = binding.bytes - int(offset_bytes) if size_bytes is None else int(size_bytes)
+            address = binding.allocation.address(int(offset_bytes), size)
+            total: dict[str, Any] = {"operation": kind.value, "logical_bytes": 0}
+            for bill in self._price_chunks(binding.component_id, kind, address, size,
+                    arrival_ns=self._arrival(None, arrival_ns), caller_managed_transaction=True):
+                self._sum_counters(total, bill)
+            if total.get("completion_ns") is None:
+                total["completion_ns"] = total.get("arrival_ns", 0.0)
+            total["service_ns"] = total["completion_ns"] - total.get("arrival_ns", 0.0)
+            total["actual_bandwidth_gb_s"] = total["logical_bytes"] / total["service_ns"] if total["service_ns"] else 0.0
+            return total
 
     def _route(self, source: str, target: str, size: int) -> Sequence[Any]:
         if source == target:
@@ -331,17 +530,9 @@ class PhysicalKVTransferExecutor:
             # consume link timeline capacity here.
             if getattr(hop, "service_ref", None):
                 continue
-            duration = float(hop.transfer_ns(size))
-            transfer = self.runtime.timeline.reserve(hop.resource_id, current, duration,
-                                                     direction="read_write")
-            self.runtime.timeline.bytes_moved[hop.resource_id] = self.runtime.timeline.bytes_moved.get(hop.resource_id, 0) + size
-            current = transfer.end_ns
-            phases.append({"kind": "link", "link_id": hop.link_id,
-                           "resource_id": hop.resource_id, "bytes": size,
-                           "start_ns": transfer.start_ns, "completion_ns": transfer.end_ns,
-                           "duration_ns": duration})
-            self.counters["link_bytes"] += size
-            self.counters["link_ns"] += duration
+            phase = self._submit_link_phase(hop, size, current)
+            current = phase["completion_ns"]
+            phases.append(phase)
         return current, phases
 
     def _transfer(self, request: KvPoolTransferRequest) -> KvPoolTransferPlan:
@@ -362,7 +553,8 @@ class PhysicalKVTransferExecutor:
         bindings_snapshot = copy.deepcopy(self._bindings)
         events_snapshot = len(self.events)
         counters_snapshot = copy.deepcopy(self.counters)
-        temp_allocations: list[tuple[PhysicalAddressAllocator, str, int]] = []
+        cost_count = len(self._cost_phases)
+        temp_allocations: list[tuple[str, str, int]] = []
         target_allocator = self._allocator(target_owner)
         target_generation = binding.generation + 1
         start = self._arrival(request, None)
@@ -371,7 +563,7 @@ class PhysicalKVTransferExecutor:
             target_alloc = target_allocator.allocate(self._buffer_id(request), binding.bytes, target_generation)
             source_addr = binding.allocation.base_address
             read_bills = self._price_chunks(binding.component_id, AccessKind.READ, source_addr,
-                                            binding.bytes, arrival_ns=start)
+                                            binding.bytes, arrival_ns=start, caller_managed_transaction=True)
             current = float(read_bills[-1].get("completion_ns", start)) if read_bills else start
             for bill in read_bills:
                 phases.append({"kind": "source_read", **bill})
@@ -380,18 +572,19 @@ class PhysicalKVTransferExecutor:
             for stage in route_stages[:-1]:
                 current, link_phases = self._link_segment(current_component, stage, binding.bytes, arrival_ns=current)
                 phases.extend(link_phases)
-                relay_allocator = self._allocator(self._ensure_service(stage).physical_owner)
+                relay_owner = self._ensure_service(stage).physical_owner
+                relay_allocator = self._allocator(relay_owner)
                 relay_allocation = relay_allocator.allocate(
                     self._buffer_id(request) + ":relay:" + stage, binding.bytes, target_generation)
-                temp_allocations.append((relay_allocator, relay_allocation.buffer_id, target_generation))
+                temp_allocations.append((relay_owner, relay_allocation.buffer_id, target_generation))
                 relay_bills = self._price_chunks(stage, AccessKind.WRITE, relay_allocation.base_address,
-                    binding.bytes, arrival_ns=current)
+                    binding.bytes, arrival_ns=current, caller_managed_transaction=True)
                 for bill in relay_bills:
                     phases.append({"kind": "relay_write", "component": stage, **bill})
                 current = float(relay_bills[-1].get("completion_ns", current)) if relay_bills else current
                 relay_read = self._price_chunks(stage, AccessKind.READ,
                     relay_allocation.base_address,
-                    binding.bytes, arrival_ns=current)
+                    binding.bytes, arrival_ns=current, caller_managed_transaction=True)
                 for bill in relay_read:
                     phases.append({"kind": "relay_read", "component": stage, **bill})
                 current = float(relay_read[-1].get("completion_ns", current)) if relay_read else current
@@ -400,7 +593,7 @@ class PhysicalKVTransferExecutor:
             current, link_phases = self._link_segment(current_component, target_component, binding.bytes, arrival_ns=current)
             phases.extend(link_phases)
             target_bills = self._price_chunks(target_component, AccessKind.WRITE, target_alloc.base_address,
-                                              binding.bytes, arrival_ns=current)
+                                              binding.bytes, arrival_ns=current, caller_managed_transaction=True)
             for bill in target_bills:
                 phases.append({"kind": "target_write", **bill})
             completion = float(target_bills[-1].get("completion_ns", current)) if target_bills else current
@@ -408,15 +601,26 @@ class PhysicalKVTransferExecutor:
             self.runtime.restore(snapshot)
             self._bindings = bindings_snapshot
             self.counters = counters_snapshot
+            del self._cost_phases[cost_count:]
             raise
-        state = {"done": False}
+        plan_id = self._next_async_plan_id
+        self._next_async_plan_id += 1
+        phase_token = self._new_phase_token()
+        # All physical work is prepared at once, so this single synchronous
+        # phase is also final. Register it just like asynchronous phases: a
+        # serving snapshot can restore it after the closure already committed.
+        state = {"done": False, "phase": 0, "phase_count": 0, "plan_id": plan_id,
+                 "phase_token": phase_token}
+        self._async_plan_states[plan_id] = state
         plan = KvPoolTransferPlan(
             duration_ns=max(0.0, completion - start), start_ns=start,
             completion_ns=completion,
             commit=lambda: self._commit_transfer(page_id, target_component, target_owner, target_alloc,
-                                                 target_generation, phases, temp_allocations, state),
+                                                 target_generation, phases, temp_allocations, state,
+                                                 expected_token=phase_token),
             rollback=lambda: self._rollback_transfer(snapshot, bindings_snapshot, counters_snapshot, events_snapshot, target_component,
-                                                     target_owner, target_alloc, temp_allocations, state),
+                                                     target_owner, target_alloc, temp_allocations, state,
+                                                     expected_token=phase_token, cost_count=cost_count),
         )
         return plan
 
@@ -441,6 +645,7 @@ class PhysicalKVTransferExecutor:
         bindings_snapshot = copy.deepcopy(self._bindings)
         events_snapshot = len(self.events)
         counters_snapshot = copy.deepcopy(self.counters)
+        cost_count = len(self._cost_phases)
         target_generation = binding.generation + 1
         temp_allocations = []
         start = self._arrival(request, None)
@@ -458,77 +663,160 @@ class PhysicalKVTransferExecutor:
                 if component == target_component:
                     downstream.append(("target_write", component, target_alloc.base_address, AccessKind.WRITE))
                 else:
-                    allocator = self._allocator(self._ensure_service(component).physical_owner)
+                    relay_owner = self._ensure_service(component).physical_owner
+                    allocator = self._allocator(relay_owner)
                     allocation = allocator.allocate(self._buffer_id(request) + ":relay:" + component,
                                                     binding.bytes, target_generation)
-                    temp_allocations.append((allocator, allocation.buffer_id, target_generation))
+                    temp_allocations.append((relay_owner, allocation.buffer_id, target_generation))
                     downstream.extend((
                         ("relay_write", component, allocation.base_address, AccessKind.WRITE),
                         ("relay_read", component, allocation.base_address, AccessKind.READ)))
                 source = component
             read_bills = self._price_chunks(binding.component_id, AccessKind.READ,
-                binding.allocation.base_address, binding.bytes, arrival_ns=start)
+                binding.allocation.base_address, binding.bytes, arrival_ns=start,
+                caller_managed_transaction=True)
             phases = tuple({"kind": "source_read", **bill} for bill in read_bills)
             ready = float(read_bills[-1].get("completion_ns", start)) if read_bills else start
         except Exception:
             self.runtime.restore(snapshot)
             self._bindings = bindings_snapshot
             self.counters = counters_snapshot
+            del self._cost_phases[cost_count:]
             raise
-        state = {"done": False}
+        plan_id = self._next_async_plan_id
+        self._next_async_plan_id += 1
+        phase_token = self._new_phase_token()
+        state = {"done": False, "phase": 0, "phase_count": len(downstream), "plan_id": plan_id,
+                 "phase_token": phase_token}
+        self._async_plan_states[plan_id] = state
 
-        def make_plan(index, phase_end, completed_phases):
+        def make_plan(index, phase_end, completed_phases, token):
             final = index == len(downstream)
 
             def advance():
+                live_state = self._transfer_state(state)
+                if live_state["done"]:
+                    raise KvPoolError("physical transfer was already committed or cancelled")
+                if live_state["phase"] != index:
+                    raise KvPoolError("physical transfer phase was already advanced")
+                self._check_phase_token(live_state, token)
+                # Other requests may have run since prepare_async. Roll back
+                # only this newly submitted phase; the plan-wide rollback is
+                # reserved for immediate, just-prepared admission failures.
+                with self._io_transaction():
+                    next_token = self._new_phase_token()
+                    next_plan = advance_phase(next_token)
+                    live_state["phase"] = index + 1
+                    live_state["phase_token"] = next_token
+                    return next_plan
+
+            def advance_phase(next_token):
                 descriptor = downstream[index]
                 kind = descriptor[0]
                 if kind == "link":
                     hop = descriptor[1]
-                    duration = float(hop.transfer_ns(binding.bytes))
-                    reservation = self.runtime.timeline.reserve(hop.resource_id, phase_end, duration,
-                                                                 direction="read_write")
-                    self.runtime.timeline.bytes_moved[hop.resource_id] = (
-                        self.runtime.timeline.bytes_moved.get(hop.resource_id, 0) + binding.bytes)
-                    self.counters["link_bytes"] += binding.bytes
-                    self.counters["link_ns"] += duration
-                    new_phases = ({"kind": "link", "link_id": hop.link_id,
-                        "resource_id": hop.resource_id, "bytes": binding.bytes,
-                        "start_ns": reservation.start_ns, "completion_ns": reservation.end_ns,
-                        "duration_ns": duration},)
-                    end = reservation.end_ns
+                    phase = self._submit_link_phase(hop, binding.bytes, phase_end)
+                    new_phases = (phase,)
+                    end = phase["completion_ns"]
                 else:
                     _, component, address, access_kind = descriptor
                     bills = self._price_chunks(component, access_kind, address, binding.bytes,
-                                               arrival_ns=phase_end)
+                                               arrival_ns=phase_end, caller_managed_transaction=True)
                     new_phases = tuple({"kind": kind, "component": component, **bill} for bill in bills)
                     end = float(bills[-1].get("completion_ns", phase_end)) if bills else phase_end
                     if kind.startswith("relay_"):
                         self.counters["relay_bytes"] += binding.bytes
-                return make_plan(index + 1, end, (*completed_phases, *new_phases))
+                return make_plan(index + 1, end, (*completed_phases, *new_phases), next_token)
 
             return KvPoolTransferPlan(
                 duration_ns=max(0.0, phase_end - start), start_ns=start, completion_ns=phase_end,
                 commit=(lambda: self._commit_transfer(page_id, target_component, target_owner, target_alloc,
-                    target_generation, list(completed_phases), temp_allocations, state)) if final else None,
+                    target_generation, list(completed_phases), temp_allocations, state,
+                    expected_token=token)) if final else None,
                 rollback=lambda: self._rollback_transfer(snapshot, bindings_snapshot, counters_snapshot,
-                    events_snapshot, target_component, target_owner, target_alloc, temp_allocations, state),
+                    events_snapshot, target_component, target_owner, target_alloc, temp_allocations, state,
+                    expected_token=token, cost_count=cost_count),
                 advance=None if final else advance,
                 cancel=lambda: self._cancel_transfer(page_id, target_component, target_owner,
-                    target_alloc, target_generation, completed_phases, temp_allocations, state),
+                    target_alloc, target_generation, completed_phases, temp_allocations, state,
+                    expected_phase=index, expected_token=token),
             )
 
-        return make_plan(0, ready, phases)
+        return make_plan(0, ready, phases, phase_token)
+
+    def _new_phase_token(self):
+        # Replaying a snapshot creates a new physical submission. Its callback
+        # must not accept a discarded future's same-index phase and old bill.
+        token = self._next_async_phase_token
+        self._next_async_phase_token += 1
+        return token
+
+    @staticmethod
+    def _check_phase_token(state, expected_token):
+        if expected_token is not None and state.get("phase_token") != expected_token:
+            raise KvPoolError("physical transfer phase belongs to a discarded future")
+
+    def _finish_transfer(self, live_state, callback_state):
+        live_state["done"] = True
+        if "plan_id" in live_state:
+            # Keep terminal idempotence in callbacks already owned by callers,
+            # without retaining every completed migration in the executor or
+            # copying that history into subsequent snapshots.
+            callback_state.update(live_state)
+            callback_state["terminal_epoch"] = self._async_restore_epoch
+            self._async_plan_states.pop(live_state["plan_id"], None)
+
+    def _transfer_state(self, state):
+        if "plan_id" not in state:
+            return state
+        try:
+            return self._async_plan_states[state["plan_id"]]
+        except KeyError as exc:
+            if state["done"] and state.get("terminal_epoch") == self._async_restore_epoch:
+                return state
+            raise KvPoolError("physical transfer plan is no longer active") from exc
 
     def _cancel_transfer(self, page_id, target_component, target_owner, target_alloc,
-                         target_generation, phases, temp_allocations, state):
+                         target_generation, phases, temp_allocations, state, *, expected_phase=None,
+                         expected_token=None):
+        with self._finalization_transaction(state):
+            return self._cancel_transfer_impl(page_id, target_component, target_owner,
+                target_alloc, target_generation, phases, temp_allocations, state,
+                expected_phase=expected_phase, expected_token=expected_token)
+
+    @contextmanager
+    def _finalization_transaction(self, callback_state):
+        """Publish/free atomically while retaining the already completed I/O."""
+        bindings = dict(self._bindings)
+        states = copy.deepcopy(self._async_plan_states)
+        callback = dict(callback_state)
+        event_count = len(self.events)
+        try:
+            with self._io_transaction():
+                yield
+        except Exception:
+            self._bindings = bindings
+            self._async_plan_states = states
+            callback_state.clear()
+            callback_state.update(callback)
+            del self.events[event_count:]
+            raise
+
+    def _cancel_transfer_impl(self, page_id, target_component, target_owner, target_alloc,
+                             target_generation, phases, temp_allocations, state, *, expected_phase=None,
+                             expected_token=None):
+        callback_state = state
+        state = self._transfer_state(state)
         if state["done"]:
             raise KvPoolError("physical transfer was already committed or cancelled")
+        if expected_phase is not None and state["phase"] != expected_phase:
+            raise KvPoolError("cannot cancel using an earlier physical transfer phase")
+        self._check_phase_token(state, expected_token)
         # Caller waits for the submitted phase's completion; no allocator can
         # reuse an address still being written by that phase.
-        self._allocator(target_owner).release(target_alloc.buffer_id, target_generation)
-        for allocator, buffer_id, generation in temp_allocations:
-            allocator.release(buffer_id, generation)
+        self._release_allocation(target_owner, target_alloc.buffer_id, target_generation)
+        for owner, buffer_id, generation in temp_allocations:
+            self._release_allocation(owner, buffer_id, generation)
         billed = {"logical_page_id": page_id, "kind": "cancelled",
                   "source_component": self._bindings[page_id].component_id,
                   "target_component": target_component, "bytes": self._bindings[page_id].bytes,
@@ -538,23 +826,37 @@ class PhysicalKVTransferExecutor:
         billed["duration_ns"] = billed["completion_ns"] - billed["start_ns"]
         self.events.append(billed)
         self.counters["cancelled_transfer_count"] = self.counters.get("cancelled_transfer_count", 0) + 1
-        state["done"] = True
+        self._finish_transfer(state, callback_state)
         return billed
 
     def _commit_transfer(self, page_id: int, target_component: str, target_owner: str,
                          target_alloc: PhysicalAllocation, target_generation: int,
-                         phases: list[dict[str, Any]], temp_allocations: list[tuple[PhysicalAddressAllocator, str, int]],
-                         state: dict[str, bool]) -> None:
+                         phases: list[dict[str, Any]], temp_allocations: list[tuple[str, str, int]],
+                          state: dict[str, Any], *, expected_token=None) -> None:
+        with self._finalization_transaction(state):
+            self._commit_transfer_impl(page_id, target_component, target_owner,
+                target_alloc, target_generation, phases, temp_allocations, state,
+                expected_token=expected_token)
+
+    def _commit_transfer_impl(self, page_id: int, target_component: str, target_owner: str,
+                             target_alloc: PhysicalAllocation, target_generation: int,
+                             phases: list[dict[str, Any]], temp_allocations: list[tuple[str, str, int]],
+                             state: dict[str, Any], *, expected_token=None) -> None:
+        callback_state = state
+        state = self._transfer_state(state)
+        if "phase_count" in state and state["phase"] != state["phase_count"]:
+            raise KvPoolError("cannot commit before every physical transfer phase completes")
+        self._check_phase_token(state, expected_token)
         if state["done"]:
             return
         binding = self._bindings[page_id]
         old = binding
-        self._allocator(old.owner).release(old.allocation.buffer_id, old.generation)
+        self._release_allocation(old.owner, old.allocation.buffer_id, old.generation)
         self._bindings[page_id] = _PageBinding(old.page_id, old.request_id, old.layer_group,
                                                target_component, target_owner, old.bytes,
                                                target_generation, target_alloc)
-        for allocator, buffer_id, generation in temp_allocations:
-            allocator.release(buffer_id, generation)
+        for owner, buffer_id, generation in temp_allocations:
+            self._release_allocation(owner, buffer_id, generation)
         self.events.append({"logical_page_id": page_id, "source_component": old.component_id,
                             "target_component": target_component, "bytes": old.bytes,
                             "start_ns": phases[0].get("arrival_ns", 0.0) if phases else 0.0,
@@ -562,32 +864,46 @@ class PhysicalKVTransferExecutor:
                             "duration_ns": 0.0 if not phases else phases[-1].get("completion_ns", 0.0) - phases[0].get("arrival_ns", 0.0),
                             "phases": tuple(phases)})
         self.counters["transfer_count"] += 1
-        state["done"] = True
+        self._finish_transfer(state, callback_state)
 
     def _rollback_transfer(self, snapshot: Mapping[str, Any], bindings: Mapping[int, _PageBinding],
                            counters: Mapping[str, Any], events_len: int, target_component: str, target_owner: str,
-                           target_alloc: PhysicalAllocation, temp_allocations: list[tuple[PhysicalAddressAllocator, str, int]],
-                           state: dict[str, bool]) -> None:
+                           target_alloc: PhysicalAllocation, temp_allocations: list[tuple[str, str, int]],
+                           state: dict[str, Any], *, expected_token=None, cost_count=0) -> None:
+        callback_state = state
+        state = self._transfer_state(state)
         if state["done"]:
             return
+        if state.get("phase", 0) != 0:
+            raise KvPoolError("only a just-prepared physical transfer can be rolled back")
+        self._check_phase_token(state, expected_token)
         self.runtime.restore(snapshot)
         self._bindings = copy.deepcopy(bindings)
         self.counters = copy.deepcopy(counters)
         del self.events[events_len:]
-        state["done"] = True
+        del self._cost_phases[cost_count:]
+        self._finish_transfer(state, callback_state)
 
     def __call__(self, request: KvPoolTransferRequest) -> KvPoolTransferPlan:
         return self._transfer(request)
 
     def snapshot(self) -> dict[str, Any]:
         return {"runtime": self.runtime.snapshot(), "bindings": copy.deepcopy(self._bindings),
-                "events": copy.deepcopy(self.events), "counters": copy.deepcopy(self.counters)}
+                "events": copy.deepcopy(self.events), "counters": copy.deepcopy(self.counters),
+                "cost_phases": tuple(self._cost_phases),
+                "async_plan_states": copy.deepcopy(self._async_plan_states)}
 
     def restore(self, snapshot: Mapping[str, Any]) -> None:
         self.runtime.restore(snapshot["runtime"])
         self._bindings = copy.deepcopy(snapshot["bindings"])
         self.events = copy.deepcopy(snapshot["events"])
         self.counters = copy.deepcopy(snapshot["counters"])
+        self._cost_phases = list(snapshot.get("cost_phases", ()))
+        self._async_plan_states = copy.deepcopy(snapshot.get("async_plan_states", {}))
+        # An absent plan cannot inherit terminal authority from a discarded
+        # future. Active phase tokens explicitly contained in the snapshot
+        # remain valid, including when the same snapshot is restored again.
+        self._async_restore_epoch += 1
 
     def stats(self) -> Mapping[str, Any]:
         return {**self.counters, "events": len(self.events)}

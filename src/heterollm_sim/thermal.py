@@ -43,7 +43,10 @@ def advance_nand_thermal(state, config, start_ns: float, work_ns: float):
     if temperature >= config.throttle_threshold_c:
         throttled = True
     initial = temperature
-    peak = max(temperature, previous["temperature_c"])
+    # This event describes the current array-operation window. A previous
+    # hot operation can have cooled during the unobserved idle gap; its peak
+    # remains in that earlier event, not in this operation's temperature range.
+    peak = temperature
     remaining, elapsed, throttle_ns, switches = float(work_ns), 0., 0., 0
     while remaining > 1e-12:
         rate = config.throttled_service_rate if throttled else 1.

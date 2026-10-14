@@ -7,6 +7,7 @@ from typing import Mapping, Optional
 
 from .contracts import TaskCategory
 from .event_kernel import KernelEvent
+from .engine import _resource_release_points
 from .scalable_serving import (
     ScheduleCostResult, TaskExecutionRecord, _better_path, _coverage_component,
     _extend_path, compact_execution_metadata,
@@ -46,10 +47,12 @@ class LiveCohortMetrics:
             if dependency_id in self._end_paths:
                 start_path = _better_path(self._end_paths[dependency_id], start_path)
         for demand in event.demands:
-            lane = int(event.resource_lanes.get(demand.resource_id, 0))
             info = event.resource_predecessors.get(demand.resource_id)
             if info is None:
                 continue
+            if info.get("end_ns", event.start_ns) > event.start_ns:
+                continue  # Internal Core wait is already in this task's span.
+            lane = int(info.get("lane", event.resource_lanes.get(demand.resource_id, 0)))
             resource_id = str(info.get("resource_id", demand.resource_id))
             previous = self._resource_paths.get((resource_id, lane))
             # Other cohorts can interleave on the same lane. An older task
@@ -59,12 +62,12 @@ class LiveCohortMetrics:
         duration = event.end_ns - event.start_ns
         self._end_paths[task.task_id] = _extend_path(
             start_path, duration, task.category, task.task_id)
-        for demand in event.demands:
-            lane = int(event.resource_lanes.get(demand.resource_id, 0))
-            interval_end = event.start_ns + demand.service_ns
+        for resource_id, lane, interval_end in _resource_release_points(
+                task, event.demands, event.start_ns, event.resource_lanes):
             path = _extend_path(start_path, interval_end - event.start_ns,
-                                task.category, "{}@{}".format(task.task_id, demand.resource_id))
-            self._resource_paths[(demand.resource_id, lane)] = (task.task_id, path)
+                                task.category, "{}@{}".format(task.task_id, resource_id))
+            self._resource_paths[(resource_id, lane)] = (task.task_id, path)
+        for demand in event.demands:
             # Physical demands already contain core interval busy time. The
             # event kernel sums this field exactly once, also for zero work.
             self._resource_busy[demand.resource_id] = (

@@ -133,6 +133,7 @@ def execute_compiled(core, request):
     for index in np.flatnonzero(touched):
         rid = ids[index]
         timeline.lane_available.setdefault(rid, [0.0])[0] = float(calendar[index])
+        timeline.lane_directions.pop(rid, None)
         timeline.ready_ns[rid] = float(calendar[index])
         timeline.busy_ns[rid] = float(busy[index])
         timeline.last_intervals[rid] = (float(last_start[index]), float(last_end[index]))
@@ -322,6 +323,7 @@ def execute_compiled_many(core, requests):
     for index in np.flatnonzero(all_touched):
         rid = ids[index]
         timeline.lane_available.setdefault(rid, [0.0])[0] = float(calendar[index])
+        timeline.lane_directions.pop(rid, None)
         timeline.ready_ns[rid] = float(calendar[index])
         timeline.busy_ns[rid] = float(busy[index])
         timeline.last_intervals[rid] = (float(last_start[index]), float(last_end[index]))

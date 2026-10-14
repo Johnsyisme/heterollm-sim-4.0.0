@@ -474,12 +474,40 @@ def _online_token_times(result: OnlineScenarioResult) -> Dict[str, List[float]]:
     return token_times
 
 
+def _paged_kv_cost_ledger(result: OnlineScenarioResult) -> Mapping[str, Any]:
+    """Already executed paged I/O, which does not emit serving batches."""
+    metrics = getattr(result.serving, "runtime_kernel_metrics", {})
+    transfers = metrics.get("paged_kv_transfers", {}) if isinstance(metrics, Mapping) else {}
+    ledger = transfers.get("cost_ledger", {}) if isinstance(transfers, Mapping) else {}
+    return ledger if isinstance(ledger, Mapping) else {}
+
+
+def _online_cost_metadata(result: OnlineScenarioResult) -> Iterable[Mapping[str, Any]]:
+    for batch in result.serving.batches:
+        yield batch.cost.metadata
+    ledger = _paged_kv_cost_ledger(result)
+    if ledger:
+        yield ledger
+
+
+def _online_total_energy_pj(result: OnlineScenarioResult) -> float:
+    return (sum(batch.cost.energy_pj for batch in result.serving.batches)
+            + float(_paged_kv_cost_ledger(result).get("energy_pj", 0.0)))
+
+
+def _combined_metric_status(statuses: Iterable[str]) -> str:
+    values = set(statuses)
+    if values == {"recorded"}:
+        return "recorded"
+    return "partial" if values & {"recorded", "partial"} else "not_recorded"
+
+
 def _sum_batch_metadata(
     result: OnlineScenarioResult, key: str
 ) -> Dict[str, float]:
     totals: Dict[str, float] = {}
-    for batch in result.serving.batches:
-        raw = batch.cost.metadata.get(key, {})
+    for metadata in _online_cost_metadata(result):
+        raw = metadata.get(key, {})
         if not isinstance(raw, Mapping):
             continue
         for name, value in raw.items():
@@ -566,6 +594,7 @@ def _sum_batch_storage_traffic(
     peaks = {key: 0 for key in ("host_outstanding_at_admission_peak",
              "host_read_outstanding_at_admission_peak", "host_write_outstanding_at_admission_peak")}
     peak_observed = {key: 0 for key in peaks}
+    source_statuses = {key: [] for key in (*optional, *peaks)}
     physical_batches = 0
     organization_batches = 0
     operations: Dict[str, int] = {}
@@ -575,11 +604,17 @@ def _sum_batch_storage_traffic(
     organizations: List[Any] = []
     page_observations = []
     complete_page_batches = 0
-    for batch in result.serving.batches:
-        ledger = batch.cost.metadata.get("storage_traffic", {})
+    for metadata in _online_cost_metadata(result):
+        ledger = metadata.get("storage_traffic", {})
         if not isinstance(ledger, Mapping) or not ledger.get("task_count"):
             continue
         physical_batches += 1
+        for key, statuses in source_statuses.items():
+            value = ledger.get(key)
+            numeric_value = isinstance(value, (int, float)) and not isinstance(value, bool)
+            status = ledger.get("metric_availability", {}).get(key, {}).get(
+                "status", "recorded" if numeric_value else "not_recorded")
+            statuses.append("not_recorded" if status == "recorded" and not numeric_value else status)
         if ledger.get("nand_observations") is not None:
             page_observations.append(ledger["nand_observations"])
             complete_page_batches += int(all(
@@ -612,6 +647,8 @@ def _sum_batch_storage_traffic(
                 "energy_pj": 0.0,
             })
             row["bytes_moved"] += int(raw.get("bytes_moved", 0) or 0)
+            if row["owner"] != raw.get("owner", "unknown"):
+                row["owner"] = str(resource_id)
             row["service_ns"] += float(raw.get("service_ns", 0.0) or 0.0)
             row["energy_pj"] += float(raw.get("energy_pj", 0.0) or 0.0)
         for value in ledger.get("profile_evidence", ()) or ():
@@ -635,12 +672,16 @@ def _sum_batch_storage_traffic(
         "schema_version": "heterollm.nand-traffic/v1",
         **{key: (int(value) if key not in {"service_ns", "energy_pj", "queue_wait_ns", "host_queue_wait_ns", "media_queue_wait_ns"} else value)
            for key, value in numeric.items()},
-        **{key: value if observed[key] == physical_batches else None for key, value in optional.items()},
-        **{key: value if peak_observed[key] == physical_batches else None for key, value in peaks.items()},
+        **{key: value if observed[key] == physical_batches and _combined_metric_status(source_statuses[key]) == "recorded"
+           else None for key, value in optional.items()},
+        **{key: value if peak_observed[key] == physical_batches and _combined_metric_status(source_statuses[key]) == "recorded"
+           else None for key, value in peaks.items()},
         "page_access_payload_utilization": (
             optional["page_access_payload_bytes"] / optional["page_access_capacity_bytes"]
             if observed["page_access_payload_bytes"] == physical_batches
             and observed["page_access_capacity_bytes"] == physical_batches
+            and _combined_metric_status(source_statuses["page_access_payload_bytes"]) == "recorded"
+            and _combined_metric_status(source_statuses["page_access_capacity_bytes"]) == "recorded"
             and optional["page_access_capacity_bytes"] else None),
         "nand_observations": observed_pages,
         "nand_read_queue_depth": observed_pages["read_queue_depth"] if observed_pages else None,
@@ -651,7 +692,8 @@ def _sum_batch_storage_traffic(
             "nand_read_queue_depth": {"status": "recorded" if complete_page_batches==physical_batches else "partial" if page_observations else "not_recorded", "reason": "page-level observation is opt-in; host requests are separate"},
             "nand_program_queue_depth": {"status": "recorded" if complete_page_batches==physical_batches else "partial" if page_observations else "not_recorded", "reason": "page-level observation is opt-in; host writes are separate"},
             **{key: {
-                "status": ("recorded" if count == physical_batches else "partial" if count else "not_recorded"),
+                "status": (_combined_metric_status(source_statuses[key]) if key in source_statuses
+                           else "recorded" if count == physical_batches else "partial" if count else "not_recorded"),
                 "recorded_batch_count": count, "physical_batch_count": physical_batches,
             }
             for key, count in {**observed, **peak_observed, "organization_profiles": organization_batches}.items()},
@@ -681,12 +723,13 @@ def _sum_batch_dram_traffic(result: OnlineScenarioResult) -> Dict[str, Any]:
     }
     optional = {"read_write_switches": 0, "refresh_wait_ns": 0.0, "turnaround_wait_ns": 0.0}
     observed = {key: 0 for key in optional}
+    source_statuses = {key: [] for key in optional}
     physical_batches = 0
     profile_batches = 0
     resources: Dict[str, Dict[str, Any]] = {}
     profiles: List[Any] = []
-    for batch in result.serving.batches:
-        ledger = batch.cost.metadata.get("dram_traffic", {})
+    for metadata in _online_cost_metadata(result):
+        ledger = metadata.get("dram_traffic", {})
         if not isinstance(ledger, Mapping) or not ledger.get("task_count"):
             continue
         physical_batches += 1
@@ -696,6 +739,10 @@ def _sum_batch_dram_traffic(result: OnlineScenarioResult) -> Dict[str, Any]:
                 numeric[key] += value
         for key in optional:
             value = ledger.get(key)
+            numeric_value = isinstance(value, (int, float)) and not isinstance(value, bool)
+            status = ledger.get("metric_availability", {}).get(key, {}).get(
+                "status", "recorded" if numeric_value else "not_recorded")
+            source_statuses[key].append("not_recorded" if status == "recorded" and not numeric_value else status)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 optional[key] += value
                 observed[key] += 1
@@ -706,6 +753,8 @@ def _sum_batch_dram_traffic(result: OnlineScenarioResult) -> Dict[str, Any]:
                                                             "bytes_moved": 0, "service_ns": 0.0,
                                                             "energy_pj": 0.0})
             row["bytes_moved"] += int(raw.get("bytes_moved", 0) or 0)
+            if row["owner"] != raw.get("owner", "unknown"):
+                row["owner"] = str(resource_id)
             row["service_ns"] += float(raw.get("service_ns", 0.0) or 0.0)
             row["energy_pj"] += float(raw.get("energy_pj", 0.0) or 0.0)
         batch_profiles = ledger.get("organization_profiles", ()) or ()
@@ -718,11 +767,13 @@ def _sum_batch_dram_traffic(result: OnlineScenarioResult) -> Dict[str, Any]:
         "schema_version": "heterollm.dram-traffic/v1",
         **{key: (int(value) if key not in {"queue_wait_ns", "service_ns"} else value)
            for key, value in numeric.items()},
-        **{key: value if physical_batches and observed[key] == physical_batches else None
+        **{key: value if physical_batches and observed[key] == physical_batches
+           and _combined_metric_status(source_statuses[key]) == "recorded" else None
            for key, value in optional.items()},
         "metric_availability": {
             key: {
-                "status": ("recorded" if physical_batches and count == physical_batches
+                "status": (_combined_metric_status(source_statuses[key]) if key in source_statuses
+                           else "recorded" if physical_batches and count == physical_batches
                            else "partial" if count else "not_recorded"),
                 "recorded_batch_count": count,
                 "physical_batch_count": physical_batches,
@@ -2271,7 +2322,7 @@ def replay_online_batch_trace(
     result: OnlineScenarioResult,
     batch_id: str,
 ) -> Dict[str, Any]:
-    """Materialize all exact planner events for one realized online batch."""
+    """Re-simulate one batch in an isolated context for explanatory events."""
 
     if not isinstance(result, OnlineScenarioResult):
         raise TypeError("result 必须是在线连续批处理结果")
@@ -2353,7 +2404,8 @@ def replay_online_batch_trace(
             )
         )
     limitations = [
-        "这是代表性批次 lowering 后任务图的精确回放；不会重新执行调度准入，也不会改变聚合运行指标。",
+        "这是单独重新仿真的代表性批次任务图；不会重新执行调度准入，也不会改变原运行指标。",
+        "回放使用新的物理运行状态，未恢复原批次之前的 DRAM 行状态、缓存、NAND 暂存、温度和资源争用；事件时间不代表原运行的逐算子实录，即使批次总耗时相等。",
         "长短不齐的请求上下文继续沿用在线 lowerer 的加权平均批次语义。",
         "KV read 仅表示外部持久化 KV Cache 读取；prefill/recompute 的历史 prompt 注意力仍保留在 causal pairs、算力及普通 attention/activation 流量中。",
         "内存区间是组件本地的确定性逻辑字节区间，不是 JEDEC 物理地址。",
@@ -2376,6 +2428,7 @@ def replay_online_batch_trace(
         "schema_version": VISUALIZATION_SCHEMA_VERSION,
         "granularity": "task",
         "trace_source": "exact_cohort_replay",
+        "physical_state_scope": "isolated_fresh_context",
         "fidelity": TraceFidelity.REPRESENTATIVE.value,
         "scope": {
             "batch_id": batch.cohort_id,
@@ -3275,6 +3328,18 @@ def _static_activity_samples(
     return component_samples, link_samples, channels
 
 
+def _online_activity_windows(result: OnlineScenarioResult):
+    """Yield executed batch and paged-I/O envelopes for aggregate activity."""
+    for batch in result.serving.batches:
+        yield batch.start_ns, batch.end_ns, batch.cost.metadata
+    for phase in _paged_kv_cost_ledger(result).get("phases", ()):
+        yield float(phase["arrival_ns"]), float(phase["completion_ns"]), {
+            "resource_busy_ns": phase.get("resource_busy_ns", {}),
+            "resource_busy_by_direction_ns": phase.get("resource_busy_by_direction_ns", {}),
+            "activity_component_id": phase.get("component_id"),
+        }
+
+
 def _online_activity_samples(
     result: OnlineScenarioResult,
 ) -> Tuple[
@@ -3296,13 +3361,13 @@ def _online_activity_samples(
     channels: Dict[str, Dict[str, set]] = {
         component_id: {} for component_id in component_map
     }
-    for batch in result.serving.batches:
-        duration_ns = float(batch.end_ns - batch.start_ns)
+    for start_ns, end_ns, metadata in _online_activity_windows(result):
+        duration_ns = float(end_ns - start_ns)
         if duration_ns <= 0.0:
             continue
-        raw_busy = batch.cost.metadata.get("resource_busy_ns", {})
+        raw_busy = metadata.get("resource_busy_ns", {})
         resource_busy = raw_busy if isinstance(raw_busy, Mapping) else {}
-        raw_directional = batch.cost.metadata.get(
+        raw_directional = metadata.get(
             "resource_busy_by_direction_ns", {}
         )
         directional = (
@@ -3328,10 +3393,10 @@ def _online_activity_samples(
             link_id = _resource_link_id(scenario, resource_id)
             if link_id is not None:
                 link_samples.setdefault(link_id, []).append(
-                    (batch.start_ns, batch.end_ns, value)
+                    (start_ns, end_ns, value)
                 )
                 continue
-            component_id = _resource_component_id(
+            component_id = metadata.get("activity_component_id") or _resource_component_id(
                 scenario, resource_id, {}, rank_owners
             )
             if component_id is None:
@@ -3341,8 +3406,8 @@ def _online_activity_samples(
                 component_samples,
                 component_id,
                 "busy_fraction",
-                batch.start_ns,
-                batch.end_ns,
+                start_ns,
+                end_ns,
                 value,
             )
             kind = component_map[component_id].normalized_kind
@@ -3367,8 +3432,8 @@ def _online_activity_samples(
                         component_samples,
                         component_id,
                         "memory_{}_bandwidth_utilization".format(direction),
-                        batch.start_ns,
-                        batch.end_ns,
+                        start_ns,
+                        end_ns,
                         direction_busy / duration_ns,
                     )
             elif kind in OFFLOAD_STORAGE_COMPONENT_KINDS:
@@ -3378,8 +3443,8 @@ def _online_activity_samples(
                         component_samples,
                         component_id,
                         "dma_engine_utilization",
-                        batch.start_ns,
-                        batch.end_ns,
+                        start_ns,
+                        end_ns,
                         value,
                     )
                 else:
@@ -3415,16 +3480,16 @@ def _online_activity_samples(
                             "storage_{}_bandwidth_utilization".format(
                                 direction
                             ),
-                            batch.start_ns,
-                            batch.end_ns,
+                            start_ns,
+                            end_ns,
                             direction_busy / duration_ns,
                         )
                 _append_sample(
                     component_samples,
                     component_id,
                     "storage_io_utilization",
-                    batch.start_ns,
-                    batch.end_ns,
+                    start_ns,
+                    end_ns,
                     value,
                 )
             elif kind in {"fabric", "switch", "bridge", "interconnect"}:
@@ -3432,12 +3497,12 @@ def _online_activity_samples(
                     component_samples,
                     component_id,
                     "fabric_bandwidth_utilization",
-                    batch.start_ns,
-                    batch.end_ns,
+                    start_ns,
+                    end_ns,
                     value,
                 )
 
-        coverage_raw = batch.cost.metadata.get("coverage", {})
+        coverage_raw = metadata.get("coverage", {})
         coverage = coverage_raw if isinstance(coverage_raw, Mapping) else {}
         operations = sum(
             _finite_non_negative(row.get("operations"))
@@ -3457,8 +3522,8 @@ def _online_activity_samples(
                 component_samples,
                 component_id,
                 "modeled_compute_utilization",
-                batch.start_ns,
-                batch.end_ns,
+                start_ns,
+                end_ns,
                 utilization,
             )
     return component_samples, link_samples, channels
@@ -3853,7 +3918,7 @@ def _component_timeseries(result: RunResult) -> Dict[str, Any]:
                             else (
                                 "区间来自静态离散事件仿真的精确链路变点。"
                                 if not online
-                                else "区间表示批次包络内的链路聚合忙时。"
+                                else "区间表示批次或分页 KV 传输阶段包络内的链路聚合忙时。"
                             )
                         ),
                     )
@@ -3871,7 +3936,7 @@ def _component_timeseries(result: RunResult) -> Dict[str, Any]:
             else (
                 "静态活动曲线使用离散事件仿真的精确资源变点；驻留估算会在各曲线上单独标注。"
                 if not online
-                else "连续批处理曲线是批次包络聚合或代表性峰值，不能还原为逐算子时间线。"
+                else "连续批处理曲线是批次及分页 KV 传输阶段的包络聚合或代表性峰值，不能还原为逐算子时间线。"
             )
         ),
         "point_limit": DEFAULT_COMPONENT_TIMESERIES_POINT_LIMIT,
@@ -5165,7 +5230,7 @@ def _online_simulated_subtargets(
         else None
     )
     makespan_ns = _online_elapsed_makespan_ns(serving)
-    total_energy_pj = sum(batch.cost.energy_pj for batch in serving.batches)
+    total_energy_pj = _online_total_energy_pj(result)
     modeled_power_mean_w = (
         total_energy_pj / makespan_ns * 1.0e-3
         if makespan_ns > 0.0
@@ -5670,10 +5735,10 @@ def _online_report_core(
         if utilization
         else None
     )
-    total_energy = sum(batch.cost.energy_pj for batch in serving.batches)
+    total_energy = _online_total_energy_pj(result)
     total_bytes = sum(
-        _non_negative_int(batch.cost.metadata.get("resource_accounted_bytes"))
-        for batch in serving.batches
+        _non_negative_int(metadata.get("resource_accounted_bytes"))
+        for metadata in _online_cost_metadata(result)
     )
     storage_traffic = _sum_batch_storage_traffic(result)
     dram_traffic = _sum_batch_dram_traffic(result)
@@ -5712,6 +5777,7 @@ def _online_report_core(
         ),
         "total_energy_pj": total_energy,
         "resource_accounted_bytes": total_bytes,
+        "paged_kv_transfer_cost": to_primitive(_paged_kv_cost_ledger(result)),
         "storage_traffic": storage_traffic,
         "dram_traffic": dram_traffic,
         "throughput": {

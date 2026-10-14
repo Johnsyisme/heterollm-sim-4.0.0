@@ -1848,7 +1848,7 @@ def _derive_requirements(
             expert_matrices = [
                 _Matrix(
                     h,
-                    2 * layer.intermediate_size,
+                    (2 if layer.gated_mlp else 1) * layer.intermediate_size,
                     layer.num_experts,
                     layer.experts_per_token,
                 ),
@@ -1887,7 +1887,7 @@ def _derive_requirements(
                         "shared_expert",
                         "{}.shared_expert".format(layer.layer_id),
                         "{}.shared_expert_weights".format(layer.layer_id),
-                        [_Matrix(h, 2 * shared), _Matrix(shared, h)],
+                        [_Matrix(h, (2 if layer.gated_mlp else 1) * shared), _Matrix(shared, h)],
                         True,
                     )
                 )
@@ -1912,8 +1912,8 @@ def _derive_requirements(
                     [
                         _projection_matrix(
                             layer,
-                            "mlp.up_gate",
-                            _Matrix(h, 2 * layer.intermediate_size),
+                            "mlp.up_gate" if layer.gated_mlp else "mlp.up",
+                            _Matrix(h, (2 if layer.gated_mlp else 1) * layer.intermediate_size),
                         ),
                         _projection_matrix(
                             layer,
@@ -2267,23 +2267,25 @@ def _derive_requirements(
                 elements_per_token=layer.num_experts,
                 output_elements_per_token=layer.experts_per_token,
             )
-            add_primitive(
-                "experts.activation",
-                "expert_activation",
-                OperatorClass.ELEMENTWISE,
-                elements_per_token=2 * layer.intermediate_size,
-                operations_per_element=8,
-            )
-            if layer.has_shared_expert:
+            if layer.gated_mlp:
                 add_primitive(
-                    "shared_expert.activation",
-                    "shared_expert_activation",
+                    "experts.activation",
+                    "expert_activation",
                     OperatorClass.ELEMENTWISE,
-                    elements_per_token=(
-                        2 * layer.shared_expert_intermediate_size
-                    ),
+                    elements_per_token=2 * layer.intermediate_size,
                     operations_per_element=8,
                 )
+            if layer.has_shared_expert:
+                if layer.gated_mlp:
+                    add_primitive(
+                        "shared_expert.activation",
+                        "shared_expert_activation",
+                        OperatorClass.ELEMENTWISE,
+                        elements_per_token=(
+                            2 * layer.shared_expert_intermediate_size
+                        ),
+                        operations_per_element=8,
+                    )
                 if layer.shared_expert_gate:
                     add_primitive(
                         "shared_expert.gate_apply",
@@ -2301,13 +2303,14 @@ def _derive_requirements(
                 input_count=3 if layer.has_shared_expert else 2,
             )
         else:
-            add_primitive(
-                "mlp.activation",
-                "mlp_activation",
-                OperatorClass.ELEMENTWISE,
-                elements_per_token=2 * layer.intermediate_size,
-                operations_per_element=8,
-            )
+            if layer.gated_mlp:
+                add_primitive(
+                    "mlp.activation",
+                    "mlp_activation",
+                    OperatorClass.ELEMENTWISE,
+                    elements_per_token=2 * layer.intermediate_size,
+                    operations_per_element=8,
+                )
             add_primitive(
                 "mlp.residual",
                 "residual",
@@ -4283,7 +4286,7 @@ def _derive_fusion_opportunities(
             )
             residual_key = "{}.attention.residual".format(layer.layer_id)
 
-        if layer.is_moe:
+        if layer.is_moe and layer.gated_mlp:
             activation_elements = max(
                 1, tokens * _ceil_div(2 * layer.intermediate_size, tp_degree)
             )
@@ -4318,7 +4321,7 @@ def _derive_fusion_opportunities(
                     _storage_bytes(shared_elements, bits),
                     1,
                 )
-        else:
+        elif not layer.is_moe and layer.gated_mlp:
             activation_elements = max(
                 1, tokens * _ceil_div(2 * layer.intermediate_size, tp_degree)
             )

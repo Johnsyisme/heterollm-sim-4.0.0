@@ -112,7 +112,7 @@ def _reserve(rid, earliest, duration, byte_count, direction, rtw, wtr,
              calendar, busy, moved, directions, last_start, last_end, touched):
     previous_end = calendar[rid]
     if direction and directions[rid] and directions[rid] != direction:
-        previous_end += rtw if directions[rid] == 1 else wtr
+        previous_end += wtr if direction == 1 else rtw
     start = max(earliest, previous_end)
     end = start + duration
     calendar[rid] = end

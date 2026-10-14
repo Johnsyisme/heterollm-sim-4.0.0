@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from itertools import product
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -108,15 +107,18 @@ class ParallelPlan:
 def shard_extent(
     global_size: int, degree: int, rank: int, *, allow_padding: bool = True
 ) -> ShardExtent:
-    if global_size <= 0:
-        raise ValueError("global_size must be positive")
-    if degree <= 0 or not 0 <= rank < degree:
+    if type(global_size) is not int or global_size <= 0:
+        raise ValueError("global_size must be a positive integer")
+    if (type(degree) is not int or type(rank) is not int
+            or degree <= 0 or not 0 <= rank < degree):
         raise ValueError("invalid shard degree or rank")
+    if not isinstance(allow_padding, bool):
+        raise ValueError("allow_padding must be boolean")
     if global_size % degree and not allow_padding:
         raise ValueError(
             "dimension {} is not divisible by degree {}".format(global_size, degree)
         )
-    local = int(math.ceil(global_size / float(degree)))
+    local = (global_size + degree - 1) // degree
     padded = local * degree
     return ShardExtent(global_size, degree, rank, padded, local, padded - global_size)
 
@@ -180,17 +182,19 @@ def _layer_stage_cost(layer: LayerSpec) -> int:
         mixer += geometry.recurrent_state_elements
     else:
         head_dim = layer.effective_attention_head_dim
-        qkv_width = hidden + 2 * layer.effective_kv_heads * head_dim
-        mixer = hidden * qkv_width + hidden * hidden
+        query_width = layer.attention_heads * head_dim
+        qkv_width = query_width + 2 * layer.effective_kv_heads * head_dim
+        mixer = hidden * qkv_width + query_width * hidden
+    ffn_projections = 3 if layer.gated_mlp else 2
     if layer.is_moe:
-        ffn = hidden * layer.num_experts * (3 * layer.intermediate_size)
+        ffn = hidden * layer.num_experts * (ffn_projections * layer.intermediate_size)
         ffn += hidden * layer.num_experts
         if layer.has_shared_expert:
-            ffn += hidden * (3 * layer.shared_expert_intermediate_size)
+            ffn += hidden * (ffn_projections * layer.shared_expert_intermediate_size)
             if layer.shared_expert_gate:
                 ffn += hidden
     else:
-        ffn = hidden * (3 * layer.intermediate_size)
+        ffn = hidden * (ffn_projections * layer.intermediate_size)
     return max(1, mixer + ffn)
 
 

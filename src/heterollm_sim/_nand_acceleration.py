@@ -47,6 +47,14 @@ def execute_full_pages(core, request, first_page, page_count):
         host_total += host_bytes
     if any(not rid or len(timeline.lane_available.get(rid, [0.0])) != 1 for rid in resources):
         return None
+    virtual_arrays = {array for array, resource, _channel, _count in pages if array != resource}
+    if any(rid not in timeline.lane_available for rid in virtual_arrays & resources):
+        # A virtual array clock can alias a real wire. ResourceTimeline creates
+        # that wire's first lane lazily from its ready clock, which an earlier
+        # page in this request may change. The affine program assumes existing
+        # lanes, so use exact ordinary transitions until those lanes exist.
+        # Default array/channel/host IDs are disjoint and retain acceleration.
+        return None
 
     # Keys keep virtual array ready times separate from actual slot calendars.
     # Resource aliases share the same lane/ready keys throughout the program.
@@ -128,7 +136,7 @@ def execute_full_pages(core, request, first_page, page_count):
                 host = reserve(core._host_id(), (base_ticks, 0), host_ns, "write")
                 dependency = maximum(host, affine["buffer", array])
                 internal = reserve(channel, dependency, ticks(internal_ns), "write")
-                program = reserve(resource, internal, ticks(program_ns))
+                program = reserve(resource, maximum(internal, affine["array", array]), ticks(program_ns))
                 affine["array", array] = affine["buffer", array] = program
                 affine["ready", array] = program
                 affine["completion", ""] = maximum(affine["completion", ""], program)

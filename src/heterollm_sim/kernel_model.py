@@ -796,7 +796,10 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
     def add(resource, ns, byte_count=0, work=0):
         old = resources.get(resource, ResourceDemand(resource, 0))
         resources[resource] = ResourceDemand(resource, old.service_ns + ns, bytes_moved=old.bytes_moved + byte_count, work_units=old.work_units + work)
-    add(dot_resource, dot_ns, work=operations)
+    # The tensor service above executes padded MMA tiles. Charge the same
+    # issued arithmetic in its work/energy ledger; logical FLOPs stay in the
+    # CostEstimate. Source MMQ work already supplies its executed extent.
+    add(dot_resource, dot_ns, work=issued if kernel.compute_primitive == 'tensor' else operations)
     add(gpu.scalar_resource_id, unpack_ns + scale_ns + reduce_ns + (0 if attention else workload.source_partial_service_ns), work=unpack + scalar_ops + reduce_ops)
     add(gpu.special_function_resource_id, sfu_ns, work=sfu_ops)
     add(hbm.resource_id, memory_ns, read + write)
@@ -880,6 +883,13 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
                  if measured_bw is not None else 'analytical_logical_resource_demand'
              ),
              'kernel_count': 1, 'read_bytes': read, 'write_bytes': write,
+             'logical_dot_operations': workload.tensor_operations if attention else workload.operations,
+             'issued_dot_operations': issued if kernel.compute_primitive == 'tensor' else operations,
+             'physical_memory_envelope': {
+                 'resource_suffix': '.device_stream',
+                 'dependency_ns': dependency_ns * factor,
+                 'policy': 'replace_backing_estimate_keep_compute_resources',
+             },
              **({'mmvf_source_work': vector.audit()} if vector is not None else {}),
              **({'scratch_traffic': scratch_traffic} if scratch_traffic else {}),
              'cache_protocol': kernel.cache_protocol,
@@ -933,6 +943,10 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
                      'stream_k': stream_k, 'scratch_traffic': scratch_traffic,
                      'achieved_bandwidth_gb_s': fix_bw,
                      'traffic_model': 'source_uniform_unique_logical_bytes',
+                     'physical_memory_envelope': {
+                         'resource_suffix': '.device_stream', 'dependency_ns': 0.0,
+                         'policy': 'replace_backing_estimate_keep_compute_resources',
+                     },
                      'pipeline_ns': {'dependency': 0}}
         if launch or gpu.launch_energy_pj:
             phases.append(CostPhase('kernel_launch', TaskCategory.COMPUTE,

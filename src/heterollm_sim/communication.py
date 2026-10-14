@@ -117,6 +117,8 @@ class RouteHop:
         _non_negative_integer(byte_count, "byte_count")
         if self.bandwidth_gbps <= 0:
             raise ValueError("route hop bandwidth must be positive")
+        if byte_count == 0:
+            return 0.0
         # Gbit/s is numerically bit/ns.
         return self.latency_ns + (8.0 * byte_count) / self.bandwidth_gbps
 
@@ -1072,7 +1074,7 @@ def _ring_rounds(
     routing_policy: str,
 ) -> Tuple[CollectiveRound, ...]:
     count = len(participants)
-    chunk = int(math.ceil(tensor_bytes / float(count)))
+    chunk = (tensor_bytes + count - 1) // count
     round_count = {
         "all_reduce": 2 * (count - 1),
         "all_gather": count - 1,
@@ -1120,7 +1122,7 @@ def _tree_rounds(
     gather_needed = kind in {"all_reduce", "all_gather", "all_to_all"}
     rounds: List[CollectiveRound] = []
     round_index = 0
-    chunk = int(math.ceil(tensor_bytes / float(count)))
+    chunk = (tensor_bytes + count - 1) // count
     padded_tensor_bytes = chunk * count
     if reduce_needed:
         # Leaves must reduce into their parent before that parent forwards the

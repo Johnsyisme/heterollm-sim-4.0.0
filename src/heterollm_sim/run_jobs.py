@@ -248,7 +248,10 @@ class RunJobManager:
                 raise RuntimeError("RunJobManager 已关闭")
             self._ensure_submission_capacity_locked()
         from .llama_scenario import prepare_llama_scenario
-        scenario = prepare_llama_scenario(scenario)
+        # Frozen scenario dataclasses still contain mutable metadata and
+        # profile registries. Own those inputs before normalization/estimation
+        # so caller edits cannot reprice a queued run or its later trace replay.
+        scenario = prepare_llama_scenario(copy.deepcopy(scenario))
         estimate = estimate_scenario(scenario)
         if selected_policy is None:
             selected_policy = RetentionPolicy(

@@ -240,7 +240,9 @@ class AsyncKVPrefetchTests(unittest.TestCase):
             demands=(ResourceDemand(first_hop.resource_id, 123.),)),))
         runner._advance_prefetches_before_kernel_step(kernel)
         event = kernel.step()
-        self.assertGreaterEqual(event.start_ns, source_end + first_hop.transfer_ns(PAGE))
+        wire_busy = next(d.service_ns for d in first_hop.demands(PAGE)
+                         if d.resource_id == first_hop.resource_id)
+        self.assertGreaterEqual(event.start_ns, source_end + wire_busy)
         finish_prefetch(runner)
 
 

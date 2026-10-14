@@ -26,7 +26,7 @@ from .contracts import (
     TaskSpec,
     TraceMarker,
 )
-from .engine import _merge_engine_metadata, _task_resource_intervals
+from .engine import _merge_engine_metadata, _task_resource_intervals, _resource_release_points
 from .event_kernel import UnifiedEventKernel
 from .execution_control import ExecutionControl
 from .metrics import MetricsSummary, NS_PER_SECOND, RequestMetrics
@@ -380,6 +380,8 @@ class _CriticalPathAccumulator:
                 candidates.append(state)
 
         for resource_id, info in resource_predecessors.items():
+            if isinstance(info, Mapping) and info.get("end_ns", start_ns) > start_ns:
+                continue  # Internal Core wait is already in this task's span.
             lane = int(info.get("lane", 0)) if isinstance(info, Mapping) else 0
             predecessor_resource = info.get("resource_id", resource_id) if isinstance(info, Mapping) else resource_id
             state = self._resource_states.get((str(predecessor_resource), lane))
@@ -398,14 +400,13 @@ class _CriticalPathAccumulator:
             end_ns,
         )
         self._task_states[task.task_id] = end_state
-        for demand in demands:
-            interval_end_ns = start_ns + demand.service_ns
-            lane = int(resource_lanes.get(demand.resource_id, 0)) if resource_lanes else 0
-            self._resource_states[(demand.resource_id, lane)] = _extend_path(
+        for resource_id, lane, interval_end_ns in _resource_release_points(
+                task, demands, start_ns, resource_lanes or {}):
+            self._resource_states[(resource_id, lane)] = _extend_path(
                 start,
                 interval_end_ns - start_ns,
                 task.category,
-                "{}@{}".format(task.task_id, demand.resource_id),
+                "{}@{}".format(task.task_id, resource_id),
                 interval_end_ns,
             )
 
@@ -658,9 +659,10 @@ def _merge_storage_traffic(target: Dict[str, object], source: Mapping[str, objec
 
     if not source.get("task_count"):
         return
+    first = not target
     if not target:
         target.update({
-            "schema_version": "heterollm.nand-traffic/v1",
+            "schema_version": "heterollm.nand-traffic/v2",
             "task_count": 0,
             "logical_bytes": 0,
             "host_transfer_bytes": 0,
@@ -686,12 +688,48 @@ def _merge_storage_traffic(target: Dict[str, object], source: Mapping[str, objec
         })
     for key in (
         "task_count", "logical_bytes", "host_transfer_bytes", "physical_bytes",
-        "physical_read_bytes", "physical_write_bytes", "pages_touched", "media_waves",
-        "read_operations", "program_operations", "erase_operations", "rmw_read_operations",
-        "queue_wait_ns", "host_queue_wait_ns", "media_queue_wait_ns",
+        "physical_read_bytes", "physical_write_bytes", "erase_operations", "queue_wait_ns",
         "service_ns", "energy_pj",
     ):
         target[key] = target.get(key, 0) + source.get(key, 0)
+    optional = ("logical_read_bytes", "logical_write_bytes", "internal_transfer_bytes",
+                "pages_read", "pages_programmed", "pages_touched", "media_waves",
+                "read_operations", "program_operations", "rmw_read_operations",
+                "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
+                "host_queue_wait_ns", "media_queue_wait_ns")
+    peaks = ("host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
+             "host_write_outstanding_at_admission_peak")
+    availability = target.setdefault("metric_availability", {})
+    def merge_status(key, status):
+        old = availability.get(key, {}).get("status")
+        availability[key] = {"status": status if old is None or old == status else "partial"}
+    for key in (*optional, *peaks):
+        value = source.get(key)
+        recorded = isinstance(value, (int, float)) and not isinstance(value, bool)
+        status = source.get("metric_availability", {}).get(key, {}).get(
+            "status", "recorded" if recorded else "not_recorded")
+        if status == "recorded" and not recorded:
+            status = "not_recorded"
+        merge_status(key, status)
+        previous = 0 if first else target.get(key)
+        target[key] = (max(previous, value) if key in peaks else previous + value) if (
+            recorded and status == "recorded" and previous is not None) else None
+    numerator, denominator = target["page_access_payload_bytes"], target["page_access_capacity_bytes"]
+    target["page_access_payload_utilization"] = (
+        numerator / denominator if numerator is not None and denominator else None)
+    from .nand_core import summarize_nand_observations
+    observations = source.get("nand_observations")
+    target["nand_observations"] = summarize_nand_observations(
+        (target.get("nand_observations"), observations))
+    for key, metric in (("nand_read_queue_depth", "read_queue_depth"),
+                        ("nand_program_queue_depth", "program_queue_depth")):
+        status = source.get("metric_availability", {}).get(key, {}).get(
+            "status", "recorded" if observations is not None else "not_recorded")
+        merge_status(key, status)
+        target[key] = target["nand_observations"][metric] if target["nand_observations"] else None
+    for key in ("queue_depth_scope", "page_utilization_scope"):
+        if key in source:
+            target[key] = source[key]
     operation_counts = target["operation_counts"]
     for key, value in (source.get("operation_counts", {}) or {}).items():
         operation_counts[str(key)] = operation_counts.get(str(key), 0) + int(value)
@@ -703,6 +741,8 @@ def _merge_storage_traffic(target: Dict[str, object], source: Mapping[str, objec
             "service_ns": 0.0,
             "energy_pj": 0.0,
         })
+        if row["owner"] != raw.get("owner", "unknown"):
+            row["owner"] = str(resource_id)
         row["bytes_moved"] += int(raw.get("bytes_moved", 0) or 0)
         row["service_ns"] += float(raw.get("service_ns", 0.0) or 0.0)
         row["energy_pj"] += float(raw.get("energy_pj", 0.0) or 0.0)
@@ -714,10 +754,8 @@ def _merge_storage_traffic(target: Dict[str, object], source: Mapping[str, objec
     target["owner_ids"] = sorted({str(row["owner"]) for row in resource_totals.values()})
     target["profile_evidence"] = sorted(target["profile_evidence"])
     target["accounting_semantics"] = (
-        "host_transfer_bytes is logical host payload; physical_* and pages/waves "
-        "are NAND media accounting; queue_wait_ns separates host/media queue waits; "
-        "service_ns/energy_pj are analytical"
-    )
+        "logical, host, internal and array traffic from physical transactions; "
+        "null means not fully recorded; resource costs are counted once per contributor")
 
 
 def _merge_dram_traffic(target: Dict[str, object], source: Mapping[str, object]) -> None:
@@ -727,19 +765,33 @@ def _merge_dram_traffic(target: Dict[str, object], source: Mapping[str, object])
     numeric = (
         "task_count", "logical_read_bytes", "logical_write_bytes", "physical_read_bytes",
         "physical_write_bytes", "physical_bytes", "burst_count", "row_hits", "row_misses",
-        "row_conflicts", "read_write_switches", "queue_wait_ns", "refresh_wait_ns",
-        "turnaround_wait_ns", "service_ns", "logical_bytes",
+        "row_conflicts", "queue_wait_ns", "service_ns", "logical_bytes",
     )
+    first = not target
     if not target:
-        target.update({"schema_version": "heterollm.dram-traffic/v1", **{key: 0 for key in numeric},
+        target.update({"schema_version": "heterollm.dram-traffic/v2", **{key: 0 for key in numeric},
                        "resource_totals": {}, "organization_profiles": []})
     for key in numeric:
         target[key] = target.get(key, 0) + source.get(key, 0)
+    availability = target.setdefault("metric_availability", {})
+    for key in ("read_write_switches", "refresh_wait_ns", "turnaround_wait_ns"):
+        value = source.get(key)
+        recorded = isinstance(value, (int, float)) and not isinstance(value, bool)
+        status = source.get("metric_availability", {}).get(key, {}).get(
+            "status", "recorded" if recorded else "not_recorded")
+        if status == "recorded" and not recorded:
+            status = "not_recorded"
+        old = availability.get(key, {}).get("status")
+        availability[key] = {"status": status if old is None or old == status else "partial"}
+        previous = 0 if first else target.get(key)
+        target[key] = previous + value if recorded and status == "recorded" and previous is not None else None
     rows = target["resource_totals"]
     for resource_id, raw in (source.get("resource_totals", {}) or {}).items():
         row = rows.setdefault(str(resource_id), {"owner": raw.get("owner", "unknown"),
                                                    "bytes_moved": 0, "service_ns": 0.0,
                                                    "energy_pj": 0.0})
+        if row["owner"] != raw.get("owner", "unknown"):
+            row["owner"] = str(resource_id)
         row["bytes_moved"] += int(raw.get("bytes_moved", 0) or 0)
         row["service_ns"] += float(raw.get("service_ns", 0.0) or 0.0)
         row["energy_pj"] += float(raw.get("energy_pj", 0.0) or 0.0)
@@ -787,26 +839,9 @@ class _ResultAccumulator:
 
     def register_chunk(self, chunk: RequestTaskChunk) -> None:
         self.critical.register_chunk(chunk)
-        # Endpoint services created by the planner carry a scalar physical
-        # execution *preview*.  The event kernel resolves that descriptor
-        # again at dispatch and stores the authoritative ``runtime_dispatch``
-        # result on the observed task.  Counting both paths doubles NAND/HBF/
-        # SSD traffic, service time, and energy.  Keep the legacy fallback for
-        # authored chunks that have no explicit role, but defer tagged
-        # construction previews until ``observe``.
-        storage_preview_tasks = tuple(
-            task
-            for task in chunk.tasks
-            if task.metadata.get("physical_execution_role")
-            != "construction_preview"
-        )
-        _merge_storage_traffic(
-            self.storage_traffic,
-            _summarize_nand_task_traffic(
-                storage_preview_tasks, resource_owners=self.resource_owners
-            ),
-        )
-        # Resolved media/DRAM state is only available after kernel.step().
+        # Media traffic is charged only by observe(), after execution. Authored
+        # chunks may include an untagged preview or a prior runtime result;
+        # neither is an additional executed access at registration time.
         grouped: Dict[
             Tuple[str, str, str, object, object], Dict[str, object]
         ] = {}

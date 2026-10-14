@@ -743,6 +743,15 @@ def _validate_task_time(task: TaskSpec) -> None:
         )
 
 
+def _validate_event_timing(task: TaskSpec, start_ns: float, demands) -> None:
+    if not math.isfinite(start_ns) or any(
+        not math.isfinite(start_ns + demand.service_ns) for demand in demands
+    ):
+        raise ValueError(
+            "task {} timing exceeds finite simulation range".format(task.task_id)
+        )
+
+
 def _validate_acyclic(tasks_by_id: Mapping[str, TaskSpec]) -> None:
     indegree = {
         task_id: len(task.dependencies) for task_id, task in tasks_by_id.items()
@@ -861,6 +870,9 @@ class UnifiedEventKernel:
         # mapping is intentionally assigned once and mutated in place so
         # compiled/serving paths retain the authority identity.
         self.physical_runtime.timeline.lane_available = self._resource_lane_available
+        # Keep the timeline copy deepcopy-compatible for paged-pool snapshots;
+        # the kernel's public MappingProxyType is immutable but not picklable.
+        self.physical_runtime.timeline.resource_aliases = dict(self.resource_owners)
 
         self._ready_by_group: Dict[ResourceGroup, List[StaticReadyKey]] = {}
         self._group_versions: Dict[ResourceGroup, int] = {}
@@ -2488,6 +2500,10 @@ class UnifiedEventKernel:
                             **task.metadata["l2_execution"],
                             "memory_completion_offset_ns": completion_span,
                         }})
+                # Validation belongs to the same transaction as the Core
+                # reservations and mutable L2 update. A rejected completion
+                # must not leave either device state or an absent ready item.
+                _validate_event_timing(task, start_ns, task.demands)
             except Exception:
                 if l2_snapshot is not None:
                     owner, previous = l2_snapshot
@@ -2516,28 +2532,35 @@ class UnifiedEventKernel:
                         self.resource_available[resource_id] = min(lanes)
         elif "stateful_l2" in task.metadata:
             try:
+                l2_owner = str(task.metadata["stateful_l2"]["owner"])
+                previous_l2_state = self._l2_states.get(l2_owner)
+                if previous_l2_state is not None:
+                    l2_transaction = previous_l2_state[1].begin_transaction()
                 task = resolve_l2_task(task, self._l2_states)
-            except (ValueError, TypeError, KeyError):
+                _validate_event_timing(task, start_ns, task.demands)
+            except Exception:
+                if l2_owner is not None:
+                    if previous_l2_state is None:
+                        self._l2_states.pop(l2_owner, None)
+                    else:
+                        self._l2_states[l2_owner] = previous_l2_state
+                        if l2_transaction is not None:
+                            previous_l2_state[1].rollback_transaction(l2_transaction)
                 # The task remains in its group queue; retain its global ready
                 # entry too, so validation failure cannot silently drop it.
                 heapq.heappush(self._ready_heap, queued)
                 raise
+            else:
+                if l2_transaction is not None:
+                    self._l2_states[l2_owner][1].commit_transaction(l2_transaction)
             demands = tuple(sorted(task.demands, key=lambda d: d.resource_id))
         else:
             demands = self._sorted_demands[task_id]
-        isfinite = math.isfinite
-        timing_is_finite = isfinite(start_ns)
-        if timing_is_finite:
-            for demand in demands:
-                if not isfinite(start_ns + demand.service_ns):
-                    timing_is_finite = False
-                    break
-        if not timing_is_finite:
-            raise ValueError(
-                "task {} timing exceeds finite simulation range".format(
-                    task_id
-                )
-            )
+            try:
+                _validate_event_timing(task, start_ns, demands)
+            except Exception:
+                heapq.heappush(self._ready_heap, queued)
+                raise
 
         group_ready = self._ready_by_group[resource_group]
         heapq.heappop(group_ready)
@@ -2560,6 +2583,7 @@ class UnifiedEventKernel:
         queue_wait_ns = start_ns - effective_ready_ns
         physical_queue_wait_by_owner: Dict[str, float] = {}
         physical_resource_owners: Dict[str, str] = {}
+        physical_resource_owner_sets: Dict[str, Set[str]] = {}
         if is_physical:
             raw_by_owner = task.metadata.get("physical_execution_by_owner")
             if isinstance(raw_by_owner, Mapping):
@@ -2571,6 +2595,10 @@ class UnifiedEventKernel:
                                 str(resource_id): str(owner)
                                 for resource_id, owner in raw_owners.items()
                             })
+                            for resource_id in raw_owners:
+                                physical_resource_owner_sets.setdefault(
+                                    str(resource_id), set()
+                                ).add(str(raw_owner))
                         try:
                             value = float(raw_execution.get("queue_wait_ns", 0.0))
                         except (TypeError, ValueError, OverflowError):
@@ -2609,10 +2637,16 @@ class UnifiedEventKernel:
                 resource_busy_ns[demand.resource_id] = (
                     resource_busy_ns_get(demand.resource_id, 0.0) + demand.service_ns
                 )
-                owner_id = physical_resource_owners.get(
-                    demand.resource_id, self._physical_owner(demand.resource_id)
-                )
-                owner_wait = physical_queue_wait_by_owner.pop(owner_id, 0.0)
+                owners = physical_resource_owner_sets.get(demand.resource_id)
+                if owners is None:
+                    owners = {physical_resource_owners.get(
+                        demand.resource_id, self._physical_owner(demand.resource_id)
+                    )}
+                # Several devices may use one explicit shared wire. Attribute
+                # each device's host admission wait once, even when its only
+                # positive-duration demand is on that shared resource.
+                owner_wait = sum(physical_queue_wait_by_owner.pop(owner, 0.0)
+                                 for owner in sorted(owners))
                 resource_queue_wait_ns[demand.resource_id] = (
                     resource_queue_wait_ns.get(demand.resource_id, 0.0)
                     + owner_wait
@@ -2666,6 +2700,8 @@ class UnifiedEventKernel:
             )
 
         if is_physical:
+            physical_intervals: Dict[str, List[Dict[str, object]]] = {}
+            physical_lane_completions = []
             for stage in task.metadata.get("physical_resource_intervals", ()):
                 if stage.resource_id is None:
                     continue
@@ -2674,13 +2710,52 @@ class UnifiedEventKernel:
                     "task_id": task_id, "resource_id": resource_id,
                     "start_ns": stage.start_ns, "end_ns": stage.end_ns,
                 }
+                physical_intervals.setdefault(resource_id, []).append(interval)
+            # Summary execution still retains the final real reservation. It
+            # must publish the same readiness and task predecessor as detailed
+            # execution whenever the lane can be identified unambiguously.
+            for resource_id, (start, end) in task.metadata.get(
+                    "physical_resource_last_intervals", {}).items():
+                physical_intervals.setdefault(resource_id, []).append({
+                    "task_id": task_id, "resource_id": resource_id,
+                    "start_ns": start, "end_ns": end,
+                })
+            for resource_id in physical_ids:
+                lanes = self.physical_runtime.timeline.lane_available.get(resource_id, ())
+                before_lanes = physical_snapshot["timeline"]["lane_available"].get(resource_id, ())
+                intervals = physical_intervals.get(resource_id, ())
                 previous = resource_last_interval.get(resource_id)
-                if previous is not None and previous["end_ns"] == stage.start_ns:
+                if (len(lanes) == 1 and previous is not None
+                        and any(previous["end_ns"] == item["start_ns"] for item in intervals)):
                     resource_predecessors.setdefault(resource_id, dict(previous))
-                if stage.end_ns >= resource_available.get(resource_id, 0.0):
-                    resource_available[resource_id] = stage.end_ns
-                    resource_last_interval[resource_id] = interval
-                    self._resource_lane_last_interval[(resource_id, 0)] = interval
+                if intervals:
+                    last = max(intervals, key=lambda item: item["end_ns"])
+                    if previous is None or last["end_ns"] >= previous["end_ns"]:
+                        resource_last_interval[resource_id] = last
+                for lane_index, end in enumerate(lanes):
+                    before = before_lanes[lane_index] if lane_index < len(before_lanes) else 0.0
+                    if end <= before:
+                        continue
+                    physical_lane_completions.append((resource_id, lane_index, end))
+                    matches = [item for item in intervals
+                               if item["end_ns"] == end and item["start_ns"] >= before]
+                    key = (resource_id, lane_index)
+                    if matches:
+                        self._resource_lane_last_interval[key] = {
+                            **max(matches, key=lambda item: item["start_ns"]), "lane": lane_index}
+                    else:
+                        # A truncated trace may omit the interval, but the
+                        # changed lane clock proves this task's release point.
+                        # Do not invent its unknown reservation start time.
+                        self._resource_lane_last_interval[key] = {
+                            "task_id": task_id, "resource_id": resource_id,
+                            "end_ns": end, "lane": lane_index}
+                if lanes:
+                    # The next task may use any free lane. Stage detail is
+                    # history, not a replacement for this calendar authority.
+                    resource_available[resource_id] = min(lanes)
+            task = replace(task, metadata={**task.metadata,
+                "physical_resource_lane_completions": tuple(physical_lane_completions)})
 
         self._completed_end[task_id] = end_ns
         self._completion_leases[task_id] = 1

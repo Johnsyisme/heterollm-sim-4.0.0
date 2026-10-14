@@ -3411,8 +3411,17 @@ class _KVLedger:
             raise RuntimeError("in-flight prefetch lost its offloaded KV accounting")
         if self.offload_used_bytes < moved_bytes:
             raise RuntimeError("in-flight prefetch offload ledger underflow")
-        for page_id, plan in prepared:
-            pool.complete_prepared_restore(page_id, plan, now_ns=now_ns)
+        # All pages form one request-level publication. A later failed page
+        # must not leave the earlier pages moved while request counters still
+        # describe the entire cohort as offloaded. Capture after the I/O, so
+        # rollback retains its actual cost and reservations for a retry.
+        snapshot = self._snapshot_paged_pool_state()
+        try:
+            for page_id, plan in prepared:
+                pool.complete_prepared_restore(page_id, plan, now_ns=now_ns)
+        except Exception:
+            self._restore_paged_pool_state(snapshot)
+            raise
         self.used_pages += moved
         self.persistent_used_pages += moved
         self.peak_pages = max(self.peak_pages, self.used_pages)
@@ -5763,6 +5772,7 @@ class _OnlineRuntime:
         self.residency_temporary_releases = 0
         self._residency_lease_sequence = 0
         self._residency_group_lease_ids: List[str] = []
+        self._residency_cohort_consumer_ids: set[str] = set()
         self.residency_fault_batches = 0
         self.residency_clean_eviction_batches = 0
         self.events: List[ServingEvent] = []
@@ -5821,6 +5831,13 @@ class _OnlineRuntime:
                 from .communication import TopologyRouter
                 from .kv_transfer import PhysicalKVTransferExecutor
 
+                transfer_energy_rates = {}
+                for component in (*pool_components, *relay_components):
+                    if plan.scenario.component_profile_kind(component) in {"hbm", "gddr", "host_memory"}:
+                        transfer_energy_rates[component.component_id] = plan.scenario.resolve_component_profile(
+                            component.component_id).energy_pj_per_byte
+                    elif component.metadata.get("physical_energy_pj_per_byte") is not None:
+                        transfer_energy_rates[component.component_id] = component.metadata["physical_energy_pj_per_byte"]
                 self._paged_pool_transfer_executor = PhysicalKVTransferExecutor(
                     plan.scenario.hardware,
                     runtime=self._execution_resource_kernel.physical_runtime,
@@ -5828,6 +5845,7 @@ class _OnlineRuntime:
                     relay_components=self.plan.kv_policy.relay_components,
                     arrival_ns=lambda _request: self.now,
                     namespace="serving:" + str(id(self)),
+                    energy_pj_per_byte_by_component=transfer_energy_rates,
                 )
                 paged_pool.set_transfer_executor(
                     self._paged_pool_transfer_executor
@@ -6107,6 +6125,7 @@ class _OnlineRuntime:
             # the consumer anchor, so a later PAGE_OUT can reclaim the range
             # only after this exact DAG consumer completes.
             self._residency_group_lease_ids.append(lease_id)
+            self._residency_cohort_consumer_ids.add(str(consumer_task_id))
 
     def _release_residency_group_leases(self) -> None:
         manager = self.residency_manager
@@ -10515,8 +10534,13 @@ class _OnlineRuntime:
         for request_id, entry in tuple(self._pending_prefetches.items()):
             if entry.get("cancel_requested_ns") is None or float(entry["completion_ns"]) > self.now:
                 continue
-            bills = [self.ledger.paged_pool.cancel_prepared_restore(page, plan, now_ns=self.now)
-                     for page, plan in entry["prepared"]]
+            snapshot = self.ledger._snapshot_paged_pool_state()
+            try:
+                bills = [self.ledger.paged_pool.cancel_prepared_restore(page, plan, now_ns=self.now)
+                         for page, plan in entry["prepared"]]
+            except Exception:
+                self.ledger._restore_paged_pool_state(snapshot)
+                raise
             size = int(entry["details"]["bytes"])
             self.prefetch_cancelled_bytes += size
             self.events.append(ServingEvent(float(entry["completion_ns"]), "kv_prefetch_cancelled", request_id,
@@ -15444,6 +15468,7 @@ class _OnlineRuntime:
             self.prefetch_useful_bytes += self._unconsumed_prefetch_bytes.pop(request_id, 0)
 
     def _execute_cohort(self, cohort: BatchCohort) -> None:
+        self._residency_cohort_consumer_ids = set()
         cohort = self._with_kv_scan_lower_bound(cohort)
         with self._cuda_graph_runtime.scope(cohort, self.now) as cuda_transition:
             cost = _lower_cost(self.lowerer, self.plan.scenario, cohort)
@@ -16074,6 +16099,9 @@ class _OnlineRuntime:
         self.now = end_ns
         self._llama_graph_runtime.commit(graph_transition)
         self._cuda_graph_runtime.commit(cuda_transition)
+        if self.residency_manager is not None:
+            self.residency_manager.retire_completed_consumers(self._residency_cohort_consumer_ids)
+        self._residency_cohort_consumer_ids.clear()
 
     def _finish(self, state: _MutableRequest, timestamp_ns: float) -> None:
         if state.status == RequestStatus.FINISHED:
@@ -16586,7 +16614,8 @@ class _OnlineRuntime:
                     else None
                 ),
                 "paged_kv_transfers": ({"events": tuple(self._paged_pool_transfer_executor.events),
-                    "counters": dict(self._paged_pool_transfer_executor.counters)}
+                    "counters": dict(self._paged_pool_transfer_executor.counters),
+                    "cost_ledger": self._paged_pool_transfer_executor.cost_ledger()}
                     if self._paged_pool_transfer_executor is not None else {}),
             },
         )

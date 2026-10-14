@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Hashable, List, Mapping, Optional, Tuple
 
 from .contracts import ResourceDemand, TaskCategory, TaskSpec
-from .engine import ScheduleIR
+from .engine import ScheduleIR, _resource_release_points
 from .event_kernel import CompiledGraphExecutor, UnifiedEventKernel
 from .execution_control import ExecutionControl
 
@@ -161,6 +161,7 @@ def compact_execution_metadata(metadata: Mapping[str, Any]) -> Mapping[str, Any]
             "resource_last_intervals",
             "physical_resource_intervals",
             "physical_resource_last_intervals",
+            "physical_resource_lane_completions",
         }
         record_metadata["physical_execution"] = {
             key: value
@@ -170,7 +171,7 @@ def compact_execution_metadata(metadata: Mapping[str, Any]) -> Mapping[str, Any]
     by_owner = metadata.get("physical_execution_by_owner")
     if isinstance(by_owner, Mapping):
         excluded = {"resource_intervals", "resource_interval_payloads", "resource_last_intervals",
-                    "physical_resource_intervals", "physical_resource_last_intervals"}
+                    "physical_resource_intervals", "physical_resource_last_intervals", "physical_resource_lane_completions"}
         record_metadata["physical_execution_by_owner"] = {
             owner: {key: value for key, value in values.items() if key not in excluded}
             for owner, values in by_owner.items() if isinstance(values, Mapping)
@@ -293,8 +294,10 @@ def execute_cost_schedule(
 
         sorted_demands = event.demands
         for demand in sorted_demands:
-            lane = int(event.resource_lanes.get(demand.resource_id, 0))
             info = event.resource_predecessors.get(demand.resource_id, {})
+            if info.get("end_ns", start_ns) > start_ns:
+                continue  # Internal Core wait is already in this task's span.
+            lane = int(info.get("lane", event.resource_lanes.get(demand.resource_id, 0)))
             predecessor_resource = str(info.get("resource_id", demand.resource_id))
             predecessor = resource_last_path.get((predecessor_resource, lane))
             if predecessor is not None and demand.resource_id in event.resource_predecessors:
@@ -313,20 +316,19 @@ def execute_cost_schedule(
         )
         end_path_by_task[task_id] = end_path
 
-        for demand in sorted_demands:
-            lane = int(event.resource_lanes.get(demand.resource_id, 0))
-            interval_end_ns = start_ns + demand.service_ns
+        for resource_id, lane, interval_end_ns in _resource_release_points(
+                task, sorted_demands, start_ns, event.resource_lanes):
             interval_duration = interval_end_ns - start_ns
             interval_path = _extend_path(
                 start_path,
                 interval_duration,
                 task.category,
-                "{}@{}".format(task.task_id, demand.resource_id),
+                "{}@{}".format(task.task_id, resource_id),
             )
             # A zero-duration resource interval is still the event kernel's
             # latest resource predecessor.  Store its empty path explicitly
             # so a later task cannot inherit an older non-zero interval.
-            resource_last_path[(demand.resource_id, lane)] = (
+            resource_last_path[(resource_id, lane)] = (
                 interval_end_ns,
                 interval_path,
             )

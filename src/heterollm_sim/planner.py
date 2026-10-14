@@ -4725,7 +4725,7 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
                 else None
             )
             allocation_size = item.get(
-                "buffer_size_bytes", item.get("allocation_bytes")
+                "buffer_size_bytes", item.get("allocation_size_bytes", item.get("allocation_bytes"))
             )
             side = "write" if operation == "write" else "read"
             raw_generation = item.get(
@@ -4738,6 +4738,8 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
             # keeping resident weight allocations on generation zero.  An
             # explicit non-zero generation remains authoritative.
             is_static_weight = _is_resident_physical_buffer(metadata, identity)
+            if is_static_weight:
+                side = "weight"
             if (
                 generation_identity is not None
                 and side in {"read", "write"}
@@ -7979,6 +7981,7 @@ def _direct_memory_phase(
             "resource_last_intervals",
             "physical_resource_intervals",
             "physical_resource_last_intervals",
+            "physical_resource_lane_completions",
         }
         compact = {key: value for key, value in bill.items() if key not in heavy_keys}
         if any(key in bill for key in heavy_keys):
@@ -22343,6 +22346,8 @@ def _compile_parallel_moe(
     prefix: str,
     dependencies: Sequence[str],
 ) -> str:
+    gated_mlp = layer.gated_mlp
+    up_projection = "up_gate" if gated_mlp else "up"
     stage = plan.stage_for_layer(layer)
     tp_ranks = plan.tp_group(stage, 0)
     norm_ends: List[str] = []
@@ -22832,7 +22837,7 @@ def _compile_parallel_moe(
                 layer,
                 expert_tokens,
                 layer.hidden_size,
-                2 * local_intermediate,
+                (2 if gated_mlp else 1) * local_intermediate,
                 name="moe_expert_up_tp_ep",
                 f32_storage=_f32_hidden_storage_enabled(scenario),
             )
@@ -22859,6 +22864,9 @@ def _compile_parallel_moe(
                     ),
                 )
             )
+            if not gated_mlp:
+                expert_activation_fused = False
+                expert_activation_audit = {"fusion_enabled": False, "fusion_decision": "ungated_ffn"}
             expert_activation_audit = dict(expert_activation_audit)
             expert_activation_audit.update(
                 {
@@ -22882,8 +22890,8 @@ def _compile_parallel_moe(
                 rank,
                 expert_up_workload,
                 target,
-                "{}.rank{:03d}.expert{:04d}.up_gate".format(
-                    prefix, rank.rank, expert_index
+                "{}.rank{:03d}.expert{:04d}.{}".format(
+                    prefix, rank.rank, expert_index, up_projection
                 ),
                 (dispatch_ready,),
                 weight_tensor_id="{}.expert_weights".format(layer.layer_id),
@@ -22891,7 +22899,7 @@ def _compile_parallel_moe(
                 metadata={
                     **expert_metadata,
                     **expert_activation_audit,
-                    "projection_id": "experts.{}.up_gate".format(expert_index),
+                    "projection_id": "experts.{}.{}".format(expert_index, up_projection),
                 },
             )
             up_component = (
@@ -22900,7 +22908,7 @@ def _compile_parallel_moe(
                 else target
             )
             activation_bits = _activation_storage_bits(layer, scenario)
-            if expert_activation_fused:
+            if not gated_mlp or expert_activation_fused:
                 activation, activation_component = up, up_component
             else:
                 activation, activation_component = _add_rank_primitive(
@@ -23141,10 +23149,12 @@ def _compile_parallel_shared_expert(
     prefix: str,
     dependencies: Sequence[str],
 ) -> str:
+    gated_mlp = layer.gated_mlp
+    up_projection = "up_gate" if gated_mlp else "up"
     stage = plan.stage_for_layer(layer)
     ranks = plan.tp_group(stage, 0)
     up_shard = shard_extent(
-        2 * layer.shared_expert_intermediate_size,
+        (2 if gated_mlp else 1) * layer.shared_expert_intermediate_size,
         plan.tp_degree,
         0,
         allow_padding=plan.allow_padding,
@@ -23206,6 +23216,9 @@ def _compile_parallel_shared_expert(
                 ),
             )
         )
+        if not gated_mlp:
+            shared_activation_fused = False
+            shared_activation_audit = {"fusion_enabled": False, "fusion_decision": "ungated_ffn"}
         shared_activation_audit = dict(shared_activation_audit)
         shared_activation_audit.update(
             {
@@ -23229,20 +23242,20 @@ def _compile_parallel_shared_expert(
             rank,
             shared_up_workload,
             target,
-            "{}.rank{:03d}.shared_expert.up_gate".format(prefix, rank.rank),
+            "{}.rank{:03d}.shared_expert.{}".format(prefix, rank.rank, up_projection),
             dependencies,
             weight_tensor_id="{}.shared_expert_weights".format(
                 layer.layer_id
             ),
             keep_output_on_target=True,
-            metadata={**common, **shared_activation_audit, "projection_id": "shared_expert.up_gate"},
+            metadata={**common, **shared_activation_audit, "projection_id": "shared_expert." + up_projection},
         )
         up_component = (
             rank.component_id
             if _is_cim(_component(scenario, target))
             else target
         )
-        if shared_activation_fused:
+        if not gated_mlp or shared_activation_fused:
             activation, activation_component = up, up_component
         else:
             activation, activation_component = _add_rank_primitive(
@@ -29227,19 +29240,65 @@ def _physical_execution_rows(tasks):
             yield task, raw, str(getattr(kind_value, "value", kind_value)).upper()
 
 
+def _accumulate_physical_resource_totals(resources, task, raw, resource_owners):
+    """Add only this owner row's contribution to a possibly shared wire."""
+    busy = raw.get("resource_busy_ns", {})
+    moved = raw.get("resource_bytes")
+    energy = raw.get("resource_energy_pj")
+    resolved_owners = raw.get("resource_owners", {})
+    for demand in task.demands:
+        resource_id = str(demand.resource_id)
+        if resource_id not in busy:
+            continue
+        if not isinstance(moved, Mapping):
+            contributors = task.metadata.get("physical_execution_by_owner", {})
+            if isinstance(contributors, Mapping) and sum(
+                isinstance(item, Mapping) and resource_id in item.get("resource_busy_ns", {})
+                for item in contributors.values()
+            ) > 1:
+                raise ValueError(
+                    f"shared physical resource {resource_id!r} requires owner resource_bytes; "
+                    "aggregate demand cannot be attributed to multiple owners")
+        owner = (resource_owners or {}).get(resource_id, resolved_owners.get(resource_id, "unknown"))
+        row = resources.setdefault(resource_id, {
+            "owner": owner, "bytes_moved": 0, "service_ns": 0.0, "energy_pj": 0.0})
+        if row["owner"] != owner:
+            row["owner"] = resource_id
+        # Older serialized rows lacked owner byte/energy maps. Their ordinary
+        # single-owner demand remains the compatibility fallback.
+        row["bytes_moved"] += int(moved.get(resource_id, 0) if isinstance(moved, Mapping) else demand.bytes_moved)
+        row["service_ns"] += float(busy[resource_id])
+        if isinstance(energy, Mapping):
+            contribution = energy.get(resource_id, 0.)
+        elif isinstance(moved, Mapping):
+            owner_bytes = sum(moved.values())
+            contribution = raw.get("energy_pj", 0.) * moved.get(resource_id, 0) / owner_bytes if owner_bytes else 0.
+        else:
+            contribution = demand.energy_pj
+        row["energy_pj"] += float(contribution)
+
+
 def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=None) -> Mapping[str, object]:
     fields = ("logical_bytes", "logical_read_bytes", "logical_write_bytes",
               "host_transfer_bytes", "internal_transfer_bytes", "physical_bytes",
               "physical_read_bytes", "physical_write_bytes", "pages_read", "pages_programmed",
               "pages_touched", "read_operations", "program_operations", "rmw_read_operations",
               "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
-              "erase_operations", "queue_wait_ns", "service_ns", "energy_pj")
-    totals = {key: 0.0 for key in fields}
+              "erase_operations", "queue_wait_ns", "service_ns", "energy_pj",
+              "media_waves", "host_queue_wait_ns", "media_queue_wait_ns")
+    continuous_fields = {"queue_wait_ns", "service_ns", "energy_pj", "host_queue_wait_ns", "media_queue_wait_ns"}
+    totals = {key: 0.0 if key in continuous_fields else 0 for key in fields}
     peaks = {key: 0 for key in ("host_outstanding_at_admission_peak",
              "host_read_outstanding_at_admission_peak", "host_write_outstanding_at_admission_peak")}
     peak_observed = {key: 0 for key in peaks}
-    measured_observed = {key: 0 for key in ("page_access_payload_bytes",
-                         "page_access_capacity_bytes", "host_admission_samples")}
+    # Legacy rows omit some counters. Only publish an optional total when
+    # every physical owner recorded it; an absent observation is not zero.
+    measured_observed = {key: 0 for key in (
+        "logical_read_bytes", "logical_write_bytes", "internal_transfer_bytes",
+        "pages_read", "pages_programmed", "pages_touched", "media_waves",
+        "read_operations", "program_operations", "rmw_read_operations",
+        "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
+        "host_queue_wait_ns", "media_queue_wait_ns")}
     physical_rows = 0
     operations: Dict[str, int] = {}
     resources: Dict[str, Dict[str, object]] = {}
@@ -29255,9 +29314,9 @@ def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
         operation = str(raw.get("operation", "unknown"))
         operations[operation] = operations.get(operation, 0) + 1
         for key in fields:
-            value = raw.get(key, 0)
+            value = raw.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                totals[key] += float(value)
+                totals[key] += value
                 if key in measured_observed and key in raw:
                     measured_observed[key] += 1
         for key in peaks:
@@ -29265,27 +29324,16 @@ def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 peaks[key] = max(peaks[key], int(value))
                 peak_observed[key] += 1
-        physical_resources = raw.get("resource_busy_ns", {})
-        resolved_owners = raw.get("resource_owners", {})
-        for demand in task.demands:
-            resource_id = str(demand.resource_id)
-            if resource_id not in physical_resources:
-                continue
-            owner = (resource_owners or {}).get(resource_id, resolved_owners.get(resource_id, "unknown"))
-            row = resources.setdefault(resource_id, {"owner": owner, "bytes_moved": 0, "service_ns": 0.0, "energy_pj": 0.0})
-            row["bytes_moved"] += int(demand.bytes_moved)
-            row["service_ns"] += float(demand.service_ns)
-            row["energy_pj"] += float(demand.energy_pj)
+        _accumulate_physical_resource_totals(resources, task, raw, resource_owners)
     if not task_ids:
         return {"schema_version": "heterollm.nand-traffic/v2", "task_count": 0}
     from .nand_core import summarize_nand_observations
     observed_pages = summarize_nand_observations(page_observations)
     return {
         "schema_version": "heterollm.nand-traffic/v2", "task_count": len(task_ids),
-        **{key: int(round(value)) for key, value in totals.items() if key not in {"queue_wait_ns", "service_ns", "energy_pj"}},
-        "queue_wait_ns": totals["queue_wait_ns"], "service_ns": totals["service_ns"], "energy_pj": totals["energy_pj"],
+        **{key: value if key in continuous_fields else int(round(value)) for key, value in totals.items()},
         **{key: value if peak_observed[key] == physical_rows else None for key, value in peaks.items()},
-        **{key: int(totals[key]) if count == physical_rows else None
+        **{key: (totals[key] if key in continuous_fields else int(round(totals[key]))) if count == physical_rows else None
            for key, count in measured_observed.items()},
         "page_access_payload_utilization": (totals["page_access_payload_bytes"] / totals["page_access_capacity_bytes"]
                                             if totals["page_access_capacity_bytes"]
@@ -29311,35 +29359,39 @@ def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
 def _summarize_dram_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=None) -> Mapping[str, object]:
     fields = ("logical_bytes", "logical_read_bytes", "logical_write_bytes",
               "physical_read_bytes", "physical_write_bytes", "physical_bytes", "burst_count",
-              "row_hits", "row_misses", "row_conflicts", "queue_wait_ns", "service_ns")
-    totals = {key: 0.0 for key in fields}
+              "row_hits", "row_misses", "row_conflicts", "queue_wait_ns", "service_ns",
+              "read_write_switches", "refresh_wait_ns", "turnaround_wait_ns")
+    continuous_fields = {"queue_wait_ns", "service_ns", "refresh_wait_ns", "turnaround_wait_ns"}
+    totals = {key: 0.0 if key in continuous_fields else 0 for key in fields}
+    optional_observed = {key: 0 for key in ("read_write_switches", "refresh_wait_ns", "turnaround_wait_ns")}
+    physical_rows = 0
     task_ids = set()
     resources: Dict[str, Dict[str, object]] = {}
     for task, raw, kind in _physical_execution_rows(tasks):
         if kind not in {"DDR", "LPDDR", "HBM", "GDDR", "MEMORYKIND.DDR", "MEMORYKIND.LPDDR", "MEMORYKIND.HBM", "MEMORYKIND.GDDR"}:
             continue
+        physical_rows += 1
         task_ids.add(task.task_id)
         for key in fields:
-            value = raw.get(key, 0)
+            value = raw.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                totals[key] += float(value)
+                totals[key] += value
+                if key in optional_observed:
+                    optional_observed[key] += 1
         # The resolved transaction ledger identifies memory resources and
         # their submitting physical owners. Unrelated compute/cache demands
         # can coexist on the task and do not belong in the DRAM ledger.
-        physical_resources = raw.get("resource_busy_ns", {})
-        resolved_owners = raw.get("resource_owners", {})
-        for demand in task.demands:
-            resource_id = str(demand.resource_id)
-            if resource_id not in physical_resources:
-                continue
-            owner = (resource_owners or {}).get(resource_id, resolved_owners.get(resource_id, "unknown"))
-            row = resources.setdefault(resource_id, {"owner": owner, "bytes_moved": 0, "service_ns": 0.0, "energy_pj": 0.0})
-            row["bytes_moved"] += int(demand.bytes_moved)
-            row["service_ns"] += float(demand.service_ns)
-            row["energy_pj"] += float(demand.energy_pj)
+        _accumulate_physical_resource_totals(resources, task, raw, resource_owners)
     return {
         "schema_version": "heterollm.dram-traffic/v2", "task_count": len(task_ids),
-        **{key: int(round(value)) if key not in {"queue_wait_ns", "service_ns"} else value for key, value in totals.items()},
+        **{key: value if key in continuous_fields else int(round(value)) for key, value in totals.items()},
+        **{key: (totals[key] if key in continuous_fields else int(round(totals[key])))
+           if physical_rows and count == physical_rows else None for key, count in optional_observed.items()},
+        "metric_availability": {
+            key: {"status": "recorded" if physical_rows and count == physical_rows else "partial" if count else "not_recorded",
+                  "recorded_owner_rows": count, "physical_owner_rows": physical_rows}
+            for key, count in optional_observed.items()
+        },
         "logical_bytes": int(round(totals["logical_bytes"])),
         "resource_totals": dict(sorted(resources.items())),
         "accounting_semantics": "row state, burst traffic and resource timing from physical transaction results",

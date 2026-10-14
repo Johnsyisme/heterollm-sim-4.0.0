@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple
 
@@ -22,6 +23,16 @@ if TYPE_CHECKING:
 
 
 _CONTROL_CHECK_INTERVAL = 256
+
+
+def _resource_release_points(task, demands, start_ns, resource_lanes):
+    """Yield actual per-lane releases, separately from summed resource busy time."""
+    physical_ids = set(task.metadata.get("physical_demands_resource_ids", ()))
+    for resource_id, lane, end_ns in task.metadata.get("physical_resource_lane_completions", ()):
+        yield str(resource_id), int(lane), float(end_ns)
+    for demand in demands:
+        if demand.resource_id not in physical_ids:
+            yield demand.resource_id, int(resource_lanes.get(demand.resource_id, 0)), start_ns + demand.service_ns
 
 
 def _task_resource_intervals(
@@ -56,41 +67,52 @@ def _task_resource_intervals(
                         bytes_moved=int(moved), energy_pj=float(energy),
                     ))
     reservations = metadata.get("physical_resource_intervals", ())
-    if not physical.get("details_truncated", False):
-        seen = {(item.resource_id, item.start_ns, item.end_ns) for item in intervals}
-        for item in reservations:
-            if isinstance(item, (tuple, list)) and len(item) >= 3:
-                resource_id, begin, end = item[:3]
-                moved = int(item[3]) if len(item) > 3 else 0
-                energy = float(item[4]) if len(item) > 4 else 0.0
-            else:
-                resource_id = getattr(item, "resource_id", None)
-                begin = getattr(item, "start_ns", None)
-                end = getattr(item, "end_ns", None)
-                moved = int(getattr(item, "bytes", 0))
-                energy = 0.0
-            key = (resource_id, begin, end)
-            if resource_id is not None and begin is not None and end is not None and key not in seen:
-                intervals.append(ResourceInterval(
-                    resource_id=str(resource_id), start_ns=begin, end_ns=end,
-                    bytes_moved=moved, energy_pj=energy,
-                ))
-                seen.add(key)
+    # Retained stages are exact even when another request in this task
+    # exceeded its detail bound. A partial record is not an invalid record.
+    # Only remove the stage copy of an already retained payload. Identical
+    # reservations on separate lanes are real work and must retain multiplicity.
+    payload_copies = Counter((item.resource_id, item.start_ns, item.end_ns, item.bytes_moved, item.energy_pj)
+                             for item in intervals)
+    for item in reservations:
+        if isinstance(item, (tuple, list)) and len(item) >= 3:
+            resource_id, begin, end = item[:3]
+            moved = int(item[3]) if len(item) > 3 else 0
+            energy = float(item[4]) if len(item) > 4 else 0.0
+        else:
+            resource_id = getattr(item, "resource_id", None)
+            begin = getattr(item, "start_ns", None)
+            end = getattr(item, "end_ns", None)
+            moved = int(getattr(item, "bytes", 0))
+            energy = float(getattr(item, "energy_pj", 0.0))
+        key = (resource_id, begin, end, moved, energy)
+        if payload_copies[key]:
+            payload_copies[key] -= 1
+            continue
+        if resource_id is not None and begin is not None and end is not None:
+            intervals.append(ResourceInterval(
+                resource_id=str(resource_id), start_ns=begin, end_ns=end,
+                bytes_moved=moved, energy_pj=energy,
+            ))
     if not intervals and not physical.get("details_truncated", False):
-        reservations = metadata.get("physical_resource_intervals", ())
         raw = physical.get("resource_intervals", {})
         resource_bytes = physical.get("resource_bytes", {})
         resource_energy = physical.get("resource_energy_pj", {})
         if isinstance(raw, Mapping):
             for resource_id, values in raw.items():
-                for item in values or ():
-                    if not isinstance(item, (tuple, list)) or len(item) < 2:
-                        continue
+                valid = [item for item in values or ()
+                         if isinstance(item, (tuple, list)) and len(item) >= 2]
+                moved = int(resource_bytes.get(resource_id, 0))
+                energy = float(resource_energy.get(resource_id, 0.0))
+                if len(valid) > 1 and (moved or energy):
+                    raise ValueError(
+                        f"physical resource {resource_id!r} requires per-interval byte/energy "
+                        "payloads; aggregate costs cannot be assigned to multiple intervals")
+                for item in valid:
                     begin, end = item[:2]
                     intervals.append(ResourceInterval(
                         resource_id=str(resource_id), start_ns=begin, end_ns=end,
-                        bytes_moved=int(resource_bytes.get(resource_id, 0)),
-                        energy_pj=float(resource_energy.get(resource_id, 0.0)),
+                        bytes_moved=moved,
+                        energy_pj=energy,
                     ))
 
     # Physical tasks retain ordinary compute/link demands alongside replaced

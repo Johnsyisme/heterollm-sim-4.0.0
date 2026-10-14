@@ -659,6 +659,7 @@ def _runtime_profile(
             {
                 "component_id": target_gpu_id,
                 "command_unit_count": target_command_units,
+                "control_byte_count": target_control_bytes,
                 "service_ns": {
                     RuntimeAction.COMMAND_BUILD.value: (
                         128 + target_command_units * 12

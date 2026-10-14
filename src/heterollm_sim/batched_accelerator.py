@@ -379,6 +379,8 @@ def _numeric_columns(candidates: BatchedGemmInput, xp: Any) -> dict:
             raise ValueError("字段 {} 不能转换为数值数组：{}".format(name, exc))
         if value.dtype.kind == "b":
             raise ValueError("字段 {} 不接受布尔值".format(name))
+        if value.dtype.kind == "c":
+            raise ValueError("字段 {} 必须为实数，不能丢弃复数的虚部".format(name))
         raw.append(value)
     try:
         broadcast = xp.broadcast_arrays(*raw)
