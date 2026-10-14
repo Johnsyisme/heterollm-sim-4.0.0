@@ -6,7 +6,8 @@ import math
 
 from hbf_hbm_economics import conditional_node_cost
 from hbf_hbm_serving_study import build_study_scenario
-from heterollm_sim.memory_types import parse_physical_memory_config
+from calibrated_hbf_profiles import _hbm_physical_config
+from heterollm_sim.physical_contract import require_physical_memory_config, reconfigure_physical_config
 from heterollm_sim.planner import ScenarioValidationError
 
 HBM_CAPACITY = 36_000_000_000
@@ -28,28 +29,48 @@ def build_package_scenario(hbm_packages, hbf_packages, architecture, *, model_id
                              hbf_capacity_bytes=HBF_CAPACITY*max(1,hbf_packages))
     counts={"hbm0":hbm_packages,"hbf0":hbf_packages}
     components=[]
+    package_profiles={}
     for c in s.hardware.components:
         if c.component_id not in counts:
             components.append(c); continue
         count=counts[c.component_id]
         if not count:
             continue
-        physical=parse_physical_memory_config(c.metadata["physical_memory_config"])
+        physical=require_physical_memory_config(c)
+        profile=s.resolve_component_profile(c)
         if c.component_id=="hbm0":
-            physical=replace(physical, channels=8*count,
-                interface_bandwidth_gb_s=1600.*count,read_bandwidth_gb_s=1600.*count,
-                write_bandwidth_gb_s=1600.*count,max_outstanding_requests=64*count)
+            outstanding = physical.max_outstanding_requests * count
+            physical = _hbm_physical_config(capacity_bytes=c.capacity_bytes,
+                read_gb_s=physical.directional_bandwidth_gb_s("read")*count,
+                write_gb_s=physical.directional_bandwidth_gb_s("write")*count,
+                stacks=count, profile_id=physical.metadata["physical_config_profile_id"])
+            physical=reconfigure_physical_config(physical,
+                overrides={"max_outstanding_requests": outstanding})
+            shared_bw=physical.physical_interface_bandwidth_gb_s
+            read_bw=physical.directional_bandwidth_gb_s("read")
+            write_bw=physical.directional_bandwidth_gb_s("write")
         else:
-            physical=replace(physical,channels=64*count,parallel_units=64*count,
-                host_bandwidth_gb_s=1600.*count,host_read_bandwidth_gb_s=1600.*count,
-                host_write_bandwidth_gb_s=16.*count,max_outstanding_requests=32*count)
-        components.append(replace(c, bandwidth_gbps=1600.*8*count,
-            read_bandwidth_gbps=1600.*8*count,
-            write_bandwidth_gbps=(1600. if c.component_id=="hbm0" else 16.)*8*count,
-            ports=tuple(replace(p,bandwidth_gbps=1600.*8*count) for p in c.ports),
+            physical=reconfigure_physical_config(physical, overrides={
+                "channels": physical.channels*count, "parallel_units": physical.parallel_units*count,
+                "host_bandwidth_gb_s": physical.host_bandwidth_gb_s*count,
+                "host_read_bandwidth_gb_s": physical.host_bandwidth_for("read")*count,
+                "host_write_bandwidth_gb_s": physical.host_bandwidth_for("write")*count,
+                "max_outstanding_requests": physical.max_outstanding_requests*count})
+            shared_bw=physical.host_bandwidth_gb_s
+            read_bw=physical.host_bandwidth_for("read")
+            write_bw=physical.host_bandwidth_for("write")
+        service_lanes = physical.lane_count if c.component_id=="hbm0" else physical.parallel_units
+        package_profiles[c.component_id]=replace(profile, bandwidth_gb_s=shared_bw,
+            read_bandwidth_gb_s=read_bw, write_bandwidth_gb_s=write_bw,
+            max_outstanding_requests=physical.max_outstanding_requests,
+            parallel_lanes=service_lanes,
+            transaction_bytes=physical.burst_bytes if c.component_id=="hbm0" else profile.transaction_bytes)
+        components.append(replace(c, bandwidth_gbps=shared_bw*8,
+            read_bandwidth_gbps=read_bw*8, write_bandwidth_gbps=write_bw*8,
+            ports=tuple(replace(p,bandwidth_gbps=shared_bw*8) for p in c.ports),
             metadata={**{k:v for k,v in c.metadata.items() if k!='memory_service'},
-                "physical_memory_config":physical,"max_outstanding_requests":(64 if c.component_id=='hbm0' else 32)*count,
-                "parallel_lanes":count if c.component_id=='hbm0' else 64*count}))
+                "physical_memory_config":physical,"max_outstanding_requests":physical.max_outstanding_requests,
+                "parallel_lanes":service_lanes}))
     ids={c.component_id for c in components}
     links=[]; gpu_ports={}
     for link in s.hardware.links:
@@ -57,24 +78,17 @@ def build_package_scenario(hbm_packages, hbf_packages, architecture, *, model_id
             continue
         memory=next((x for x in (link.source_component,link.target_component) if x in counts),None)
         if memory:
-            link=replace(link,bandwidth_gbps=1600.*8*counts[memory])
+            link=replace(link,bandwidth_gbps=package_profiles[memory].bandwidth_gb_s*8)
             gpu_ports[link.source_port if link.source_component=="gpu0" else link.target_port]=link.bandwidth_gbps
         links.append(link)
     components=[replace(c,ports=tuple(replace(p,bandwidth_gbps=gpu_ports[p.port_id]) if p.port_id in gpu_ports else p
         for p in c.ports)) if c.component_id=="gpu0" else c for c in components]
     registry={k:dict(v) for k,v in s.component_profiles.items()}
     hbm=s.hardware.get_component("hbm0")
-    profile=s.resolve_component_profile("hbm0")
-    registry["hbm"][hbm.cost_profile_id]=replace(profile,bandwidth_gb_s=1600.*hbm_packages,
-        read_bandwidth_gb_s=1600.*hbm_packages,write_bandwidth_gb_s=1600.*hbm_packages,
-        parallel_lanes=hbm_packages,max_outstanding_requests=64*hbm_packages)
+    registry["hbm"][hbm.cost_profile_id]=package_profiles["hbm0"]
     if hbf_packages:
         flash=s.hardware.get_component("hbf0")
-        profile=s.resolve_component_profile("hbf0")
-        registry[s.component_profile_kind(flash)][flash.cost_profile_id]=replace(profile,
-            bandwidth_gb_s=1600.*hbf_packages,read_bandwidth_gb_s=1600.*hbf_packages,
-            write_bandwidth_gb_s=16.*hbf_packages,parallel_lanes=64*hbf_packages,
-            max_outstanding_requests=32*hbf_packages)
+        registry[s.component_profile_kind(flash)][flash.cost_profile_id]=package_profiles["hbf0"]
     return replace(s,hardware=replace(s.hardware,components=tuple(components),links=tuple(links)),component_profiles=registry)
 
 

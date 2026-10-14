@@ -32,9 +32,97 @@ def supported_scope(group):
     return '；'.join(supported)
 
 
+_BANK_GROUP_TIMING_FIELDS = (
+    'column_same_group_ns', 'column_different_group_ns',
+    'activate_same_group_ns', 'activate_different_group_ns',
+    'four_activate_window_ns', 'write_to_read_same_group_ns',
+    'write_to_read_different_group_ns',
+)
+
+
+def bank_group_variants(group):
+    """Describe saved execution facts, never re-resolve a mutable profile name."""
+    profiles = list(dict.fromkeys(group.get('hardware_profiles', [])))
+    for row in group.get('rows', []):
+        profile = row.get('hardware_profile')
+        if profile is not None and profile not in profiles:
+            profiles.append(profile)
+    variants = []
+    for profile in profiles:
+        records = []
+        for row in group.get('rows', []):
+            if row.get('hardware_profile') != profile:
+                continue
+            configs = row.get('executed_hbm_parameters') or {
+                owner: item['physical_config'] for owner, item in
+                row.get('core_execution_audit', {}).get('executed_physical_configurations', {}).items()
+                if item.get('physical_config', {}).get('kind') == 'HBM'}
+            for owner, config in configs.items():
+                existing = next((r for r in records if r['owner'] == owner and r['config'] == config), None)
+                if existing is None:
+                    records.append({'owner': owner, 'config': config, 'row_ids': [row.get('id')]})
+                else:
+                    existing['row_ids'].append(row.get('id'))
+        labels = []
+        for record in records:
+            config = record['config']; metadata = config.get('metadata', {})
+            geometry = str(config.get('bank_groups_per_rank', '?'))+'×'+str(config.get('banks_per_group', '?'))
+            generation = config.get('generation') or 'HBM'
+            if metadata.get('geometry_control') == 'flat':
+                zh, en = '平坦消融 ', 'Flat control '
+            elif metadata.get('geometry_status') == 'standard_organization':
+                zh, en = generation+'参考 ', generation+' reference '
+            else:
+                zh, en = '合成/未核实 ', 'Synthetic/unverified '
+            timing = [config.get(key) for key in _BANK_GROUP_TIMING_FIELDS]
+            if any(value is not None and value > 0 for value in timing):
+                timing_zh, timing_en = (('合成组时序', 'synthetic group timing')
+                    if metadata.get('geometry_control') == 'timed' else ('已配置组时序', 'configured group timing'))
+            elif any(value is None for value in timing):
+                timing_zh, timing_en = '组时序未记录', 'group timing unavailable'
+            else:
+                timing_zh, timing_en = '组时序关闭', 'group timing off'
+            label = (zh+geometry+'，'+timing_zh, en+geometry+', '+timing_en)
+            if label not in labels:
+                labels.append(label)
+        variants.append({'profile': profile, 'records': records,
+            'label_zh': ' / '.join(x[0] for x in labels) or str(profile)+'（配置未记录）',
+            'label_en': ' / '.join(x[1] for x in labels) or str(profile)+' (configuration unavailable)'})
+    return variants
+
+
 def extension_tables(group):
     n=int(group['id'][:2]); rows=group.get('rows',[]); parts=[]
-    if n==12:
+    if n==20:
+        variants = bank_group_variants(group)
+        parts.append('<p id="bank-group">下列是小型合成Dense模型的完整服务，先执行真实prefill，再测Decode。基准分组、分组控制和非零组时序对照的标签均取自结果中实际执行的HBM配置；不按当前目录重新解析profile名称。总bank数及其余条件是否相同，见本组检查与逐点配置。</p>')
+        parts.append('<p>每点一个请求、'+str(group['output_tokens'])+'个输出token；首token来自prefill，Decode TPS只统计之后'+str(group['output_tokens']-1)+'个token。标准CCD约束与合成敏感性时序按保存的来源区分；零值表示关闭该项约束，不表示器件真实延迟为零。具体执行值如下。</p>')
+        parts.append(table(('配置ID','实际分组与时序'),[(v['profile'],v['label_zh']) for v in variants]))
+        parts.append(table(('上下文','KV放置','基准分组Decode TPS','分组控制Decode TPS','非零组时序Decode TPS','非零/控制'),[
+            (r['prompt_tokens'],r['placement'],number(r['baseline_decode_tps'],2),number(r['geometry_control_decode_tps'],2),
+             number(r['bank_group_decode_tps'],2),number(r['timing_over_control_tps'],5)) for r in group.get('comparisons',[])]))
+        records=[(v['profile'],r['owner'],r['config']) for v in variants for r in v['records']]
+        parts.append(table(('配置','owner','代际','stack','通道/stack','伪通道/通道','分组×bank/伪通道','行 B','burst B','容量 bytes'),[
+            (profile,owner,config.get('generation') or '未记录',config.get('stacks'),config.get('channels'),config.get('pseudo_channels_per_channel'),
+             str(config.get('bank_groups_per_rank'))+'×'+str(config.get('banks_per_group')),
+             config.get('row_bytes'),config.get('burst_bytes'),config.get('capacity_bytes'))
+            for profile,owner,config in records]))
+        parts.append(table(('配置','owner','列命令同/异组 ns','ACT同/异组 ns','四ACT窗口 ns','写结束→读同/异组 ns'),[
+            (profile,owner,
+             '/'.join(number(config.get(k)) for k in _BANK_GROUP_TIMING_FIELDS[0:2]),
+             '/'.join(number(config.get(k)) for k in _BANK_GROUP_TIMING_FIELDS[2:4]),
+             number(config.get('four_activate_window_ns')),
+             '/'.join(number(config.get(k)) for k in _BANK_GROUP_TIMING_FIELDS[5:7]))
+            for profile,owner,config in records]))
+        parts.append(table(('配置','owner','控制逻辑范围','时序验证','未知参数'),[
+            (profile,owner,config.get('metadata',{}).get('control_status'),
+             config.get('metadata',{}).get('timing_validation'),
+             '、'.join(config['metadata']['unknown_parameters'])
+             if isinstance(config.get('metadata',{}).get('unknown_parameters'),list) else None)
+            for profile,owner,config in records]))
+        parts.append(details('实际Core配置、来源、未知参数与对应结果行（保留同profile下的不同配置）',variants))
+        parts.append('<p>只有保存的metadata声明标准组织时，标签才写明HBM代际参考组织；参考组织不等于已识别的厂商器件，平坦分组也只是合成消融。来源、所选密度/层数、未知的目标器件参数和寻址/时序简化以保存的metadata为准。非零组时序未作厂商校准；小Dense的倍率不能外推为8B/70B性能。</p>')
+    elif n==12:
         parts.append('<p>先使完整服务的KV介质等效，再分别加入读延迟、写限制和有限并发。路径实验固定链路带宽总和，权重与冷KV采用固定物理分区；QoS指静态带宽分配和请求优先级。</p>')
         parts.append(table(('实验','TPS','相对理想HBM TPS','中继写/读B','后到请求TTFT µs'),[
             (r['id'],number(r['node_tps'],2),number(r.get('relative_to_ideal_hbm',{}).get('tps_ratio'),5),
@@ -92,15 +180,16 @@ def extension_tables(group):
 
 def render_report(report):
     groups=report['groups']
+    output_dir=esc(report.get('output_directory','artifacts/hbf_hbm'))
     service=[r for g in groups for r in g.get('rows',[]) if r.get('mode')=='full_operator_serving']
     rejected=[r for g in groups for r in g.get('rows',[]) if r.get('mode') in {'configuration_rejected','physical_capacity_rejected'} or r.get('status')=='configuration_rejected']
     parts=['<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HBF/HBM 内部仿真实验审计报告</title>',
            '<style>body{background:#f4f7fa;color:#193446;font:15px/1.7 system-ui,"Microsoft YaHei",sans-serif;margin:0}main{max-width:1420px;margin:auto;padding:32px 24px 80px}h1,h2{color:#123d59}h2{margin-top:36px;border-top:2px solid #d5e0e8;padding-top:22px}.lead{padding:20px;background:#dfedf5;border-left:5px solid #387da9}.scroll{overflow-x:auto}table{border-collapse:collapse;background:white;width:100%;margin:15px 0;font-size:13px}td,th{padding:9px;border:1px solid #cedbe4;text-align:left;vertical-align:top}th{background:#e7eff5;white-space:nowrap}a{color:#146eaf}pre{background:white;padding:15px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}details{margin:12px 0}code{font-size:12px}nav{display:flex;gap:15px;flex-wrap:wrap}.muted{color:#526b7b}.bad{background:#fff0db;padding:15px}</style></head><body><main>',
            '<h1>HBF/HBM：内部仿真实验与审计结果</h1>',
            '<p class="lead">机制检查与研究覆盖分别报告。当前完整服务结果 '+str(len(service))+' 行，配置或物理容量拒绝 '+str(len(rejected))+' 行；其余为微基准或明确假设下的分析。所有数值均为仿真或条件估计，尚无独立硬件预测精度验证。</p>',
-           '<p><a href="results.json">完整结果 JSON</a> · <a href="acceptance.json">后端机制检查</a> · <a href="profiles.json">文献参数化探针</a> · <a href="core_path_audit.md">旧结果的Core路径审计</a> · <a href="gap_audit.html">修改前的审计清单（历史状态）</a></p>',
-           '<nav><a href="#decode">独立Decode结果</a><a href="#core">Core执行口径</a><a href="#coverage">审计完成清单</a><a href="#performance">完整服务性能</a><a href="#memory">内存与迁移指标</a><a href="#micro">各组实验</a><a href="#economics">购置成本与磨损</a><a href="#remaining">范围与限制</a></nav>',
-           '<p class="muted">完整复跑：<code>python -B scripts/hbf_hbm_experiments.py --output-dir artifacts/hbf_hbm --workers 4</code>；生成图表：<code>python -B scripts/plot_hbf_hbm_results.py --update-report</code>。使用项目虚拟环境。时间原始单位 ns，带宽十进制 GB/s，容量 bytes；表中延迟已转换为 ms/µs。</p>',
+           '<p><a href="results.json">完整结果 JSON</a> · <a href="acceptance.json">后端机制检查</a> · <a href="profiles.json">文献参数化探针</a></p>',
+           '<nav><a href="#decode">独立Decode结果</a><a href="#bank-group">Bank group对照</a><a href="#core">Core执行口径</a><a href="#coverage">审计完成清单</a><a href="#performance">完整服务性能</a><a href="#memory">内存与迁移指标</a><a href="#micro">各组实验</a><a href="#economics">购置成本与磨损</a><a href="#remaining">范围与限制</a></nav>',
+           '<p class="muted">完整复跑：<code>python -B scripts/hbf_hbm_experiments.py --output-dir &quot;'+output_dir+'&quot; --workers 4</code>；生成图表：<code>python -B scripts/plot_hbf_hbm_results.py --input &quot;'+output_dir+'/results.json&quot; --output &quot;'+output_dir+'/figures&quot; --update-report</code>。使用项目虚拟环境。时间原始单位 ns，带宽十进制 GB/s，容量 bytes；表中延迟已转换为 ms/µs。</p>',
            '<h2 id="coverage">修改和覆盖范围</h2><ul>'+''.join('<li>'+esc(x)+'</li>' for x in report.get('audit_fixes',[]))+'</ul>',
            table(('实验组','检查状态','结果行数','检查支持的范围'),[(g.get('title',g['id']),g['status'],len(g.get('rows',[])),supported_scope(g)) for g in groups])]
     study=next((g for g in groups if g['id'].startswith('09')),None)
@@ -109,6 +198,7 @@ def render_report(report):
         '<p>GPU侧继续使用聚合简化模型估算计算和启动时间。上层算子与KV管理器生成实际读写请求；'
         'HBM统一交给DRAM Core处理地址、行/Bank、命令和数据通道、排队与完成时间；HBF交给NAND Core处理页读取与编程。'
         'KV迁移按源内存读取、链路传输、目标内存写入的依赖顺序执行。调度器组合这些依赖与重叠，不再额外叠加HBM聚合带宽耗时。</p>')
+    parts.append('<p>标准参考几何不等于完整JEDEC协议仿真：当前仍未建模刷新、SID专用时序、同一物理通道两个伪通道的命令共享，以及两个1KiB有效寻址页共享一次2KiB激活的命中行为。具体器件型号、速度档和阵列时序仍是未知项或明确的分析假设，实际取值和来源保存在每点Core配置中。</p>')
     if core.get('all_full_serving_hbm_verified'):
         parts.append('<p><strong>本报告 '+str(core['verified_hbm_dram_core_rows'])+' / '+str(core['full_serving_rows'])+
             ' 个完整服务点均记录到实际HBM DRAM Core执行。</strong>证据来自持久在线服务运行时的实际提交，排除规划预演、隔离重放与服务启动前初始化。'
@@ -204,9 +294,12 @@ def render_report(report):
                 '因此8B更容易暴露HBF读取代价，70B较长的计算服务则可覆盖大部分读取；约6.3ms/token的附加时间随共同计算时间增加而被稀释。'
                 '这不能推成HBF对大模型影响普遍更小的规律。逐点Core计数确认70B确实读取了HBF；当前结果未保存逐算子关键路径，不能把全部附加时间精确归因给写入。</p>')
         if decode.get('capacity_baseline_observations'):
-            parts.append('<h3>原库存的容量负对照</h3>'+table(('模型 / 放置','输入/输出','原HBM GiB','失败的单次申请 GiB','结果'),[
+            parts.append('<h3>原库存的容量负对照</h3>'+table(('模型 / 放置','输入/输出','原HBM GiB','失败的单次申请 GiB','总空闲 GiB','最大连续空闲 GiB','结果'),[
                 (r['model_id']+' / '+r['placement'],str(r['prompt_tokens'])+'/'+str(r['output_tokens_per_request']),
-                 r['hbm_capacity_bytes']/1024**3,r['failed_allocation_bytes']/1024**3,r['reason'])
+                 r['hbm_capacity_bytes']/1024**3,r['failed_allocation_bytes']/1024**3,
+                 number(r['capacity_failure']['free_bytes_at_failure']/1024**3) if r.get('capacity_failure',{}).get('free_bytes_at_failure') is not None else None,
+                 number(r['capacity_failure']['largest_free_extent_bytes']/1024**3) if r.get('capacity_failure',{}).get('largest_free_extent_bytes') is not None else None,
+                 r['reason'])
                 for r in decode['capacity_baseline_observations']])+
                 '<p>失败发生在规划阶段的物理地址分配，没有完成服务，不产生TPS。单次申请失败不等于整个系统峰值需求；1TiB是本次共同对照配置，不宣称最小可行容量。</p>')
         core_rows=[]
@@ -238,7 +331,7 @@ def render_report(report):
         '<p>A=HBM 权重与 KV；B=全部 KV 在 HBF；C=HBM 活跃 KV/HBF 冷 KV；D=HBF 权重/HBM KV。具体目标与控制面实际放置分别保存在结果中。对照约束见每个场景；相同 GPU 或相同槽数不代表相同购置成本和面积。</p>',
         '<p>补充对照 E=主机DRAM中的KV，F=NVMe SSD冷KV，G=CXL连接DRAM中的KV。第9组G是单GPU本地对照，第15组另建多GPU共享池和机架网络变体，路径假设分别保存。</p>',
         '<p>当前未提供真实 token-ID 轨迹；解析 embedding 的远端读取若超过权重表大小，使用明确的循环地址假设保留重复读流量，不扩大权重表驻留容量。不能据此声称复现了真实 token 局部性。</p>',
-        '<p>组 02：1 层 hidden=256、4 Q 头/2 KV 头、INT8 小 Dense，每请求 4 输出 token。HBM/HBF 端口峰值同为 1600 GB/s，HBM 效率为 75%；HBF 默认 4µs 读、75µs program、16KiB 页、64 个有效并行单元、16GB/s 写。内部通道按非瓶颈参数假设，3TB/s 端口扫描仍受 1.6TB/s 互联限制。named 模型和研究扩展使用各行实际参数，不能套用此小模型说明。</p>'])
+        '<p>组 02：1 层 hidden=256、4 Q 头/2 KV 头、INT8 小 Dense，每请求 4 输出 token。HBM/HBF 端口峰值同为 1600 GB/s，HBM完成时间由DRAM Core计算，不再额外乘聚合效率系数；HBF 默认 4µs 读、75µs program、16KiB 页、64 个有效并行单元、16GB/s 写。内部通道按非瓶颈参数假设，3TB/s 端口扫描仍受 1.6TB/s 互联限制。named 模型和研究扩展使用各行实际参数，不能套用此小模型说明。</p>'])
     parts.append(table(('ID / 架构','模型','输入/输出','请求数','完成/拒绝','并发上限/实际batch','TPS','初始化后TPS','合格TPS','prefill token/s','decode token/s','初始化µs'),[
         (r['id']+' / '+r['placement'],r['model'],str(r['prompt_tokens'])+'/'+str(r['output_tokens_per_request']),r['request_count'],str(r['completed_requests'])+'/'+str(r['rejected_requests']),str(r['requested_concurrency'])+'/'+str(r['max_observed_batch_requests']),number(r['node_tps'],2),number(r.get('runtime_tps'),2),number(r['goodput_tps'],2),number(r.get('phase_service_rates',{}).get('prefill',{}).get('wall_clock_tokens_per_second'),2),number(r.get('phase_service_rates',{}).get('decode',{}).get('wall_clock_tokens_per_second'),2),number(r.get('measurement_windows',{}).get('initialization_ns',0)/1000)) for r in service]))
     pairs=[]

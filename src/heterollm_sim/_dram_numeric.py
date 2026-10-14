@@ -177,7 +177,9 @@ def _burst_range(cursor, target, row, unit, arrival, read, geometry, durations,
 def run_numeric(first, stop, arrival, read, geometry, durations, shared,
                 bankrows, bankready, bankactivation, banktouched, calendar, busy, moved,
                 directions, last_start, last_end, touched):
-    lanes, banks, inner, bursts_per_row, rows_per_bank, dies_per_stack = geometry
+    # Independent stack interfaces are already flattened into ``lanes``;
+    # ``unit`` below spans only the remaining addressable array dimensions.
+    lanes, banks, inner, bursts_per_row, rows_per_bank, addressable_dies = geometry
     period = lanes * banks * inner
     row_span = lanes * banks * bursts_per_row
     total_banks = len(bankrows)

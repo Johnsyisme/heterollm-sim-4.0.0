@@ -11,16 +11,88 @@ import json
 import math
 from pathlib import Path
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "src")]
 from hbf_hbm_experiments import group, percentiles
-from hbf_hbm_serving_study import run_case, StudyCasesError
+from hbf_hbm_serving_study import run_case, StudyCasesError, POINT_RESULT_VERSION
 
 MODELS = ("llama3_1-8b", "llama3_1-70b")
 CONTEXTS = (2048, 32768, 131072, 1048576)
 ARCHITECTURES = ("A_hbm_only", "B_all_kv_hbf")
 OUTPUT_TOKENS = 64
+# Share the serving hardware/execution revision so a geometry change also
+# invalidates Decode points and their capacity control.
+EXECUTION_CONTRACT = f"physical_core_unified_hardware_catalog_v3/serving-points-v{POINT_RESULT_VERSION}"
+CAPACITY_BASELINE_CONTRACT = EXECUTION_CONTRACT + "/capacity-baseline-v1"
+CAPACITY_BASELINE_FILENAME = "capacity-baseline-70b-1m-512gib.json"
+CAPACITY_BASELINE_HBM_BYTES = 512 * 1024 ** 3
+
+
+def capacity_baseline_parameters():
+    # Omit the capacity override deliberately: this is the original inventory,
+    # not point_parameters()'s enlarged A/B comparison.
+    return dict(model_id="llama3_1-70b", prompt=1048576, batch=1, output=64)
+
+
+def capacity_baseline_checks(row):
+    failure = row.get("capacity_failure", {})
+    return {
+        "current_execution_contract": row.get("memory_execution_contract") == CAPACITY_BASELINE_CONTRACT,
+        "original_workload_and_inventory": row.get("parameters") == capacity_baseline_parameters()
+            and row.get("placement") == "A_hbm_only"
+            and row.get("hbm_capacity_bytes") == CAPACITY_BASELINE_HBM_BYTES,
+        "actual_physical_capacity_rejection": row.get("mode") == "physical_capacity_rejected"
+            and row.get("attempted_serving") is True and row.get("executed_serving") is False
+            and failure.get("exception_type") == "AllocationError"
+            and failure.get("classification") == "physical_allocator_no_contiguous_extent"
+            and failure.get("capacity_bytes") == CAPACITY_BASELINE_HBM_BYTES
+            and failure.get("requested_allocation_bytes", 0) > 0
+            and row.get("failed_allocation_bytes") == failure.get("requested_allocation_bytes"),
+        "rejection_has_no_throughput": row.get("node_tps") is None and row.get("decode_tps") is None,
+    }
+
+
+def run_capacity_baseline():
+    """Really attempt the original 70B/1M/64-output A inventory once.
+
+    A normal completion or another rejection remains a failed negative-control
+    check; neither is relabelled as the expected physical allocation failure.
+    Unclassified exceptions propagate from run_case.
+    """
+    started = time.perf_counter()
+    row = run_case("A_hbm_only", row_id="decode-capacity-llama3_1-70b-1048576-A_hbm_only-64-512GiB",
+                   **capacity_baseline_parameters())
+    failure = row.get("capacity_failure", {})
+    observed_capacity = row.get("fixed_inventory", {}).get("hbm0", {}).get("capacity_bytes")
+    row.update(model_id="llama3_1-70b", prompt_tokens=1048576,
+        output_tokens_per_request=64, hbm_capacity_bytes=observed_capacity,
+        failed_allocation_bytes=failure.get("requested_allocation_bytes"),
+        exception_type=failure.get("exception_type"), failure_stage=failure.get("failure_stage"),
+        decode_tps=None, wall_seconds=time.perf_counter()-started,
+        memory_execution_contract=CAPACITY_BASELINE_CONTRACT,
+        evidence="Fresh run_case execution of the original 512 GiB inventory, 70B model, 1M input and 64 requested output tokens; no cached or historical failure is used by this entrypoint.",
+        interpretation="A failed contiguous allocation does not establish total peak demand or minimum feasible hardware capacity; occupancy and fragmentation observations are retained in capacity_failure.")
+    row.setdefault("reason", "Original inventory completed serving; the expected capacity rejection was not reproduced.")
+    row["capacity_baseline_checks"] = capacity_baseline_checks(row)
+    row["status"] = "passed" if all(row["capacity_baseline_checks"].values()) else "failed"
+    return row
+
+
+def load_or_run_capacity_baseline(*, point_dir=None, resume=False):
+    path = Path(point_dir) / CAPACITY_BASELINE_FILENAME if point_dir else None
+    if resume and path and path.exists():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if all(capacity_baseline_checks(saved).values()):
+            return saved
+    row = run_capacity_baseline()
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(row, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+    print(json.dumps({"capacity_baseline": row["id"], "status": row["status"],
+                      "mode": row["mode"], "wall_seconds": row["wall_seconds"]}), flush=True)
+    return row
 
 
 def point_parameters(point):
@@ -111,7 +183,7 @@ def run_decode_point(point):
         raise RuntimeError("Decode point was rejected: "+str(row))
     row["decode_measurement"] = observed
     row["decode_core_checks"] = core_checks(row)
-    row["memory_execution_contract"] = "physical_hbm_dram_core_and_hbf_nand_core_v1"
+    row["memory_execution_contract"] = EXECUTION_CONTRACT
     return row
 
 
@@ -148,7 +220,7 @@ def summarize_decode(rows, *, models=MODELS, contexts=CONTEXTS, output=OUTPUT_TO
         ["GPU计算与发射仍使用现有聚合简化模型；HBM/HBF内存完成时间来自各自Core。",
          "参考GPU的单token attention按MMA矩阵块扩展计量，并允许计算与物理访存重叠；模型间的Decode倍率差异受这些假设影响，不是HBF对大模型影响普遍更小的规律。",
          "128K加输出略超原生上下文，1M为架构压力外推，不代表模型语义有效性。",
-         "70B/1M的A/B共同使用1TiB HBM容纳真实KV与prefill工作空间；其余点为512GiB。容量扩展不改变带宽/时序参数。",
+         "70B/1M的A/B共同使用1TiB HBM容纳真实KV与prefill工作空间；其余点为512GiB。统一入口按标准参考组织选择覆盖容量的堆叠与密度；聚合带宽与显式阵列延迟保持不变，各通路带宽和派生突发间隔随几何变化，实际值见Core配置。",
          "每点一个请求、固定输出长度；TBT分位数是本次样本统计，不是生产尾延迟保证。"],
         comparisons=comparisons,models=list(models),contexts=list(contexts),output_tokens=output,
         execution_contract="HBM always DramCore; HBF NandCore; GPU compute/launch approximation retained")
@@ -165,7 +237,8 @@ def run_decode_study(*,workers=2,models=MODELS,contexts=CONTEXTS,output=OUTPUT_T
         saved=path(point)
         if resume and saved and saved.exists():
             row=json.loads(saved.read_text(encoding='utf-8'))
-            if (row.get('memory_execution_contract')=='physical_hbm_dram_core_and_hbf_nand_core_v1'
+            if (row.get('memory_execution_contract')==EXECUTION_CONTRACT
+                    and row.get('core_execution_audit',{}).get('executed_physical_configurations')
                     and row.get('parameters')==point_parameters(point) and all(core_checks(row).values())):
                 rows.append(row);continue
         pending.append(point)
@@ -186,9 +259,13 @@ def run_decode_study(*,workers=2,models=MODELS,contexts=CONTEXTS,output=OUTPUT_T
     if failures:
         raise StudyCasesError(failures,rows) from failures[0][1]
     result=summarize_decode(rows,models=models,contexts=contexts,output=output)
-    if point_dir:
-        result['capacity_baseline_observations']=[json.loads(path.read_text(encoding='utf-8'))
-            for path in sorted(point_dir.glob('capacity-baseline-*.json'))]
+    if "llama3_1-70b" in models and 1048576 in contexts and output == 64:
+        baseline = load_or_run_capacity_baseline(point_dir=point_dir, resume=resume)
+        result["capacity_baseline_observations"] = [baseline]
+        result["checks"]["original_inventory_negative_control_reproduced"] = all(capacity_baseline_checks(baseline).values())
+        result["status"] = "passed" if all(result["checks"].values()) else "failed"
+        if result["status"] != "passed":
+            result["capability"]["supported"] = []
     return result
 
 
@@ -200,8 +277,19 @@ def main():
     parser.add_argument('--contexts',default=','.join(map(str,CONTEXTS)))
     parser.add_argument('--output-tokens',type=int,default=OUTPUT_TOKENS)
     parser.add_argument('--resume',action='store_true',help='Reuse only this unchanged physical-Core decode study’s saved points')
+    parser.add_argument('--capacity-baseline-only',action='store_true',
+        help='Attempt only the original 70B/1M/64-output 512 GiB A inventory; --output is this observation JSON, not the group summary')
     args=parser.parse_args()
     if not 1<=args.workers<=8 or args.output_tokens<2:parser.error('workers must be 1..8 and output-tokens >= 2')
+    if args.capacity_baseline_only:
+        if args.output == parser.get_default('output'):
+            parser.error('--capacity-baseline-only requires a separate --output file; it cannot overwrite the group summary')
+        result = run_capacity_baseline()
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+        print(json.dumps({'status':result['status'],'mode':result['mode'],
+                          'wall_seconds':result['wall_seconds'],'output':str(args.output)},ensure_ascii=False))
+        return 0 if result['status']=='passed' else 1
     result=run_decode_study(workers=args.workers,models=tuple(args.models.split(',')),contexts=tuple(map(int,args.contexts.split(','))),
         output=args.output_tokens,point_dir=args.output.parent/'decode_points',resume=args.resume)
     args.output.parent.mkdir(parents=True,exist_ok=True)

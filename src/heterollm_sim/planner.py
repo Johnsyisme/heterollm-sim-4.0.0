@@ -22,6 +22,7 @@ from graphlib import CycleError, TopologicalSorter
 from typing import Callable, Dict, FrozenSet, Hashable, Iterator, List, Optional, Sequence, Set, Tuple
 
 from . import __version__
+from .memory_service import DRAM_OPTIONAL_COUNTER_FIELDS, DRAM_OPTIONAL_TIME_FIELDS, DRAM_SERVICE_TIME_SCOPE
 from .kernel_query_ledger import summarize_kernel_queries
 from .config import ScenarioConfig
 from .attention_bias import projection_bias_workload, resolve_attention_qkv_bias
@@ -29442,10 +29443,10 @@ def _summarize_dram_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
     fields = ("logical_bytes", "logical_read_bytes", "logical_write_bytes",
               "physical_read_bytes", "physical_write_bytes", "physical_bytes", "burst_count",
               "row_hits", "row_misses", "row_conflicts", "queue_wait_ns", "service_ns",
-              "read_write_switches", "refresh_wait_ns", "turnaround_wait_ns")
-    continuous_fields = {"queue_wait_ns", "service_ns", "refresh_wait_ns", "turnaround_wait_ns"}
+              *DRAM_OPTIONAL_COUNTER_FIELDS)
+    continuous_fields = {"queue_wait_ns", "service_ns", *DRAM_OPTIONAL_TIME_FIELDS}
     totals = {key: 0.0 if key in continuous_fields else 0 for key in fields}
-    optional_observed = {key: 0 for key in ("read_write_switches", "refresh_wait_ns", "turnaround_wait_ns")}
+    optional_observed = {key: 0 for key in DRAM_OPTIONAL_COUNTER_FIELDS}
     physical_rows = 0
     task_ids = set()
     resources: Dict[str, Dict[str, object]] = {}
@@ -29477,6 +29478,7 @@ def _summarize_dram_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
         "logical_bytes": int(round(totals["logical_bytes"])),
         "resource_totals": dict(sorted(resources.items())),
         "accounting_semantics": "row state, burst traffic and resource timing from physical transaction results",
+        "service_time_scope": DRAM_SERVICE_TIME_SCOPE,
     }
 
 

@@ -85,7 +85,8 @@ class DramCoreDeepSemanticsTests(unittest.TestCase):
         reference_checks.DramCoreSemanticsTests().assert_matches(reference, (expected,), core, (actual,))
 
     def test_large_legal_bank_geometry_avoids_full_resource_table(self):
-        c = DramConfig(channels=2, banks_per_group=10000, rows_per_bank=2, row_bytes=256)
+        c = DramConfig(channels=2, banks_per_group=dram_module.MAX_ACCELERATED_BANKS // 2 + 1,
+                       rows_per_bank=2, row_bytes=256)
         core = DramCore(c, capture_details=False)
         self.assertFalse(core._can_accelerate())
         with patch("heterollm_sim.dram_core._mapping_cycle", side_effect=AssertionError("full geometry table")):

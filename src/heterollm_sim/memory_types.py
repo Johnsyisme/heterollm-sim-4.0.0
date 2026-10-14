@@ -55,6 +55,17 @@ DRAM_BANK_GROUP_TIMING_FIELDS = (
     "write_to_read_same_group_ns", "write_to_read_different_group_ns",
 )
 
+# HBM command occupancy and array constraints are separate quantities. These
+# fields are optional on legacy analytical DRAM inputs; the JEDEC HBM command
+# mode requires an explicitly authored clock and command format.
+HBM_CONTROL_TIMING_FIELDS = (
+    "command_clock_ns", "activate_command_cycles", "precharge_command_cycles",
+    "column_command_cycles", "activate_to_read_ns", "activate_to_write_ns",
+    "precharge_to_activate_ns", "minimum_active_ns", "maximum_active_ns", "activate_cycle_ns",
+    "read_to_precharge_ns", "write_to_precharge_ns", "column_different_sid_ns",
+    "read_to_write_command_ns", "precharge_to_precharge_ns", "refresh_interval_ns", "refresh_cycle_ns",
+)
+
 
 def _coerce_dram_kind(value: Any, generation: Any = "") -> tuple[MemoryKind, str]:
     """Canonicalize DRAM family and GDDR generation without guessing NAND."""
@@ -201,6 +212,31 @@ class DramConfig:
     four_activate_window_ns: float = 0.0
     write_to_read_same_group_ns: float = 0.0
     write_to_read_different_group_ns: float = 0.0
+    # Addressable bank/row organization can already include all stacked dies.
+    # Physical die count then remains descriptive and must not multiply it.
+    # Defaults retain the original generic DRAM organization and shared bus.
+    bank_geometry_scope: str = "per_die"
+    stack_interface_mode: str = "shared"
+    control_mode: str = "legacy"
+    command_clock_ns: float = 0.0
+    activate_command_cycles: float = 0.0
+    precharge_command_cycles: float = 0.0
+    column_command_cycles: float = 0.0
+    activate_to_read_ns: float = 0.0
+    activate_to_write_ns: float = 0.0
+    precharge_to_activate_ns: float = 0.0
+    minimum_active_ns: float = 0.0
+    maximum_active_ns: float = 0.0
+    activate_cycle_ns: float = 0.0
+    read_to_precharge_ns: float = 0.0
+    write_to_precharge_ns: float = 0.0
+    column_different_sid_ns: float = 0.0
+    read_to_write_command_ns: float = 0.0
+    precharge_to_precharge_ns: float = 0.0
+    activated_row_msb: Optional[int] = None
+    refresh_policy: str = "disabled"
+    refresh_interval_ns: float = 0.0
+    refresh_cycle_ns: float = 0.0
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "DramConfig":
@@ -221,6 +257,51 @@ class DramConfig:
         object.__setattr__(self, "kind", kind)
         if generation:
             object.__setattr__(self, "generation", generation)
+        if self.bank_geometry_scope not in {"per_die", "per_stack"}:
+            raise ValueError("bank_geometry_scope must be per_die or per_stack")
+        if self.stack_interface_mode not in {"shared", "independent"}:
+            raise ValueError("stack_interface_mode must be shared or independent")
+        if self.control_mode not in {"legacy", "jedec_hbm"}:
+            raise ValueError("control_mode must be legacy or jedec_hbm")
+        if self.refresh_policy not in {"disabled", "all_bank"}:
+            raise ValueError("refresh_policy must be disabled or all_bank")
+        for name in HBM_CONTROL_TIMING_FIELDS:
+            _nonnegative(name, getattr(self, name))
+        if self.activated_row_msb is not None:
+            if (isinstance(self.activated_row_msb, bool)
+                    or not isinstance(self.activated_row_msb, int)
+                    or self.activated_row_msb < 0):
+                raise ValueError("activated_row_msb must be a non-negative integer or None")
+        if self.control_mode == "jedec_hbm":
+            _positive_int("rows_per_bank", self.rows_per_bank)
+            if kind is not MemoryKind.HBM or generation not in {"HBM2", "HBM2E", "HBM3", "HBM3E", "HBM4"}:
+                raise ValueError("jedec_hbm control requires a supported HBM generation")
+            if self.command_clock_ns <= 0:
+                raise ValueError("jedec_hbm control requires a positive command_clock_ns")
+            hbm2 = generation in {"HBM2", "HBM2E"}
+            expected = (2.0, 1.0, 1.0) if hbm2 else (1.5, 0.5, 1.0)
+            actual = (self.activate_command_cycles, self.precharge_command_cycles, self.column_command_cycles)
+            if actual != expected:
+                raise ValueError("jedec_hbm command occupancy conflicts with generation (ACT/PRE/RD-WR cycles)")
+            latency_limits = ((3, 48), (1, 16)) if hbm2 else (((17, 90), (4, 19)) if generation == "HBM4" else ((4, 63), (4, 16)))
+            for name, (minimum, maximum) in zip(("read_latency_ns", "write_latency_ns"), latency_limits):
+                cycles = _nonnegative(name, getattr(self, name)) / self.command_clock_ns
+                if not math.isclose(cycles, round(cycles), rel_tol=0, abs_tol=1e-9) or not minimum <= round(cycles) <= maximum:
+                    raise ValueError(f"jedec_hbm {name} must encode {minimum}..{maximum} whole command clocks; actual vendor support is separate")
+            if (self.pseudo_channels_per_channel != 2 or self.subchannels_per_channel != 1
+                    or self.ranks_per_channel != 1 or self.data_lanes not in (None, self.channels * 2)
+                    or self.burst_bytes != 32 or self.data_width_bits != (64 if hbm2 else 32)
+                    or self.row_bytes != 1024 or self.bank_geometry_scope != "per_stack"
+                    or self.stack_interface_mode != "independent"):
+                raise ValueError("jedec_hbm control requires PC-mode HBM geometry and independent stack interfaces")
+            if self.activated_row_msb != (None if hbm2 else (self.rows_per_bank - 1).bit_length() - 1):
+                raise ValueError("jedec_hbm activated_row_msb must identify the effective row address MSB")
+        elif self.refresh_policy != "disabled":
+            raise ValueError("automatic refresh requires jedec_hbm control")
+        if self.refresh_policy == "all_bank" and (self.refresh_interval_ns <= 0 or self.refresh_cycle_ns <= 0):
+            raise ValueError("all_bank refresh requires positive refresh_interval_ns and refresh_cycle_ns")
+        if 0 < self.maximum_active_ns < self.minimum_active_ns:
+            raise ValueError("maximum_active_ns cannot be shorter than minimum_active_ns")
         for name in ("channels", "subchannels_per_channel", "pseudo_channels_per_channel", "stacks", "dies_per_stack", "ranks_per_channel", "bank_groups_per_rank", "banks_per_group", "rows_per_bank", "row_bytes", "burst_bytes", "data_width_bits"):
             _positive_int(name, getattr(self, name))
         _positive_int("max_outstanding_requests", self.max_outstanding_requests)
@@ -294,6 +375,11 @@ class DramConfig:
         )
         if physical_bandwidth <= 0 or not math.isfinite(physical_bandwidth):
             raise ValueError("physical interface bandwidth must be finite and positive")
+        if self.control_mode == "jedec_hbm":
+            transfers_per_ck = 2 if generation in {"HBM2", "HBM2E"} else 4
+            expected_clock = transfers_per_ck * self.data_width_bits * self.lane_count / (8.0 * physical_bandwidth)
+            if not math.isclose(self.command_clock_ns, expected_clock, rel_tol=1e-10):
+                raise ValueError("command_clock_ns conflicts with the JEDEC CK/DQ ratio and physical interface bandwidth")
         if any(value is not None and value > physical_bandwidth
                for value in (self.read_bandwidth_gb_s, self.write_bandwidth_gb_s)):
             raise ValueError("directional bandwidth cannot exceed the physical interface bandwidth")
@@ -314,12 +400,25 @@ class DramConfig:
         return self.ranks_per_channel * self.bank_groups_per_rank * self.banks_per_group
 
     @property
-    def lane_count(self) -> int:
+    def lanes_per_stack(self) -> int:
         # data_lanes is the authoritative escape hatch for non-multiplicative
         # package organizations (notably HBM pseudo-channel implementations).
         # Stacked dies add capacity and array choices; they do not imply new
         # external data wires.  Use data_lanes for an explicitly wired design.
         return self.data_lanes or (self.channels * self.subchannels_per_channel * self.pseudo_channels_per_channel)
+
+    @property
+    def lane_count(self) -> int:
+        return self.lanes_per_stack * (self.stacks if self.stack_interface_mode == "independent" else 1)
+
+    @property
+    def addressable_die_count(self) -> int:
+        return 1 if self.bank_geometry_scope == "per_stack" else self.dies_per_stack
+
+    @property
+    def addressable_stack_count(self) -> int:
+        # Independent stack interfaces are already represented in lane_count.
+        return 1 if self.stack_interface_mode == "independent" else self.stacks
 
     @property
     def effective_lane_bandwidth_gb_s(self) -> float:
@@ -350,7 +449,7 @@ class DramConfig:
 
     @property
     def computed_capacity_bytes(self) -> int:
-        return self.stacks * self.dies_per_stack * self.lane_count * self.bank_count * self.rows_per_bank * self.row_bytes
+        return self.addressable_stack_count * self.addressable_die_count * self.lane_count * self.bank_count * self.rows_per_bank * self.row_bytes
 
     @property
     def effective_capacity_bytes(self) -> int:

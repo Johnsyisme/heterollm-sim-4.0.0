@@ -25,7 +25,8 @@ import hbf_hbm_invariants as invariants
 import hbf_hbm_metrics as study_metrics
 from hbf_hbm_core_audit import CoreExecutionAudit
 from heterollm_sim.ir import LayerSpec, ModelSpec, RequestSpec, build_model_graph_from_layer_specs
-from heterollm_sim.memory_types import AccessRequest, Operation, make_hbf_config, parse_physical_memory_config
+from heterollm_sim.memory_types import AccessRequest, Operation, parse_physical_memory_config
+from heterollm_sim.physical_contract import reconfigure_physical_config
 from heterollm_sim.nand_core import NandCore
 from heterollm_sim.reporting import report_dict, run_scenario
 from heterollm_sim.serving import compile_serving_plan, RequestStatus
@@ -71,14 +72,14 @@ def synthetic_profile():
 def scenario(*, hbf=False, prompt=128, count=4, output=8, slots=None,
              interval_ns=0., kv_budget=None, read_gb_s=1600., write_gb_s=16.,
              units=64, read_us=4., program_us=75., page_bytes=PAGE,
-             link_gb_s=1600.):
+             link_gb_s=1600., hbm_timing_profile="hbm3e_reference"):
     p = synthetic_profile()
     p = replace(p, bandwidth={**p.bandwidth, "hbf_read_gb_s": read_gb_s,
                 "hbf_write_gb_s": write_gb_s, "interconnect_bandwidth_gbps": link_gb_s*8}, hardware={**p.hardware,
                 "effective_parallel_units": units}, latency={**p.latency,"hbf_read_us":read_us,
                 "hbf_write_us":program_us}, granularity={**p.granularity,"page_bytes":page_bytes})
     s = profiles._full_backend_scenario(p, use_hbf=hbf, request_count=count,
-        prompt_tokens=prompt, output_tokens=output)
+        prompt_tokens=prompt, output_tokens=output, hbm_timing_profile=hbm_timing_profile)
     layers = (LayerSpec("dense0", "dense", 256, 512, 4, kv_heads=2,
               dtype="int8", quantization="w8a8", weight_bytes=655360),)
     model = ModelSpec(name="synthetic-small-dense", graph=build_model_graph_from_layer_specs(
@@ -96,7 +97,13 @@ def scenario(*, hbf=False, prompt=128, count=4, output=8, slots=None,
         physical = parse_physical_memory_config(source.metadata["physical_memory_config"])
         device_id = "hbf0" if hbf else "hbm_kv"
         metadata = {k:v for k,v in source.metadata.items() if k != "memory_service"}
-        metadata["physical_memory_config"]=replace(physical,capacity_bytes=kv_budget)
+        metadata["physical_memory_config"] = (
+            reconfigure_physical_config(physical,
+                overrides={"capacity_bytes":kv_budget},expand_geometry=True) if hbf else
+            profiles._hbm_physical_config(capacity_bytes=kv_budget,
+                read_gb_s=physical.directional_bandwidth_gb_s("read"),
+                write_gb_s=physical.directional_bandwidth_gb_s("write"),
+                profile_id=hbm_timing_profile))
         if not hbf:
             metadata["memory_service_owner"]="hbm_kv.hbm_fabric"
         device = replace(source, component_id=device_id, capacity_bytes=kv_budget,
@@ -112,7 +119,11 @@ def scenario(*, hbf=False, prompt=128, count=4, output=8, slots=None,
             components=[replace(c,ports=c.ports+(port,)) if c.component_id=="gpu0" else c for c in components]
             link=next(l for l in links if l.source_component=="gpu0" and l.target_component=="hbm0")
             links.append(replace(link,link_id="gpu-hbm-kv",source_port="hbm_kv",target_component="hbm_kv"))
-            registry["hbm"]["experiment-kv-hbm"]=replace(registry["hbm"][source.cost_profile_id],resource_id="hbm_kv.hbm_fabric")
+            kv_physical = metadata["physical_memory_config"]
+            registry["hbm"]["experiment-kv-hbm"]=replace(registry["hbm"][source.cost_profile_id],
+                resource_id="hbm_kv.hbm_fabric", parallel_lanes=kv_physical.lane_count,
+                transaction_bytes=kv_physical.burst_bytes,
+                max_outstanding_requests=kv_physical.max_outstanding_requests)
         s=replace(s,hardware=replace(s.hardware,components=tuple(components),links=tuple(links)),
             component_profiles=registry,placement=replace(s.placement,
             kv_policy=replace(s.placement.kv_policy,cache_component=device_id,allocation_policy="eager")))
@@ -170,6 +181,9 @@ def serving_row(s, row_id, *, placement=None, result_observer=None):
     return {
         "id": row_id, "mode": "full_operator_serving", "model": s.model.name,
         "core_execution_audit": core_execution_audit,
+        "hbm_protocol": {owner: profiles.hbm_protocol_summary(item["physical_config"])
+                         for owner, item in core_execution_audit.get("executed_physical_configurations", {}).items()
+                         if item["physical_config"].get("kind") == "HBM"},
         "placement": placement or ("B_all_kv_hbf" if s.placement.kv_policy.cache_component == "hbf0" else "A_hbm_only"),
         "resolved_placement": {"tensor_to_component":dict(result.scenario.placement.tensor_to_component),
             "op_to_component":dict(result.scenario.placement.op_to_component),
@@ -366,8 +380,10 @@ TITLES={1:"① 理想隔离",2:"② 固定工作量",3:"③ 容量与SLO",4:"④
         13:"⑬ 多轮agent与取消",14:"⑭ 磨损与物理页队列",
         15:"⑮ 多GPU与共享内存池",16:"⑯ 持续负载SLO与会话边界",
         17:"⑰ 扩展模型规格与工作负载",18:"⑱ 目标有效带宽与物理页扫描",
-        19:"⑲ DRAM/NAND Core下的独立Decode对照"}
+        19:"⑲ DRAM/NAND Core下的独立Decode对照",
+        20:"⑳ 统一参数入口下的Bank group Decode对照"}
 AUDIT_FIXES=[
+    "物理硬件使用统一目录与重配置入口，完整服务采用已核对的HBM参考组织；微基准中的理想化几何明确作为消融控制，第20组比较平坦分组、参考分组及合成组时序，实际参数以执行Core记录为准。",
     "修复迁移完成时刻重复累加、分块访问累加绝对时间、swap-in迁移漏计。",
     "修复写缓冲自动排空漏计、介质编程早于主机确认、独立通道被串行化，以及未写入区域误命中缓冲。",
     "修复迁移失败回滚、临时页预留破坏持久页、多页共享前缀释放，以及物理状态浅拷贝泄漏。",
@@ -410,11 +426,24 @@ def completion_matrix(groups):
         ('预算与SLO下配置选择',(11,), '枚举明确的九个固定4槽候选，重跑完整服务、共同预算上限和SLO；无可行解也是有效结果。'),
         ('购置成本、面积与3/5年摊销',(11,14), '参数作为内部假设；条件节点成本与实际候选栈数一致，均匀寿命推导与动态物理轨迹分别报告。'),
         ('投机解码、热点、共享前缀和读写混合',(4,9,10,13), '分别保存真实接受/拒绝、精确物理访问比例和多轮生命周期；不伪造模型token或训练路由轨迹。'),
-        ('独立Decode与实际Core执行',(19,), '8B/70B、2K/32K/128K/1M、A/B共16点，统一64输出；实际执行prefill后单独统计63个Decode token。')]
+        ('独立Decode与实际Core执行',(19,), '8B/70B、2K/32K/128K/1M、A/B共16点，统一64输出；实际执行prefill后单独统计63个Decode token。'),
+        ('Bank group合成时序Decode对照',(20,), '小Dense完整服务的原参数、仅重分组和合成组时序三种统一目录配置；A/B分别对比，真实Core执行，不声称器件校准。')]
     return [{'item':item,'status':'已完成所述实验' if all(n in present and present[n]['status']=='passed' for n in numbers)
              and (17 not in numbers or extended_model_matrix_complete(groups))
-             and (19 not in numbers or decode_matrix_complete(groups)) else '本次未完成',
+             and (19 not in numbers or decode_matrix_complete(groups))
+             and (20 not in numbers or bank_group_matrix_complete(groups)) else '本次未完成',
         'groups':list(numbers),'reason':reason} for item,numbers,reason in specs]
+
+
+def bank_group_matrix_complete(groups):
+    from hbf_hbm_bank_group_study import PROFILES, CONTEXTS, ARCHITECTURES
+    study=next((g for g in groups if g['id']=='20_bank_group_decode'),{})
+    rows=study.get('rows',[])
+    expected={(p,c,a) for p in PROFILES for c in CONTEXTS for a in ARCHITECTURES}
+    actual={(r.get('hardware_profile'),r.get('prompt_tokens'),r.get('placement')) for r in rows}
+    return (study.get('status')=='passed' and actual==expected and len(rows)==len(expected)
+            and all(r.get('visible_output_tokens')==8 and r.get('decode_measurement',{}).get('decode_tokens')==7
+                    for r in rows))
 
 
 def decode_matrix_complete(groups):
@@ -515,7 +544,7 @@ def render(report):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir',type=Path,default=ROOT/'artifacts'/'hbf_hbm')
-    parser.add_argument('--groups',default=','.join(str(n) for n in range(1,20)),help='comma-separated group numbers')
+    parser.add_argument('--groups',default=','.join(str(n) for n in range(1,21)),help='comma-separated group numbers')
     parser.add_argument('--render-only',action='store_true',help='render already saved group results without rerunning simulations')
     parser.add_argument('--reuse-groups',default='',help='explicitly reuse these already saved groups; caller must ensure their code and assumptions remain applicable')
     parser.add_argument('--resume-study',action='store_true',help='reuse completed study points with matching parameters from this output directory; only use if their code remains applicable')
@@ -527,8 +556,8 @@ def main():
         (args.output_dir/'report.html').write_text(render(report),encoding='utf-8')
         return 0
     selected={int(x) for x in args.groups.split(',')}
-    if not selected or not selected <= set(range(1,20)):
-        parser.error('--groups must contain numbers from 1 through 19')
+    if not selected or not selected <= set(range(1,21)):
+        parser.error('--groups must contain numbers from 1 through 20')
     reused={int(x) for x in args.reuse_groups.split(',') if x.strip()}
     if not reused<=selected: parser.error('--reuse-groups must be selected in --groups')
     groups=[]
@@ -571,13 +600,16 @@ def main():
     extensions={12:('hbf_hbm_ablation_paths','run_group'),13:('hbf_hbm_agent_study','run_agent_study'),
         14:('hbf_hbm_wear_study','run_wear_study'),15:('hbf_hbm_system_study','run_system_study'),
         16:('hbf_hbm_sustained_study','run_sustained_study'),17:('hbf_hbm_extended_models','run_extended_models_study'),
-        18:('hbf_hbm_bandwidth_study','run_bandwidth_study')}
+        18:('hbf_hbm_bandwidth_study','run_bandwidth_study'),
+        20:('hbf_hbm_bank_group_study','run_bank_group_study')}
     import importlib
     for number,(module,function) in extensions.items():
         if number in active:
             print(f'Running group {number}',flush=True)
             kwargs=({'workers':args.workers,'point_cache_dir':args.output_dir/'extended_model_points',
                      'resume':args.resume_study} if number==17 else {})
+            if number==20:
+                kwargs={'workers':args.workers,'point_dir':args.output_dir/'bank_group_points'}
             g=getattr(importlib.import_module(module),function)(**kwargs); groups.append(g)
             (args.output_dir/(g['id']+'.json')).write_text(json.dumps(g,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
     groups.sort(key=lambda g:g['id'])
@@ -585,13 +617,13 @@ def main():
     report={'schema_version':2,'scope':'mechanism microbenchmarks plus full-operator placement/model/tier studies and explicitly conditional economics',
         'all_selected_checks_passed':all(g['status']=='passed' for g in groups),'groups':groups,
         'external_prediction_accuracy_validated':False,'overall_research_program_complete':False,
-        'external_calibration_required':False,
+        'external_calibration_required':False,'output_directory':args.output_dir.as_posix(),
         'audit_fixes':AUDIT_FIXES,'audit_completion':completion_matrix(groups),'remaining_research_scope':EXCLUDED_SCOPE}
     report['memory_core_coverage']=memory_core_coverage(groups)
     if report['memory_core_coverage']['full_serving_rows']:
         report['all_selected_checks_passed'] &= report['memory_core_coverage']['all_full_serving_hbm_verified']
         report['all_selected_checks_passed'] &= not report['memory_core_coverage']['wrong_nand_core_row_ids']
-    report['internal_experiment_matrix_complete']=(selected==set(range(1,20)) and
+    report['internal_experiment_matrix_complete']=(selected==set(range(1,21)) and
         report['all_selected_checks_passed'] and all(r['status']=='已完成所述实验' for r in report['audit_completion']))
     report['model_execution_coverage']=model_execution_coverage(groups)
     from hbf_hbm_economics import run_economics_sensitivity

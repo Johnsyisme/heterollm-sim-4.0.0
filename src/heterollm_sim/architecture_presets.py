@@ -746,6 +746,19 @@ def _component(
                 write_latency_ns=float(component_metadata.get("write_latency_ns", 35.0)),
                 scope="architecture_preset_{}".format(component_id),
             )
+    # Product-visible budgets are not raw binary DRAM densities. Keep the
+    # selected reference geometry's raw capacity separate from product facts.
+    if kind == "hbm" and "physical_composition" in component_metadata:
+        geometry = component_metadata["physical_memory_config"].get("metadata", {})
+        if geometry.get("geometry_status") == "standard_organization":
+            composition = component_metadata["physical_composition"]
+            composition["nominal_raw_capacity_budget_bytes"] = composition.get("unit_raw_capacity_bytes")
+            composition["unit_raw_capacity_bytes"] = geometry["raw_capacity_bytes"]
+            composition["product_total_raw_capacity_bytes"] = (
+                geometry["raw_capacity_bytes"] * composition.get("unit_count_in_product", 1)
+            )
+            composition["raw_capacity_status"] = "selected_JEDEC_reference_not_verified_product_geometry"
+            composition["capacity_accounting"] = "product_visible_budget_separate_from_selected_reference_raw_capacity"
     return ComponentSpec(
         component_id=component_id,
         kind=kind,
@@ -2431,7 +2444,7 @@ _LEGACY_ARCHITECTURE_PRESETS: Tuple[ArchitecturePresetDefinition, ...] = (
     _mi300a(),
     _mi300x_single(),
     _hbm_accelerator_cluster(preset_id="amd-mi300x-8-infinity-fabric", name="8× AMD Instinct MI300X + Infinity Fabric", gpu_model="MI300X", memory_kind="HBM3", memory_capacity_gb=192, memory_bandwidth_gbps=42600.0, peak_ops_per_s=1_307_400_000_000_000.0, count=8, fabric_protocol="InfinityFabric", fabric_version="MI300X", fabric_bandwidth_gbps=3584.0, fabric_lanes=8, vendor="AMD", family="MI300", sources=(AMD_MI300X,), support_level=ANALYTICAL_APPROXIMATION, memory_physical_unit_count=8, memory_count_status="vendor_documented_stacks", peak_precision="BF16_matrix", memory_component_preset_id="hbm3-24gb-0_665625tbs-mi300x-slice", channels_per_stack=16),
-    _hbm_accelerator_cluster(preset_id="intel-gaudi3-8-roce", name="8× Intel Gaudi 3 RoCE Reference Baseboard", gpu_model="Gaudi 3", memory_kind="HBM2E", memory_capacity_gb=128, memory_bandwidth_gbps=29600.0, peak_ops_per_s=1_835_000_000_000_000.0, count=8, fabric_protocol="RoCE", fabric_version="v2", fabric_bandwidth_gbps=1600.0, fabric_lanes=8, vendor="Intel", family="Gaudi", sources=(INTEL_GAUDI3,), support_level=ANALYTICAL_APPROXIMATION, fabric_kind="ethernet_switch", memory_physical_unit_count=8, memory_count_status="vendor_documented_stacks", peak_precision="BF16_MME", fabric_member_rate_gbps=200.0, fabric_total_physical_port_count=24, memory_component_preset_id="hbm2e-16gb-0_4625tbs-gaudi3-slice", channels_per_stack=16),
+    _hbm_accelerator_cluster(preset_id="intel-gaudi3-8-roce", name="8× Intel Gaudi 3 RoCE Reference Baseboard", gpu_model="Gaudi 3", memory_kind="HBM2E", memory_capacity_gb=128, memory_bandwidth_gbps=29600.0, peak_ops_per_s=1_835_000_000_000_000.0, count=8, fabric_protocol="RoCE", fabric_version="v2", fabric_bandwidth_gbps=1600.0, fabric_lanes=8, vendor="Intel", family="Gaudi", sources=(INTEL_GAUDI3,), support_level=ANALYTICAL_APPROXIMATION, fabric_kind="ethernet_switch", memory_physical_unit_count=8, memory_count_status="vendor_documented_stacks", peak_precision="BF16_MME", fabric_member_rate_gbps=200.0, fabric_total_physical_port_count=24, memory_component_preset_id="hbm2e-16gb-0_4625tbs-gaudi3-slice", channels_per_stack=8),
     _cxl_type3(),
     _cxl_pool(),
     _ucie_chiplet(),

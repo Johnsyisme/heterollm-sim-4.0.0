@@ -9,7 +9,6 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
 import json
-import math
 import multiprocessing
 from pathlib import Path
 import re
@@ -20,14 +19,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-# Do not reuse historical points produced with the removed HBM aggregate path.
-POINT_RESULT_VERSION = 3
+# Version 6 executes JEDEC normal-operation commands and bills CA/DQ occupancy
+# separately. Results from the old controller must be recomputed on resume.
+POINT_RESULT_VERSION = 6
 
 from heterollm_sim.config import model_from_dict
 from heterollm_sim.control_plane_planner import _derive_requirements
 from heterollm_sim.ir import (KVCachePolicy, RequestSpec, LinkSpec, PortSpec,
     MTPPolicy, MTPBranchSpec, build_model_graph_from_layer_specs, model_graph_execution_layers)
-from heterollm_sim.memory_types import parse_physical_memory_config, make_ssd_config
+from heterollm_sim.physical_contract import reconfigure_physical_config, parse_execution_physical_config
+from heterollm_sim.physical_presets import resolve_physical_config
 from heterollm_sim.memory_allocator import AllocationError
 from heterollm_sim.model_presets import materialize_model_payload, list_model_presets, get_model_preset
 from heterollm_sim.planner import ScenarioValidationError
@@ -48,6 +49,7 @@ def build_study_scenario(architecture: str, *, model_id: str = "small",
                          hbm_capacity_bytes: int = 512 * GIB,
                          hbf_capacity_bytes: int = 1024 * GIB,
                          hbf_page_read_ns: float | None = None,
+                         hbm_timing_profile: str = "hbm3e_reference",
                          slo_ttft_ns: float = 10e9, slo_tbt_ns: float = 100e6):
     """Build a real serving scenario, retaining identical device inventory.
 
@@ -63,7 +65,8 @@ agent-session API or a static hot-hit probability.
     import hbf_hbm_experiments as experiments
     count = batch if request_count is None else request_count
     s = experiments.scenario(hbf=architecture == "B_all_kv_hbf", prompt=prompt,
-                             count=count, slots=batch, output=output)
+                             count=count, slots=batch, output=output,
+                             hbm_timing_profile=hbm_timing_profile)
     model = s.model
     if model_id != "small":
         payload = materialize_model_payload(model_id)
@@ -100,17 +103,21 @@ agent-session API or a static hot-hit probability.
         if c.component_id in {"hbm0", "hbf0"}:
             capacity = hbm_capacity_bytes if c.component_id == "hbm0" else hbf_capacity_bytes
             metadata = {k: v for k, v in c.metadata.items() if k != "memory_service"}
-            physical = parse_physical_memory_config(metadata["physical_memory_config"])
-            geometry = {}
-            if capacity > physical.computed_capacity_bytes:
-                factor = math.ceil(capacity / physical.computed_capacity_bytes)
-                if hasattr(physical, "rows_per_bank"):
-                    geometry["rows_per_bank"] = physical.rows_per_bank * factor
-                else:
-                    geometry["blocks_per_plane"] = physical.blocks_per_plane * factor
+            overrides = {"capacity_bytes": capacity}
             if c.component_id == "hbf0" and hbf_page_read_ns is not None:
-                geometry["page_read_ns"] = hbf_page_read_ns
-            metadata["physical_memory_config"] = replace(physical, capacity_bytes=capacity, **geometry)
+                overrides["page_read_ns"] = hbf_page_read_ns
+            if c.component_id == "hbm0":
+                source = parse_execution_physical_config(metadata["physical_memory_config"])
+                # A changed capacity budget selects a covering reference part
+                # and stack count; it must not invent extra rows in one part.
+                physical = experiments.profiles._hbm_physical_config(
+                    capacity_bytes=capacity, read_gb_s=source.directional_bandwidth_gb_s("read"),
+                    write_gb_s=source.directional_bandwidth_gb_s("write"),
+                    profile_id=hbm_timing_profile)
+            else:
+                physical = reconfigure_physical_config(metadata["physical_memory_config"],
+                    overrides=overrides, expand_geometry=True)
+            metadata["physical_memory_config"] = physical
             if c.component_id == "hbf0":
                 metadata["access_mode"] = "remote_flash" if tiered else "memory"
                 metadata["write_buffer_bytes"] = physical.write_buffer_bytes
@@ -118,9 +125,8 @@ agent-session API or a static hot-hit probability.
             if c.component_id == "hbf0" and tiered:
                 c = replace(c, cost_profile_id=None)
             if c.component_id == "hbf0" and architecture == "F_nvme":
-                physical = make_ssd_config(capacity_bytes=hbf_capacity_bytes,
-                    channels=32,blocks_per_plane=8192,host_bandwidth_gb_s=7.,host_read_bandwidth_gb_s=7.,
-                    host_write_bandwidth_gb_s=4.,page_read_ns=50_000.,page_program_ns=800_000.)
+                physical = resolve_physical_config("study_nvme_baseline",
+                    overrides={"capacity_bytes":hbf_capacity_bytes},expand_geometry=True)
                 c = replace(c, kind="ssd", bandwidth_gbps=56.,read_bandwidth_gbps=56.,write_bandwidth_gbps=32.,
                     ports=tuple(replace(p,protocol="PCIe",version="5.0",lanes=16,bandwidth_gbps=56.) for p in c.ports),
                     metadata={"physical_memory_config":physical,"memory_service_owner":"far_nvme"})
@@ -178,7 +184,15 @@ agent-session API or a static hot-hit probability.
         preemption_enabled=priority_preemption,
         preemption_policy="swap" if tiered else "recompute",
         slo_ttft_ns=slo_ttft_ns, slo_tbt_ns=slo_tbt_ns)
+    hbm_component = hardware.get_component("hbm0")
+    hbm_config = parse_execution_physical_config(hbm_component.metadata["physical_memory_config"])
+    component_profiles = {kind:dict(registry) for kind,registry in s.component_profiles.items()}
+    component_profiles["hbm"][hbm_component.cost_profile_id] = replace(
+        s.resolve_component_profile("hbm0"), parallel_lanes=hbm_config.lane_count,
+        transaction_bytes=hbm_config.burst_bytes,
+        max_outstanding_requests=hbm_config.max_outstanding_requests)
     scenario = replace(s, name=f"study-{architecture}-{model_id}", hardware=hardware, model=model,
+        component_profiles=component_profiles,
         placement=replace(s.placement, model_name=model.name, tensor_to_component={},
             tensor_bytes={}, metadata=metadata,
             parallel=replace(s.placement.parallel, layer_to_stage={l.layer_id:0 for l in layers}),

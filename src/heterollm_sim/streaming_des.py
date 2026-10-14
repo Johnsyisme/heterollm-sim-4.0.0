@@ -30,6 +30,7 @@ from .engine import _merge_engine_metadata, _task_resource_intervals, _resource_
 from .event_kernel import UnifiedEventKernel
 from .execution_control import ExecutionControl
 from .metrics import MetricsSummary, NS_PER_SECOND, RequestMetrics
+from .memory_service import DRAM_OPTIONAL_COUNTER_FIELDS, DRAM_SERVICE_TIME_SCOPE
 from .planner import (
     RequestTaskChunk,
     StreamingScheduleIR,
@@ -770,7 +771,7 @@ def _merge_dram_traffic(target: Dict[str, object], source: Mapping[str, object])
     for key in numeric:
         target[key] = target.get(key, 0) + source.get(key, 0)
     availability = target.setdefault("metric_availability", {})
-    for key in ("read_write_switches", "refresh_wait_ns", "turnaround_wait_ns"):
+    for key in DRAM_OPTIONAL_COUNTER_FIELDS:
         value = source.get(key)
         recorded = isinstance(value, (int, float)) and not isinstance(value, bool)
         status = source.get("metric_availability", {}).get(key, {}).get(
@@ -794,6 +795,7 @@ def _merge_dram_traffic(target: Dict[str, object], source: Mapping[str, object])
         if value not in profiles and len(profiles) < 32:
             profiles.append(value)
     target["owner_ids"] = sorted({str(row.get("owner", "unknown")) for row in rows.values()})
+    target["service_time_scope"] = DRAM_SERVICE_TIME_SCOPE
     target["accounting_semantics"] = source.get(
         "accounting_semantics",
         "resolved analytical burst bytes and controller waits; no device accuracy claim",

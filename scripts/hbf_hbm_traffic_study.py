@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 from pathlib import Path
 import sys
 from typing import Any
@@ -15,13 +16,14 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 
-from hbf_hbm_sessions import PAGE, TOKENS_PER_PAGE, _hardware
+from hbf_hbm_sessions import PAGE, TOKENS_PER_PAGE, _hardware, _executed_core_configurations
 from heterollm_sim.communication import TopologyRouter
 from heterollm_sim.data_motion import PhysicalRuntimeContext
 from heterollm_sim.kv_pool import DynamicKVPool, KvPoolComponent
 from heterollm_sim.kv_transfer import PhysicalKVTransferExecutor
 from heterollm_sim.memory_transfer import ResourceTimeline
-from heterollm_sim.memory_types import AccessRequest, Operation, make_hbf_config
+from heterollm_sim.memory_types import AccessRequest, Operation
+from heterollm_sim.physical_presets import resolve_physical_config
 from heterollm_sim.nand_core import NandCore
 
 TOTAL_CAPACITY_PAGES = 100
@@ -186,6 +188,7 @@ def run_hot_read_trace(*, hot_reads: int, hbm_pages: int = 25) -> dict[str, Any]
     }
     return {**base, "runnable": True, "status": "passed" if all(checks.values()) else "failed", "checks": checks,
             "applied_hardware": applied_hardware,
+            "executed_physical_configurations": _executed_core_configurations(runtime),
             "capacity_bytes": capacity, "peak_bytes_including_migration_copies": peak,
             "initialization_duration_ns": start,
             "initialization_scope": "40 actual initial page writes and 32 cold-page offloads; excluded from the measured read window",
@@ -206,11 +209,7 @@ def run_hot_read_trace(*, hot_reads: int, hbm_pages: int = 25) -> dict[str, Any]
 def run_read_write_trace(reads_per_write: int) -> dict[str, Any]:
     if isinstance(reads_per_write, bool) or not isinstance(reads_per_write, int) or reads_per_write < 1:
         raise ValueError("reads_per_write must be a positive integer")
-    config = make_hbf_config(capacity_bytes=8*PAGE, page_bytes=PAGE,
-        channels=4, parallel_units=4, host_bandwidth_gb_s=400.,
-        host_read_bandwidth_gb_s=400., host_write_bandwidth_gb_s=16.,
-        internal_bandwidth_gb_s=128., page_read_ns=4000., page_program_ns=75000.,
-        write_buffer_bytes=0)
+    config = resolve_physical_config("research_hbf_read_write")
     core = NandCore(config, timeline=ResourceTimeline(), capture_details=False)
     now = 0.
     # The same eight-page resident set is physically initialized before every
@@ -251,9 +250,15 @@ def run_read_write_trace(reads_per_write: int) -> dict[str, Any]:
         "effective_total_payload_gb_s": (logical_read+logical_write)/duration,
         "resource_bytes": _delta(dict(core.timeline.bytes_moved), bytes_before),
         "resource_busy_ns": _delta(dict(core.timeline.busy_ns), busy_before),
-        "applied_hardware": {"kind": "hbf", "channels": 4, "parallel_units": 4,
-            "host_read_gb_s": 400., "host_write_gb_s": 16., "internal_channel_gb_s": 128.,
-            "page_read_ns": 4000., "page_program_ns": 75000., "write_buffer_bytes": 0},
+        "applied_hardware": {"kind": "hbf", "channels": core.config.channels,
+            "parallel_units": core.config.parallel_units,
+            "host_read_gb_s": core.config.host_read_bandwidth_gb_s,
+            "host_write_gb_s": core.config.host_write_bandwidth_gb_s,
+            "internal_channel_gb_s": core.config.internal_bandwidth_gb_s,
+            "page_read_ns": core.config.page_read_ns, "page_program_ns": core.config.page_program_ns,
+            "write_buffer_bytes": core.config.write_buffer_bytes},
+        "executed_physical_configurations": {"hbf": {"core": type(core).__name__,
+            "physical_config": asdict(core.config)}},
         "node_tps": None, "per_gpu_tps": None, "ttft_ns": None, "tpot_ns": None,
         "comparison_scope": "one full-page write is held fixed; read count and total traffic increase with the ratio. Completion times are not fixed-work speedups. Requests are deliberately sequential.",
     }

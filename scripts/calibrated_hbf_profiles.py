@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass, field, replace
 import json
-import math
 from pathlib import Path
 import sys
 from typing import Any, Optional
@@ -30,16 +29,15 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from heterollm_sim.dram_core import DramCore
 from heterollm_sim.memory_transfer import summarize_batch
+from heterollm_sim.memory_service import DRAM_OPTIONAL_COUNTER_FIELDS
 from heterollm_sim.reference import build_reference_scenario
 from heterollm_sim.reporting import report_dict, run_scenario
 from heterollm_sim.memory_types import (
     AccessRequest,
-    DramConfig,
-    NandConfig,
     Operation,
-    make_hbm_config,
-    make_hbf_config,
 )
+from heterollm_sim.physical_presets import resolve_physical_config
+from heterollm_sim.physical_contract import parse_execution_physical_config
 from heterollm_sim.cost_models import HostMemoryProfile
 from heterollm_sim.ir import (
     ComponentSpec,
@@ -406,73 +404,71 @@ def _profile_by_id(profile_id: str) -> CalibratedProfile:
     raise KeyError(profile_id)
 
 
-def _capacity_geometry(capacity_bytes: int, *, channels: int, page_bytes: int,
-                       pages_per_block: int = 256) -> int:
-    per_block = channels * pages_per_block * page_bytes
-    return max(1, math.ceil(capacity_bytes / per_block))
+def _hbm_physical_config(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
+                         stacks: Optional[int] = None,
+                         profile_id: str = "hbm3e_reference"):
+    """Apply a paper/user capacity budget to an explicitly selected reference.
+
+    The paper's aggregate capacity and rates do not identify a manufacturer's
+    die density, stack height or timings. Preserve their declared units and
+    let the shared catalog select and label a covering reference organization.
+    """
+    overrides = {"capacity_bytes": capacity_bytes,
+        "interface_bandwidth_gb_s": max(read_gb_s, write_gb_s),
+        "read_bandwidth_gb_s": read_gb_s, "write_bandwidth_gb_s": write_gb_s,
+        "metadata": {
+            "capacity_input_scope": "paper_or_user_usable_capacity_budget",
+            "capacity_input_units": "GB inputs use 10^9 bytes; GiB inputs use 2^30 bytes; neither identifies a physical DRAM part",
+            "source_stack_count": stacks,
+            "source_stack_count_status": "declared_input" if stacks is not None else "unknown_reference_selected",
+            "source_device_geometry_known": False,
+        }}
+    if stacks is not None:
+        overrides["stacks"] = stacks
+    return resolve_physical_config(profile_id, overrides=overrides, expand_geometry=True)
 
 
-def _make_hbm(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
-              stacks: int = 8) -> DramCore:
-    # The geometry is only needed to keep requests in range.  It is made large
-    # enough for the advertised capacity while the run itself uses tiny traffic.
-    rows = 65536
-    config = DramConfig(
-        kind="HBM",
-        channels=8,
-        pseudo_channels_per_channel=2,
-        stacks=max(1, stacks),
-        banks_per_group=8,
-        rows_per_bank=rows,
-        row_bytes=8192,
-        burst_bytes=64,
-        interface_bandwidth_gb_s=max(read_gb_s, write_gb_s, 1.0),
-        read_bandwidth_gb_s=max(read_gb_s, 1.0),
-        write_bandwidth_gb_s=max(write_gb_s, 1.0),
-        burst_interval_ns=0.0,
-        capacity_bytes=capacity_bytes,
-        metadata={"profile_kind": "calibrated_hbm"},
-    )
-    return DramCore(config, capture_details=False)
+def _hbm_core(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
+              stacks: Optional[int] = None,
+              profile_id: str = "hbm3e_reference") -> DramCore:
+    return DramCore(_hbm_physical_config(capacity_bytes=capacity_bytes,
+        read_gb_s=read_gb_s, write_gb_s=write_gb_s, stacks=stacks,
+        profile_id=profile_id), capture_details=False)
 
 
-def _make_hbf(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
-              page_bytes: int, read_latency_ns: float, program_ns: float,
-              parallel_units: int, buffered: bool = False,
+def _hbf_core(*, capacity_bytes: int, read_gb_s: float, write_gb_s: float,
+              page_bytes: Optional[int] = None, read_latency_ns: Optional[float] = None,
+              program_ns: Optional[float] = None, parallel_units: Optional[int] = None,
+              buffered: bool = False,
               host_granularity_bytes: Optional[int] = None) -> NandCore:
-    channels = max(1, parallel_units)
-    blocks = _capacity_geometry(capacity_bytes, channels=channels, page_bytes=page_bytes)
-    # The paper publishes one effective secondary-tier bandwidth, so the host
-    # leg carries that value and the internal leg is deliberately non-bottleneck.
-    shared = max(read_gb_s, write_gb_s, 1.0)
-    config = NandConfig(
-        kind="HBF",
-        channels=channels,
-        targets_per_channel=1,
-        dies_per_target=1,
-        luns_per_die=1,
-        planes_per_lun=1,
-        parallel_units=parallel_units,
-        blocks_per_plane=blocks,
-        pages_per_block=256,
-        page_bytes=page_bytes,
-        host_granularity_bytes=host_granularity_bytes or min(4096, page_bytes),
-        host_bandwidth_gb_s=shared,
-        host_read_bandwidth_gb_s=max(read_gb_s, 1.0),
-        host_write_bandwidth_gb_s=max(write_gb_s, 1.0),
-        internal_bandwidth_gb_s=shared * 1000.0,
-        page_read_ns=read_latency_ns,
-        page_program_ns=program_ns,
-        front_ns=0.0,
-        write_buffer_bytes=0,
-        capacity_bytes=capacity_bytes,
-        metadata={
-            "profile_kind": "calibrated_hbf",
-            "buffered_write_mode": bool(buffered),
-            "bandwidth_mapping": "effective_shared_tier_on_host_leg",
-        },
-    )
+    """Resolve unspecified geometry and timing in the shared catalog."""
+    overrides = {"capacity_bytes": capacity_bytes,
+        "host_bandwidth_gb_s": max(read_gb_s, write_gb_s),
+        "host_read_bandwidth_gb_s": read_gb_s,
+        "host_write_bandwidth_gb_s": write_gb_s,
+        "metadata": {"buffered_write_mode": bool(buffered)}}
+    overrides.update({key: value for key, value in {
+        "page_bytes": page_bytes, "page_read_ns": read_latency_ns,
+        "page_program_ns": program_ns, "parallel_units": parallel_units,
+        "host_granularity_bytes": host_granularity_bytes}.items() if value is not None})
+    config = resolve_physical_config("published_hbf", overrides=overrides,
+        expand_geometry=True)
     return NandCore(config, capture_details=False)
+
+
+def hbm_protocol_summary(config) -> dict[str, Any]:
+    """Expose recorded protocol scope without filling undisclosed values."""
+    values = config if isinstance(config, dict) else asdict(config)
+    metadata = values.get("metadata", {})
+    return {
+        **{key: values.get(key) for key in (
+            "generation", "control_mode", "command_clock_ns", "maximum_active_ns",
+            "read_latency_ns", "write_latency_ns", "refresh_policy",
+            "refresh_interval_ns", "refresh_cycle_ns")},
+        **{key: metadata.get(key) for key in (
+            "geometry_status", "control_status", "timing_validation", "timing_basis",
+            "unknown_parameters", "unconfigured_timing_parameters", "control_limitations", "accounting_basis")},
+    }
 
 
 def _request(core: Any, *, operation: Operation, address: int, bytes_: int,
@@ -537,6 +533,9 @@ def _stream(core_hbm: Optional[DramCore], core_hbf: Optional[NandCore], *,
             "physical_write_bytes": batch.physical_write_bytes,
             "queue_wait_ns": batch.queue_wait_ns,
             "write_buffer_wait_ns": batch.write_buffer_wait_ns,
+            **({"protocol": hbm_protocol_summary(cores[tier].config),
+                **{key: batch.counters.get(key) for key in DRAM_OPTIONAL_COUNTER_FIELDS}}
+               if tier == "hbm" else {}),
         }
     return {
         "service_ns": float(clock),
@@ -569,11 +568,11 @@ def _profile_hardware(profile: CalibratedProfile, *,
             hbm_cap = float(hbm_cap) * GIB / GB
     hbm = None
     if hbm_read > 0 and hbm_cap and hbm_cap > 0:
-        hbm = _make_hbm(
+        hbm = _hbm_core(
             capacity_bytes=max(PAGE * 64, int(float(hbm_cap) * GB)),
             read_gb_s=hbm_read,
             write_gb_s=hbm_write or hbm_read,
-            stacks=int(p.hardware.get("hbm_stacks", 8) or 8),
+            stacks=int(p.hardware["hbm_stacks"]) if p.hardware.get("hbm_stacks") else None,
         )
     hbf_cap = p.hardware.get("hbf_capacity_gb")
     if hbf_cap is None and p.hardware.get("secondary_capacity_tb"):
@@ -588,25 +587,20 @@ def _profile_hardware(profile: CalibratedProfile, *,
             # unspecified rather than treated as a measured write bandwidth.
             hbf_write = hbf_read
         granularity = p.granularity
-        page_bytes = int(granularity.get("page_bytes") or granularity.get("write_page_bytes") or granularity.get("kv_block_bytes") or PAGE)
-        read_us = float(p.latency.get("hbf_read_us", granularity.get("page_read_latency_us", 4.0)) or 4.0)
-        program_us = float(p.latency.get("hbf_write_us", granularity.get("page_program_latency_us", 75.0)) or 75.0)
+        page_bytes = (granularity.get("page_bytes") or granularity.get("write_page_bytes")
+                      or granularity.get("kv_block_bytes"))
+        read_us = p.latency.get("hbf_read_us", granularity.get("page_read_latency_us"))
+        program_us = p.latency.get("hbf_write_us", granularity.get("page_program_latency_us"))
         if latency_override_us is not None:
             read_us, program_us = latency_override_us
-        read_ns = read_us * US
-        program_ns = program_us * US
-        # A per-core-die plane count is not an aggregate device lane count.
-        # When the paper supplies no aggregate geometry, use an explicitly
-        # derived service-lane proxy that can sustain its nominal read rate.
-        parallel_units = int(p.hardware.get("effective_parallel_units") or math.ceil(
-            float(bw.get("hbf_read_gb_s") or 1.0)
-            * float(p.latency.get("hbf_read_us") or 1.0) * US / page_bytes
-        ))
+        read_ns = float(read_us) * US if read_us is not None else None
+        program_ns = float(program_us) * US if program_us is not None else None
+        parallel_units = p.hardware.get("effective_parallel_units")
         host_granularity = int(p.granularity.get("read_bytes", 0) or 0)
-        if host_granularity <= 0 or host_granularity > page_bytes:
-            host_granularity = min(4096, page_bytes)
-        hbf = _make_hbf(
-            capacity_bytes=max(page_bytes * 256, int(float(hbf_cap) * GB)),
+        if host_granularity <= 0 or (page_bytes is not None and host_granularity > page_bytes):
+            host_granularity = None
+        hbf = _hbf_core(
+            capacity_bytes=int(float(hbf_cap) * GB),
             read_gb_s=hbf_read,
             write_gb_s=hbf_write or hbf_read,
             page_bytes=page_bytes,
@@ -620,6 +614,8 @@ def _profile_hardware(profile: CalibratedProfile, *,
         "bandwidth_variant": applied,
         "hbm_read_gb_s": hbm_read,
         "hbm_write_gb_s": hbm_write,
+        "hbm_physical_config": asdict(hbm.config) if hbm else None,
+        "hbm_protocol": hbm_protocol_summary(hbm.config) if hbm else None,
         "hbf_read_gb_s": hbf_read,
         "hbf_write_gb_s": hbf_write,
         "hbf_write_was_unspecified": hbf_write_declared is None,
@@ -643,6 +639,7 @@ def _full_backend_scenario(
     interconnect_bandwidth_gbps: Optional[float] = None,
     interconnect_latency_ns: Optional[float] = None,
     cim_mode: str = "disabled",
+    hbm_timing_profile: Optional[str] = None,
 ):
     """Build a small continuous-batching scenario on the real V4 backend.
 
@@ -666,8 +663,8 @@ def _full_backend_scenario(
         raise ValueError("request_count, prompt_tokens and output_tokens must be positive")
     bw = profile.bandwidth
     hbm_read = float(bw.get("hbm_read_gb_s", 0) or 0)
-    # HBF+ has no local HBM stack.  Keep the paper's HBM4 reference as the
-    # full-backend control, and label it as a separate reference below.
+    # HBF+ has no local HBM stack. Its separate comparison/support tier uses
+    # paper capacity/rates and a JESD270-4A reference organization, not a known SKU.
     if hbm_read <= 0:
         hbm_read = 12_800.0
     hbm_write = float(bw.get("hbm_write_gb_s", 0) or hbm_read)
@@ -684,16 +681,15 @@ def _full_backend_scenario(
         16 * GIB,
         int(float(hbm_capacity_gb or 16.0) * GB),
     )
-    physical_hbm = make_hbm_config(
-        capacity_bytes=hbm_capacity,
-        rows_per_bank=524_288,
-        interface_bandwidth_gb_s=hbm_read,
-        read_bandwidth_gb_s=hbm_read,
-        write_bandwidth_gb_s=hbm_write,
-        burst_interval_ns=0.0,
-    )
+    hbm_stacks = (int(profile.hardware["hbm_stacks"]) if profile.hardware.get("hbm_stacks")
+                  else 8 if profile.profile_id == "son_hbf_plus" else None)
+    physical_hbm = _hbm_physical_config(capacity_bytes=hbm_capacity,
+        read_gb_s=hbm_read, write_gb_s=hbm_write, stacks=hbm_stacks,
+        profile_id=hbm_timing_profile or (
+            "hbm4_reference" if profile.profile_id == "son_hbf_plus" else "hbm3e_reference"))
     hbm0 = base.hardware.get_component("hbm0")
     hbm_link_gbps = max(hbm_read, hbm_write, 1.0) * 8.0
+    hbm_link_version = "4.0" if physical_hbm.generation == "HBM4" else "3.0"
     hbm0 = replace(
         hbm0,
         capacity_bytes=hbm_capacity,
@@ -701,7 +697,7 @@ def _full_backend_scenario(
         read_bandwidth_gbps=hbm_read * 8.0,
         write_bandwidth_gbps=hbm_write * 8.0,
         ports=tuple(
-            replace(port, bandwidth_gbps=hbm_link_gbps)
+            replace(port, bandwidth_gbps=hbm_link_gbps, version=hbm_link_version)
             for port in hbm0.ports
         ),
         metadata={**hbm0.metadata, "physical_memory_config": physical_hbm},
@@ -711,7 +707,7 @@ def _full_backend_scenario(
     gpu0 = replace(
         gpu0,
         ports=tuple(
-            replace(port, bandwidth_gbps=hbm_link_gbps)
+            replace(port, bandwidth_gbps=hbm_link_gbps, version=hbm_link_version)
             if port.port_id == "hbm0" else port
             for port in gpu0.ports
         ) + (PortSpec(
@@ -786,7 +782,7 @@ def _full_backend_scenario(
             for component in base.hardware.components
         ) + (hbf,),
         links=tuple(
-            replace(link, bandwidth_gbps=hbm_link_gbps)
+            replace(link, bandwidth_gbps=hbm_link_gbps, version=hbm_link_version)
             if {link.source_component, link.target_component} == {"gpu0", "hbm0"}
             else link
             for link in base.hardware.links
@@ -837,6 +833,9 @@ def _full_backend_scenario(
         read_bandwidth_gb_s=hbm_read,
         write_bandwidth_gb_s=hbm_write,
         measured_effective_bandwidth_gb_s=None,
+        parallel_lanes=physical_hbm.lane_count,
+        transaction_bytes=physical_hbm.burst_bytes,
+        max_outstanding_requests=physical_hbm.max_outstanding_requests,
     )
     gpu_profile_id = gpu0.cost_profile_id
     gpu_profile = component_profiles["gpu"].get(gpu_profile_id)
@@ -969,6 +968,7 @@ def _full_backend_summary(
     interconnect_bandwidth_gbps: Optional[float] = None,
     interconnect_latency_ns: Optional[float] = None,
     cim_mode: str = "disabled",
+    hbm_timing_profile: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run the calibrated profile through the full GPU/serving backend."""
 
@@ -992,6 +992,7 @@ def _full_backend_summary(
         interconnect_bandwidth_gbps=interconnect_bandwidth_gbps,
         interconnect_latency_ns=interconnect_latency_ns,
         cim_mode=cim_mode,
+        hbm_timing_profile=hbm_timing_profile,
     )
     result = run_scenario(scenario)
     report = report_dict(result)
@@ -1003,6 +1004,16 @@ def _full_backend_summary(
     throughput = summary.get("throughput", {})
     goodput = summary.get("goodput", {})
     resource_utilization = report.get("resource_utilization", {})
+    gpu_resource_busy = {}
+    gpu_busy_recorded_batches = 0
+    for batch in result.serving.batches:
+        metadata = batch.cost.metadata
+        if metadata.get("physical_execution_scope") != "persistent_live_kernel":
+            continue
+        gpu_busy_recorded_batches += 1
+        for key, value in metadata.get("resource_busy_ns", {}).items():
+            if str(key).startswith("gpu0."):
+                gpu_resource_busy[str(key)] = gpu_resource_busy.get(str(key), 0.0) + float(value)
     slo_configured = any(value is not None for value in (
         scenario.workload.scheduler.slo_ttft_ns,
         scenario.workload.scheduler.slo_tbt_ns,
@@ -1037,7 +1048,7 @@ def _full_backend_summary(
                 else "endpoint-matched bandwidth proxy; not a measured package link"
             ),
             "hbm_support_tier": (
-                "288 GB HBM4 surrogate required by the reference operator backend; absent from the paper HBF+ architecture"
+                "288 decimal GB paper capacity budget over a JESD270-4A HBM4 reference organization; actual vendor SKU and timings are unknown, and this support tier is absent from the paper HBF+ architecture"
                 if profile.profile_id == "son_hbf_plus" else "profile near-tier capacity"
             ),
             "hbf_write_parameters": (
@@ -1056,6 +1067,10 @@ def _full_backend_summary(
             ),
         },
         "hbm_backend": "DramCore",
+        "hbm_physical_config": asdict(parse_execution_physical_config(
+            scenario.hardware.get_component("hbm0").metadata["physical_memory_config"])),
+        "hbm_protocol": hbm_protocol_summary(parse_execution_physical_config(
+            scenario.hardware.get_component("hbm0").metadata["physical_memory_config"])),
         "summary": {
             "makespan_ns": summary.get("makespan_ns"),
             "completed_requests": summary.get("completed_requests"),
@@ -1077,9 +1092,14 @@ def _full_backend_summary(
                 key: value for key, value in resource_utilization.items()
                 if key.startswith("gpu0.")
             },
+            "gpu_resource_busy_ns": gpu_resource_busy,
+            "gpu_busy_recorded_batches": gpu_busy_recorded_batches,
+            "gpu_busy_scope": "per-resource occupied time recorded by persistent_live_kernel serving batches; GPU resources can overlap, so this is not wall-clock duration",
             "dram_traffic": {
                 key: dram.get(key)
-                for key in ("task_count", "logical_read_bytes", "logical_write_bytes", "service_ns")
+                for key in ("task_count", "logical_read_bytes", "logical_write_bytes", "physical_read_bytes",
+                            "physical_write_bytes", "service_ns", "service_time_scope", "resource_totals",
+                            "metric_availability", *DRAM_OPTIONAL_COUNTER_FIELDS)
             },
             "storage_traffic": {
                 key: storage.get(key)
@@ -1126,10 +1146,11 @@ def run_profile(profile: CalibratedProfile, *,
             traffic_page_bytes=traffic_page_bytes,
         )
     elif profile.profile_id == "son_hbf_plus":
-        # HBF+ has no HBM stack in the paper configuration.  Keep a separate
-        # 8-stack HBM4 reference so the memory-path ratio is still useful.
-        baseline = _make_hbm(
+        # HBF+ has no HBM stack in the paper configuration. Its separately
+        # labelled HBM4 comparison uses the JEDEC reference organization.
+        baseline = _hbm_core(
             capacity_bytes=288 * GB, read_gb_s=12800, write_gb_s=12800, stacks=8,
+            profile_id="hbm4_reference",
         )
         hbm_only = _stream(
             baseline, None, kv_pages=kv_pages, steps=steps,
@@ -1137,6 +1158,8 @@ def run_profile(profile: CalibratedProfile, *,
             traffic_page_bytes=traffic_page_bytes,
         )
         hbm_only["baseline_label"] = "son_hbm4_reference_not_same_profile"
+        hbm_only["physical_config"] = asdict(baseline.config)
+        hbm_only["hbm_protocol"] = hbm_protocol_summary(baseline.config)
     all_hbf = None
     if hbf is not None and profile.profile_id != "hot_cold_b200":
         # Each alternative starts with fresh resource queues.  Reusing the

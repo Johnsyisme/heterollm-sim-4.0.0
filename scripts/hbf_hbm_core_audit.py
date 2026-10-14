@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import ExitStack
 from copy import deepcopy
+from dataclasses import asdict
 from functools import wraps
 from pathlib import Path
 import sys
@@ -32,6 +33,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from heterollm_sim.data_motion import PhysicalRuntimeContext
 from heterollm_sim.dram_core import DramCore
+from heterollm_sim.memory_service import DRAM_CONTROL_COUNT_FIELDS, DRAM_CONTROL_TIME_FIELDS
 from heterollm_sim.nand_core import NandCore
 from heterollm_sim.serving import _OnlineRuntime
 
@@ -79,6 +81,13 @@ class CoreExecutionAudit:
                 "physical_read_bytes": 0, "physical_write_bytes": 0,
                 "transfer_bytes": 0, "burst_count": 0, "pages_read": 0,
                 "pages_programmed": 0, "erase_operations": 0,
+                "bank_group_timing_transactions": 0,
+                "bank_group_exact_fallback_transactions": 0,
+                "jedec_control_transactions": 0,
+                "compiled_hbm_float64_transactions": 0,
+                **{key: 0 for key in DRAM_CONTROL_COUNT_FIELDS + DRAM_CONTROL_TIME_FIELDS},
+                "control_metric_recorded_transactions": {
+                    key: 0 for key in DRAM_CONTROL_COUNT_FIELDS + DRAM_CONTROL_TIME_FIELDS},
                 "first_arrival_ns": None, "last_completion_ns": None}
 
     def _record(self, core, entrypoint, requests, results):
@@ -90,6 +99,15 @@ class CoreExecutionAudit:
         sample["first_arrival_ns"] = min((r.arrival_ns for r in requests), default=None)
         sample["last_completion_ns"] = max((r.completion_ns for r in results), default=None)
         for request, result in zip(requests, results):
+            sample["jedec_control_transactions"] += int(result.counters.get("control_mode") == "jedec_hbm")
+            sample["compiled_hbm_float64_transactions"] += int(bool(result.counters.get("compiled_hbm_float64")))
+            sample["bank_group_timing_transactions"] += int(bool(result.counters.get("bank_group_timing_enabled")))
+            sample["bank_group_exact_fallback_transactions"] += int(bool(result.counters.get("bank_group_timing_fallback")))
+            for key in DRAM_CONTROL_COUNT_FIELDS + DRAM_CONTROL_TIME_FIELDS:
+                value = result.counters.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    sample[key] += value
+                    sample["control_metric_recorded_transactions"][key] += 1
             if request.operation.value in {"read", "write"}:
                 sample["logical_" + request.operation.value + "_bytes"] += result.logical_bytes
             sample["transfer_bytes"] += result.transfer_bytes
@@ -111,7 +129,7 @@ class CoreExecutionAudit:
     @staticmethod
     def _merge(row, sample):
         for key, value in sample.items():
-            if key == "entrypoint_calls":
+            if key in {"entrypoint_calls", "control_metric_recorded_transactions"}:
                 for entrypoint, count in value.items():
                     row[key][entrypoint] = row[key].get(entrypoint, 0) + count
             elif key == "first_arrival_ns":
@@ -212,7 +230,11 @@ class CoreExecutionAudit:
 
     def summary(self):
         cohorts = [{**row, "owners": list(row["owners"].values())} for row in self._cohorts.values()]
-        return deepcopy({
+        configurations = {}
+        for core, owner in self._cores.values():
+            if (owner, type(core).__name__) in self._rows:
+                configurations[owner] = {"core": type(core).__name__, "physical_config": asdict(core.config)}
+        result = deepcopy({
             "schema_version": "heterollm.live-core-audit/v1",
             "scope": "successful Core submissions on the persistent online-serving kernel; excludes planner previews, isolated replay and pre-serving initialization",
             "method": "instrumented DramCore/NandCore submit and submit_many, selected by live PhysicalRuntimeContext identity",
@@ -220,8 +242,16 @@ class CoreExecutionAudit:
             "live_runtime_restores": self._restores, "failed_entrypoint_calls": self._failures,
             "valid_for_committed_byte_totals": self._run_count == self._run_finished > 0 and not self._restores and not self._failures,
             "owners": list(self._rows.values()), "cohorts": cohorts,
+            "executed_physical_configurations": configurations,
             "call_records": self._call_records, "call_records_dropped": self._call_records_dropped,
             "call_records_enabled": bool(self.max_call_records),
             "limitations": ["Cohort phase attribution follows actual execution; mixed cohorts are not split artificially.",
                             "Physical bytes are Core result counters; NAND internal/host transfer bytes are separate from media read/program bytes.",
                             "Instrumenting these process-global entry points requires one simulation thread per process."]})
+        rows = result["owners"] + result["call_records"] + [
+            row for cohort in result["cohorts"] for row in cohort["owners"]]
+        for row in rows:
+            for key, count in row["control_metric_recorded_transactions"].items():
+                if count != row["transactions"]:
+                    row[key] = None
+        return result

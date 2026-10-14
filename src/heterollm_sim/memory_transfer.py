@@ -11,6 +11,7 @@ import math
 from typing import Dict, Mapping, Optional
 
 from .memory_types import BatchResult, TransactionResult
+from .memory_service import DRAM_OPTIONAL_COUNTER_FIELDS
 
 
 def _number(name: str, value: float, *, positive: bool = False) -> float:
@@ -247,6 +248,10 @@ def summarize_batch(results, *, bandwidth_ceiling_gb_s: float = 0.0) -> BatchRes
             (item.write_buffer_occupancy_bytes for item in items), default=0
         ),
     }
+    for key in DRAM_OPTIONAL_COUNTER_FIELDS:
+        values = [item.counters.get(key) for item in items]
+        counters[key] = (sum(values) if all(isinstance(value, (int, float))
+                        and not isinstance(value, bool) for value in values) else None)
     return BatchResult(
         requests=items,
         first_arrival_ns=first,

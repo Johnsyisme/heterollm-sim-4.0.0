@@ -18,7 +18,8 @@ from typing import Any, Iterable, Optional, Sequence, Tuple
 
 from .contracts import EvidenceStatus, ResourceDemand, TaskCategory, TaskSpec
 from .ir import ComponentSpec, LinkSpec, OFFLOAD_STORAGE_COMPONENT_KINDS, default_memory_resource_id
-from .memory_service import realtime_memory_metrics
+from .memory_service import (realtime_memory_metrics, DRAM_CONTROL_COUNT_FIELDS,
+                             DRAM_CONTROL_TIME_FIELDS, DRAM_OPTIONAL_COUNTER_FIELDS)
 
 
 # Ordered small-request batching retains individual DRAM admission, accesses
@@ -140,6 +141,8 @@ class PhysicalRuntimeContext:
         if isinstance(config, DramConfig):
             metadata.setdefault("bank_resource_prefix", f"{owner}:dram:bank")
             metadata.setdefault("command_resource_prefix", f"{owner}:dram:command")
+            metadata.setdefault("row_command_resource_prefix", f"{owner}:dram:row_command")
+            metadata.setdefault("column_command_resource_prefix", f"{owner}:dram:column_command")
             metadata.setdefault("data_resource_prefix", f"{owner}:dram:data")
         else:
             metadata.setdefault("array_resource_prefix", f"{owner}:nand:array")
@@ -257,7 +260,7 @@ class PhysicalRuntimeContext:
                     # NAND readiness values are scalars, so a shallow dict
                     # copy is sufficient and avoids copying timeline history.
                     core_state[key] = dict(value)
-                elif key == "_bank_group_state":
+                elif key in {"_bank_group_state", "_hbm_control_state"}:
                     # Group command/activation histories contain mutable
                     # per-group clocks and activation windows. They are live
                     # execution state, so a failed task must not modify its
@@ -874,6 +877,7 @@ def _resolve_physical_task(
         counters["nand_observations"] = summarize_nand_observations(observations)
     execution_by_owner = {}
     operations_by_owner = {}
+    optional_observed_by_owner = {}
     for (_access, operation, _address, _byte_count, owner, access_config), item in zip(validated, results):
         row = execution_by_owner.get(owner)
         if row is None:
@@ -893,6 +897,7 @@ def _resolve_physical_task(
             }
             execution_by_owner[owner] = row
             operations_by_owner[owner] = set()
+            optional_observed_by_owner[owner] = {key: 0 for key in DRAM_OPTIONAL_COUNTER_FIELDS}
         operations_by_owner[owner].add(operation.value)
         row["operation_count"] += 1
         row["logical_bytes"] += item.logical_bytes
@@ -921,16 +926,21 @@ def _resolve_physical_task(
             "write_buffer_wait_ns", "write_buffer_bytes", "merge_bytes",
             "staging_read_hits", "staging_read_merges", "staging_write_pages",
             "merged_pages", "auto_drain_physical_programs",
-        ):
+        ) + DRAM_CONTROL_COUNT_FIELDS + DRAM_CONTROL_TIME_FIELDS:
             value = item.counters.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 row[key] = row.get(key, 0) + value
+                if key in optional_observed_by_owner[owner]:
+                    optional_observed_by_owner[owner][key] += 1
         for key in ("write_buffer_peak_bytes", "host_outstanding_at_admission_peak", "host_read_outstanding_at_admission_peak",
                     "host_write_outstanding_at_admission_peak"):
             value = item.counters.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 row[key] = max(row.get(key, 0), value)
     for owner, row in execution_by_owner.items():
+        for key, count in optional_observed_by_owner[owner].items():
+            if count != row["operation_count"]:
+                row[key] = None
         if "_nand_observations" in row:
             from .nand_core import summarize_nand_observations
             row["nand_observations"] = summarize_nand_observations(row.pop("_nand_observations"))
@@ -948,7 +958,7 @@ def _resolve_physical_task(
         "write_buffer_wait_ns", "write_buffer_bytes", "merge_bytes",
         "staging_read_hits", "staging_read_merges", "staging_write_pages",
         "merged_pages", "auto_drain_physical_programs",
-    ):
+    ) + DRAM_CONTROL_COUNT_FIELDS + DRAM_CONTROL_TIME_FIELDS:
         if key == "physical_bytes":
             counters[key] = sum(item.transfer_bytes for item in results)
         elif key == "logical_bytes":
@@ -957,7 +967,9 @@ def _resolve_physical_task(
             values = [item.counters[key] for item in results
                       if isinstance(item.counters.get(key), (int, float))
                       and not isinstance(item.counters[key], bool)]
-            if values:
+            if key in DRAM_OPTIONAL_COUNTER_FIELDS and len(values) != len(results):
+                counters[key] = None
+            elif values:
                 # Preserve integer counters in the combined compatibility
                 # view as well as each owner ledger. Timing remains float.
                 counters[key] = sum(values)
@@ -1575,6 +1587,7 @@ class PhysicalService:
                 "end_ns": batch.last_completion_ns,
                 "actual_bandwidth_gb_s": batch.actual_bandwidth_gb_s,
                 "bandwidth_ceiling_gb_s": batch.bandwidth_ceiling_gb_s,
+                **{key:batch.counters.get(key) for key in DRAM_OPTIONAL_COUNTER_FIELDS},
             }
         if self.component is None or self.component.metadata.get("physical_memory_config") is None:
             raise ValueError("price_batch requires physical_memory_config")

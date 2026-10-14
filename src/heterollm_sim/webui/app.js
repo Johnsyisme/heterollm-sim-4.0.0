@@ -5167,6 +5167,34 @@ function validatePhysicalMemoryConfig(value, component) {
   return { ...value, kind };
 }
 
+function hbmGeometryMarkup(config) {
+  if (!config || String(config.kind || "").toUpperCase() !== "HBM") return "";
+  const metadata = asObject(config.metadata);
+  const standard = metadata.geometry_status === "standard_organization";
+  const labels = {
+    vendor_part_number: "具体厂商料号", vendor_address_mapping: "厂商地址映射",
+    array_timing_ns: "阵列时序", refresh_timing_ns: "刷新时序",
+    controller_policy: "控制器策略", effective_pin_data_rate_gbps: "厂商引脚速度档",
+    die_density_gbits: "目标器件芯粒密度", dies_per_stack: "目标器件堆叠层数",
+    vendor_stack_count: "目标产品堆叠数量",
+    vendor_supported_rl_wl: "厂商支持的读写延迟编码",
+    activate_same_group_ns: "同组激活间隔", activate_different_group_ns: "跨组激活间隔",
+    four_activate_window_ns: "四次激活窗口", read_to_precharge_ns: "读取至预充电间隔",
+    write_to_read_same_group_ns: "同组写转读间隔", write_to_read_different_group_ns: "跨组写转读间隔",
+    read_to_write_command_ns: "读转写命令间隔", refresh_cycle_ns: "刷新持续时间",
+  };
+  const unknown = asArray(metadata.unknown_parameters).map((name) => labels[name] || name);
+  const raw = metadata.raw_capacity_bytes;
+  return `<div class="hbm-geometry-provenance">
+    <p><strong>${standard ? "JEDEC 标准组织参考" : "未验证的几何假设"}</strong> · ${escapeHtml(config.generation || "代际未指定")}</p>
+    <p class="muted">每堆叠 ${escapeHtml(config.channels)} 个物理通道，每通道 ${escapeHtml(config.pseudo_channels_per_channel)} 个伪通道；每伪通道 ${escapeHtml(config.data_width_bits)} bit。Bank 组和行大小按每伪通道计。${config.bank_geometry_scope === "per_stack" ? "Bank 已包含整个堆叠的寻址范围，容量不再乘一次 die 层数。" : "此配置使用旧的每 die 几何口径。"}</p>
+    ${metadata.activated_page_bytes ? `<p class="muted">${escapeHtml(metadata.jedec_standard || "JEDEC")}：有效寻址页 ${escapeHtml(formatBytes(config.row_bytes))}，一次激活页 ${escapeHtml(formatBytes(metadata.activated_page_bytes))}。${config.control_mode === "jedec_hbm" ? "行地址最高位选择的两个半页共享激活状态。" : "此旧控制模型未实现两个半页共享激活。"}</p>` : ""}
+    ${config.control_mode === "jedec_hbm" ? `<p class="muted">按 JEDEC 执行激活、预充电和读写命令；每个物理通道共享行、列命令口，每伪通道独立传输。命令等待和数据占用分别计量，写恢复只约束后续预充电。${config.refresh_policy === "all_bank" ? "已启用周期刷新。" : "自动刷新未配置，结果不包含刷新开销。"}读写延迟采用合法时钟编码；参考时序尚未通过具体厂商速度档验证。</p>` : ""}
+    ${raw ? `<p class="muted">原始阵列容量：${escapeHtml(formatBytes(raw))}；可用容量：${escapeHtml(formatBytes(config.capacity_bytes))}。</p>` : ""}
+    <p class="muted">${standard ? "标准组织不等于已验证的厂商器件，时序假设与几何来源分别记录。" : "这些参数不能作为 JEDEC 或厂商真实规格。"}${unknown.length ? ` 未确认：${escapeHtml(unknown.join("、"))}。` : ""}</p>
+  </div>`;
+}
+
 function dramBankGroupTimingMarkup(config) {
   if (!config || !["DDR", "LPDDR", "HBM", "GDDR"].includes(String(config.kind || "").toUpperCase())) return "";
   const enabled = DRAM_BANK_GROUP_TIMING_FIELDS.some(([field]) => Number(config[field] || 0) > 0);
@@ -9224,6 +9252,7 @@ function renderComponentInspector(componentId) {
     ? `<section class="inspector-section physical-memory-config-section">
       <h3>物理内存核心配置（Canonical physical_memory_config）</h3>
       <p class="muted">只有显式配置且通过后端几何校验，才会启用 DDR / LPDDR / HBM / SSD / HBF 物理核心。组件容量、带宽和旧 profile 不会自动转换为物理配置。</p>
+      ${hbmGeometryMarkup(physicalMemoryConfig)}
       <textarea data-inspector-physical-config rows="12" spellcheck="false" aria-label="physical_memory_config JSON">${escapeHtml(physicalMemoryConfig ? JSON.stringify(physicalMemoryConfig, null, 2) : "")}</textarea>
       ${dramBankGroupTimingMarkup(physicalMemoryConfig)}
       ${physicalMemoryConfig

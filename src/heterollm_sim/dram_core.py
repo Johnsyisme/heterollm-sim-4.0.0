@@ -12,6 +12,11 @@ from .memory_transfer import ResourceTimeline
 from .memory_types import AccessRequest, DramConfig, Operation, StageTiming, TransactionResult
 
 
+# Numeric state and mapping tables are sized dynamically. Keep allocation
+# bounded while admitting standard multi-stack HBM3/HBM4 organizations.
+MAX_ACCELERATED_BANKS = 65_536
+
+
 @dataclass
 class _BankState:
     open_row: Optional[int] = None
@@ -52,7 +57,8 @@ def _repeat_add(value: float, increment: float, count: int) -> float:
 
 @lru_cache(maxsize=128)
 def _mapping_cycle(lanes, banks, groups, banks_per_group,
-                   bank_prefix, command_prefix, data_prefix, shared, stack, die):
+                   bank_prefix, command_prefix, data_prefix, shared, stack, die,
+                   independent_stack_lanes=0):
     """Immutable resource IDs for one row-periodic address-mapping cycle.
 
     This is the lane/bank decoding in map_dram_address, with row/column
@@ -65,7 +71,8 @@ def _mapping_cycle(lanes, banks, groups, banks_per_group,
         rank, bank_in_rank = divmod(bank, groups * banks_per_group)
         group, bank_index = divmod(bank_in_rank, banks_per_group)
         for lane in range(lanes):
-            entry = (f"{bank_prefix}:{stack}:{die}:{lane}:{rank}:{group}:{bank_index}",
+            physical_stack = lane // independent_stack_lanes if independent_stack_lanes else stack
+            entry = (f"{bank_prefix}:{physical_stack}:{die}:{lane}:{rank}:{group}:{bank_index}",
                      shared or f"{command_prefix}:{lane}", f"{data_prefix}:{lane}")
             # Inner bursts share exactly the same resources. Repeating the
             # tuple once per burst can allocate gigabytes for a legal large
@@ -75,17 +82,20 @@ def _mapping_cycle(lanes, banks, groups, banks_per_group,
 
 
 class DramCore:
-    """Generate reduced DRAM array/burst stages on a shared time line.
+    """Generate ordered DRAM command, array and data-path timing.
 
-    Banks retain one open row. PRE/ACT occupy the bank; column commands occupy
-    the lane's command resource, and full bursts occupy its directional data
-    resource. This is not a full JEDEC command scheduler: PRE/ACT do not also
-    reserve command slots, and refresh and tRAS are outside this model.
-    Optional bank-group timing gates column/ACT starts and WRITE-data-end to
-    READ-command dependencies within each (stack, die, lane, rank). These are
-    eligibility constraints, not extra bus reservations. Requests retain
-    submission order at admission and resource calendars; no FR-FCFS
-    reordering is used.
+    Legacy mode retains the reduced model: PRE/ACT reserve a bank for
+    close_ns/open_ns, columns reserve per-lane command resources, and optional
+    group gates use (stack, die, lane, rank). It does not model refresh/tRAS.
+
+    jedec_hbm dispatches to the normal-operation HBM controller: both PCs
+    share their physical channel's separate row/column command buses, ACT/PRE
+    occupancy is distinct from array timing, effective row halves may share an
+    activated page, maximum row-active deadlines are enforced, and an
+    explicit periodic all-bank refresh policy is supported. Its configured
+    timing inputs do not establish a vendor speed
+    grade or support for training, low-power modes or the full standard.
+    Both modes keep request submission order; neither implements FR-FCFS.
     """
 
     def __init__(
@@ -112,6 +122,7 @@ class DramCore:
         # retains future reservations until the admission time proves they
         # cannot affect another four-activation window.
         self._bank_group_state: Dict[tuple[int, int, int, int], dict] = {}
+        self._hbm_control_state: dict = {}
         self._inflight: list[float] = []
         self._acceptance_ns = 0.0
         self._largest_stage_ns = max(
@@ -126,6 +137,10 @@ class DramCore:
             config.burst_bytes / config.directional_lane_bandwidth_gb_s(Operation.READ),
             config.burst_bytes / config.directional_lane_bandwidth_gb_s(Operation.WRITE),
         )
+        if config.control_mode == "jedec_hbm":
+            from .memory_types import HBM_CONTROL_TIMING_FIELDS
+            self._largest_stage_ns = max(self._largest_stage_ns,
+                *(getattr(config, name) for name in HBM_CONTROL_TIMING_FIELDS))
 
     def _bank_id(self, mapping) -> str:
         prefix = str(self.config.metadata.get("bank_resource_prefix", "dram:bank"))
@@ -278,7 +293,7 @@ class DramCore:
             **self.timeline.metrics_delta(before_metrics),
             **({
                 "bank_group_timing_enabled": True,
-                "bank_group_timing_fallback": not self.capture_details,
+                "bank_group_timing_fallback": self.config.control_mode == "legacy" and not self.capture_details,
             } if self.config.bank_group_timing_enabled else {}),
         })
         self._acceptance_ns = effective_arrival
@@ -299,6 +314,9 @@ class DramCore:
         return tuple(self.submit(request) for request in items)
 
     def _execute_accepted(self, request: AccessRequest) -> TransactionResult:
+        if self.config.control_mode == "jedec_hbm":
+            from ._hbm_control import execute_hbm
+            return execute_hbm(self, request)
         # Summary execution can compress repeated row-hit cycles, but must
         # retain the same bank and command/data state as the burst loop below.
         start = request.address
@@ -439,8 +457,9 @@ class DramCore:
         """Use the closed form only for a single-slot, row-periodic calendar."""
         config = self.config
         interleave = config.interleave_bytes or config.burst_bytes
-        if (self.capture_details or config.bank_group_timing_enabled
-                or config.lane_count * config.bank_count > 8192
+        if (config.control_mode == "jedec_hbm" or self.capture_details or config.bank_group_timing_enabled
+                or config.addressable_stack_count * config.addressable_die_count
+                * config.lane_count * config.bank_count > MAX_ACCELERATED_BANKS
                 or interleave > config.row_bytes
                 or config.row_bytes % interleave
                 or type(self.timeline) is not ResourceTimeline):
@@ -473,7 +492,7 @@ class DramCore:
             return False
         # Prefixes are arbitrary metadata: a nested command/data prefix can
         # name an actual bank resource even when the three prefixes differ.
-        bank_limits = (config.stacks, config.dies_per_stack, config.lane_count,
+        bank_limits = (config.stacks, config.addressable_die_count, config.lane_count,
                        config.ranks_per_channel, config.bank_groups_per_rank, config.banks_per_group)
         for prefix in (command, data):
             for lane in range(config.lane_count):
@@ -578,10 +597,11 @@ class DramCore:
 
         while cursor < stop:
             device, row = divmod(cursor // row_span, config.rows_per_bank)
-            stack, die = divmod(device, config.dies_per_stack)
+            stack, die = divmod(device, config.addressable_die_count)
             cycle_table = _mapping_cycle(lanes, banks, config.bank_groups_per_rank, config.banks_per_group,
                                    bank_prefix, command_prefix, data_prefix,
-                                   str(shared) if shared else None, stack, die)
+                                   str(shared) if shared else None, stack, die,
+                                   config.lanes_per_stack if config.stack_interface_mode == "independent" else 0)
             row_stop = min(stop, (cursor // row_span + 1) * row_span)
             aligned = cursor % period == 0
             execute_until(min(row_stop, (cursor // period + 1) * period))

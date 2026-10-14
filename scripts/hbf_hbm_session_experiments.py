@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from hbf_hbm_sessions import PAGE, TOKENS_PER_PAGE, _hardware
+from hbf_hbm_sessions import PAGE, TOKENS_PER_PAGE, _hardware, _executed_core_configurations
 from heterollm_sim.communication import TopologyRouter
 from heterollm_sim.data_motion import PhysicalRuntimeContext
 from heterollm_sim.kv_pool import DynamicKVPool, KvPoolComponent
@@ -286,6 +286,7 @@ class SessionExperiment:
             "resume_latency_p50_ns": percentile(.5), "resume_latency_p99_ns": percentile(.99),
             "resume_latencies_ns": self.resume_waits, "observed_pause_durations_ns": self.actual_pause_ns,
             "elapsed_ns": self.clock, "events": self.events,
+            "executed_physical_configurations": _executed_core_configurations(self.runtime),
         }
 
 

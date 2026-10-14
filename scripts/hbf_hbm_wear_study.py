@@ -14,18 +14,18 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 
-from heterollm_sim.memory_types import (AccessRequest, Operation,
-    NandWearConfig, make_hbf_config, parse_physical_memory_config)
+from heterollm_sim.memory_types import AccessRequest, Operation
+from heterollm_sim.physical_presets import resolve_physical_config
+from heterollm_sim.physical_contract import require_physical_memory_config, reconfigure_physical_config
 from heterollm_sim.nand_core import NandCore, summarize_nand_observations
 
 PAGE = 4096
-ASSUMPTION = "Authored stress sensitivity, not measured HBF/NAND properties or a silicon lifetime forecast"
 
 
 def wear_assumption(*, initial_pe_cycles=2968):
-    return NandWearConfig(rated_pe_cycles=3000, initial_pe_cycles=initial_pe_cycles,
-        program_latency_growth_at_rated_pe=1., max_program_latency_scale=2.,
-        assumption=ASSUMPTION + "; authored program latency doubles at rated P/E and then caps")
+    config = resolve_physical_config("research_hbf_wear_trace")
+    wear = {**asdict(config.wear_model), "initial_pe_cycles": initial_pe_cycles}
+    return reconfigure_physical_config(config, overrides={"wear_model": wear}).wear_model
 
 
 def run_controlled_trace(*, wear_enabled=True, cycles=32,
@@ -41,13 +41,8 @@ def run_controlled_trace(*, wear_enabled=True, cycles=32,
         raise ValueError("cycles must be a positive integer")
     if isinstance(idle_ns, bool) or not isinstance(idle_ns, (int, float)) or not 0 <= idle_ns < float("inf"):
         raise ValueError("idle_ns must be finite and nonnegative")
-    config = make_hbf_config(channels=1, targets_per_channel=1, dies_per_target=1,
-        luns_per_die=1, planes_per_lun=4, planes_independent=True, parallel_units=2,
-        blocks_per_plane=2, pages_per_block=64, page_bytes=PAGE, host_granularity_bytes=1,
-        host_bandwidth_gb_s=100., internal_bandwidth_gb_s=100.,
-        page_read_ns=4000., page_program_ns=75000., block_erase_ns=3e6, front_ns=0.,
-        detailed_observability=True,
-        wear_model=wear_assumption() if wear_enabled else None)
+    config = resolve_physical_config("research_hbf_wear_trace", overrides={
+        "wear_model": wear_assumption() if wear_enabled else None})
     core = NandCore(config, capture_details=False)
     observations, cycle_rows = [], []
     now = 0.
@@ -94,9 +89,10 @@ def build_feedback_scenario(architecture, *, wear_enabled=False,
     for component in scenario.hardware.components:
         if component.component_id == "hbf0":
             metadata = {key:value for key,value in component.metadata.items() if key != "memory_service"}
-            config = parse_physical_memory_config(metadata["physical_memory_config"])
-            metadata["physical_memory_config"] = replace(config, detailed_observability=True,
-                wear_model=wear_assumption(initial_pe_cycles=3000) if wear_enabled else None)
+            config = require_physical_memory_config(component)
+            metadata["physical_memory_config"] = reconfigure_physical_config(config, overrides={
+                "detailed_observability": True,
+                "wear_model": wear_assumption(initial_pe_cycles=3000) if wear_enabled else None})
             component = replace(component, metadata=metadata)
         components.append(component)
     return replace(scenario, hardware=replace(scenario.hardware, components=tuple(components)))

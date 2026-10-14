@@ -8,6 +8,7 @@ budget.  The slot assumptions are not a commercial package calibration.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 import sys
 from typing import Any
@@ -17,7 +18,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from heterollm_sim.dram_core import DramCore
 from heterollm_sim.memory_transfer import summarize_batch
-from heterollm_sim.memory_types import AccessRequest, Operation, make_hbm_config, make_hbf_config
+from heterollm_sim.memory_types import AccessRequest, Operation
+from heterollm_sim.physical_presets import resolve_physical_config
 from heterollm_sim.nand_core import NandCore
 
 PAGE = 16_384
@@ -37,14 +39,22 @@ class SlotProfile:
 
     def __init__(
         self, tier: str, capacity_pages: int, read_bandwidth_gb_s: float,
-        write_bandwidth_gb_s: float, parallel_units: int,
+        write_bandwidth_gb_s: float, parallel_units: int | None,
         write_buffer_bytes: int,
     ) -> None:
         self.tier = tier
         self.capacity_pages = capacity_pages
         self.read_bandwidth_gb_s = read_bandwidth_gb_s
         self.write_bandwidth_gb_s = write_bandwidth_gb_s
-        self.parallel_units = parallel_units
+        if tier == "hbm":
+            # An HBM slot is one catalog stack. Parallelism describes its
+            # resolved data lanes; it is not a channel-geometry override.
+            lanes = resolve_physical_config("research_hbm_package").lane_count
+            if parallel_units is not None and parallel_units != lanes:
+                raise ValueError("HBM parallel_units must match the catalog stack's data lanes")
+            self.parallel_units = lanes
+        else:
+            self.parallel_units = parallel_units
         self.write_buffer_bytes = write_buffer_bytes
 
     @property
@@ -68,7 +78,7 @@ class SlotProfile:
 # HBF) finite buffering together; no ratio row silently borrows the old total.
 HBM_SLOT = SlotProfile(
     tier="hbm", capacity_pages=4, read_bandwidth_gb_s=256.0,
-    write_bandwidth_gb_s=256.0, parallel_units=4, write_buffer_bytes=0,
+    write_bandwidth_gb_s=256.0, parallel_units=None, write_buffer_bytes=0,
 )
 HBF_SLOT = SlotProfile(
     tier="hbf", capacity_pages=2, read_bandwidth_gb_s=160.0,
@@ -79,7 +89,7 @@ HBF_SLOT = SlotProfile(
 # page counts are deliberately small, not a scaling law for real package area.
 ARCHITECTURE_HBM_SLOT = SlotProfile(
     tier="hbm", capacity_pages=4, read_bandwidth_gb_s=256.0,
-    write_bandwidth_gb_s=256.0, parallel_units=4, write_buffer_bytes=0,
+    write_bandwidth_gb_s=256.0, parallel_units=None, write_buffer_bytes=0,
 )
 ARCHITECTURE_HBF_SLOT = SlotProfile(
     tier="hbf", capacity_pages=32, read_bandwidth_gb_s=160.0,
@@ -90,27 +100,21 @@ ARCHITECTURE_HBF_SLOT = SlotProfile(
 def _core(profile: SlotProfile):
     if profile.tier == "hbm":
         return DramCore(
-            make_hbm_config(
-                capacity_bytes=profile.capacity_bytes,
-                channels=profile.parallel_units,
-                pseudo_channels_per_channel=1,
-                interface_bandwidth_gb_s=profile.read_bandwidth_gb_s,
-                read_bandwidth_gb_s=profile.read_bandwidth_gb_s,
-                write_bandwidth_gb_s=profile.write_bandwidth_gb_s,
-                burst_interval_ns=0.0,
-            ),
+            resolve_physical_config("research_hbm_package", overrides={
+                "capacity_bytes": profile.capacity_bytes,
+                "interface_bandwidth_gb_s": profile.read_bandwidth_gb_s,
+                "read_bandwidth_gb_s": profile.read_bandwidth_gb_s,
+                "write_bandwidth_gb_s": profile.write_bandwidth_gb_s}),
             capture_details=False,
         )
     return NandCore(
-        make_hbf_config(
-            capacity_bytes=profile.capacity_bytes,
-            channels=profile.parallel_units,
-            parallel_units=profile.parallel_units,
-            host_bandwidth_gb_s=profile.read_bandwidth_gb_s,
-            host_read_bandwidth_gb_s=profile.read_bandwidth_gb_s,
-            host_write_bandwidth_gb_s=profile.write_bandwidth_gb_s,
-            write_buffer_bytes=profile.write_buffer_bytes,
-        ),
+        resolve_physical_config("research_hbf_package", overrides={
+            "capacity_bytes": profile.capacity_bytes, "channels": profile.parallel_units,
+            "parallel_units": profile.parallel_units,
+            "host_bandwidth_gb_s": profile.read_bandwidth_gb_s,
+            "host_read_bandwidth_gb_s": profile.read_bandwidth_gb_s,
+            "host_write_bandwidth_gb_s": profile.write_bandwidth_gb_s,
+            "write_buffer_bytes": profile.write_buffer_bytes}),
         capture_details=False,
     )
 
@@ -141,13 +145,17 @@ def _budget_row(*, hbm_slots: int, hbm_slot: SlotProfile, hbf_slot: SlotProfile,
     hbf_slots = TOTAL_SLOTS - hbm_slots
     working_set_pages = weight_pages + kv_pages
     profiles = [hbm_slot] * hbm_slots + [hbf_slot] * hbf_slots
+    cores = [(_core(profile), profile.tier, index) for index, profile in enumerate(profiles)]
+    slots = [{**profile.to_dict(), "parallel_units": (
+        core.config.lane_count if tier == "hbm" else core.config.parallel_units)}
+        for profile, (core, tier, _index) in zip(profiles, cores)]
     capacity_pages = sum(profile.capacity_pages for profile in profiles)
     aggregate = {
         "capacity_pages": capacity_pages,
         "capacity_bytes": sum(profile.capacity_bytes for profile in profiles),
         "read_bandwidth_gb_s": sum(profile.read_bandwidth_gb_s for profile in profiles),
         "write_bandwidth_gb_s": sum(profile.write_bandwidth_gb_s for profile in profiles),
-        "parallel_units": sum(profile.parallel_units for profile in profiles),
+        "parallel_units": sum(slot["parallel_units"] for slot in slots),
         "write_buffer_bytes": sum(profile.write_buffer_bytes for profile in profiles),
     }
     row: dict[str, Any] = {
@@ -159,7 +167,9 @@ def _budget_row(*, hbm_slots: int, hbm_slot: SlotProfile, hbf_slot: SlotProfile,
                       "steps": steps, "bytes_per_access": PAGE,
                       "kv_write_pages_per_step": 2,
                       "growth": "fixed resident set; the last two KV pages are updated each step"},
-        "slots": [profile.to_dict() for profile in profiles],
+        "slots": slots,
+        "executed_physical_configurations": {},
+        "configuration_evidence_scope": "Only slots with submitted accesses appear in executed_physical_configurations; each configuration is read from that executing Core. Rejected and idle slots are not execution evidence.",
         "aggregate_budget": aggregate,
         "assumption": "hypothetical four-slot package; not commercial calibration",
         "scope": (
@@ -190,7 +200,6 @@ def _budget_row(*, hbm_slots: int, hbm_slot: SlotProfile, hbf_slot: SlotProfile,
         })
         return row
 
-    cores = [(_core(profile), profile.tier, index) for index, profile in enumerate(profiles)]
     # Pack pages into slots in declaration order.  A page's address is local to
     # its slot, so every physical core sees only in-range requests.
     assignment: list[tuple[int, int]] = []
@@ -259,6 +268,10 @@ def _budget_row(*, hbm_slots: int, hbm_slot: SlotProfile, hbf_slot: SlotProfile,
         "step_service_ns": step_durations,
         "useful_memory_bandwidth_gb_s": logical_bytes / clock,
         "tiers": tier_metrics,
+        "executed_physical_configurations": {
+            str(index): {"core": type(core).__name__, "physical_config": asdict(core.config),
+                         "transactions": len(by_slot[str(index)])}
+            for core, _tier, index in cores if by_slot[str(index)]},
         "slot_traffic": {
             slot: {
                 "tier": profiles[int(slot)].tier,

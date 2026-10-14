@@ -9,19 +9,24 @@ import numpy as np
 from .memory_types import Operation, TransactionResult
 
 _INT64_MAX = (1 << 63) - 1
+# Per-request result matrices use 33 bytes per resource cell. This bounds
+# those matrices to 264 MiB even when the bank limit admits larger stacks.
+_MAX_BATCH_RESOURCE_CELLS = 8_388_608
 
 
 @lru_cache(maxsize=32)
 def _resource_ids(stacks, dies, lanes, banks, groups, banks_per_group,
-                  bank_prefix, command_prefix, data_prefix, shared):
+                  bank_prefix, command_prefix, data_prefix, shared,
+                  independent_stack_lanes=0):
     ids = []
     for stack in range(stacks):
         for die in range(dies):
             for lane in range(lanes):
+                physical_stack = lane // independent_stack_lanes if independent_stack_lanes else stack
                 for bank in range(banks):
                     rank, within = divmod(bank, groups * banks_per_group)
                     group, index = divmod(within, banks_per_group)
-                    ids.append(f"{bank_prefix}:{stack}:{die}:{lane}:{rank}:{group}:{index}")
+                    ids.append(f"{bank_prefix}:{physical_stack}:{die}:{lane}:{rank}:{group}:{index}")
     ids.extend([shared] if shared else [f"{command_prefix}:{lane}" for lane in range(lanes)])
     ids.extend(f"{data_prefix}:{lane}" for lane in range(lanes))
     return tuple(ids)
@@ -29,19 +34,19 @@ def _resource_ids(stacks, dies, lanes, banks, groups, banks_per_group,
 
 def execute_compiled(core, request):
     """Return None without changing state when the numeric path is unsuitable."""
-    from .dram_core import DramCore, _BankState
+    from .dram_core import DramCore, _BankState, MAX_ACCELERATED_BANKS
 
     if (type(core) is not DramCore or request.operation not in (Operation.READ, Operation.WRITE)
             or request.byte_count <= 0 or not core._can_accelerate()):
         return None
     config, timeline = core.config, core.timeline
     lanes, banks = config.lane_count, config.bank_count
-    total_banks = config.stacks * config.dies_per_stack * lanes * banks
+    total_banks = config.addressable_stack_count * config.addressable_die_count * lanes * banks
     burst = config.burst_bytes
     first = request.address // burst
     stop = (request.address + request.byte_count - 1) // burst + 1
     physical = (stop - first) * burst
-    if (total_banks > 8192 or burst > 2 ** 53 or config.computed_capacity_bytes > _INT64_MAX
+    if (total_banks > MAX_ACCELERATED_BANKS or burst > 2 ** 53 or config.computed_capacity_bytes > _INT64_MAX
             or request.address < 0 or request.address + request.byte_count > config.effective_capacity_bytes
             or stop > _INT64_MAX or physical > _INT64_MAX):
         return None
@@ -51,14 +56,15 @@ def execute_compiled(core, request):
     data_prefix = str(metadata.get("data_resource_prefix", "dram:data"))
     shared_value = metadata.get("shared_command_resource")
     shared = str(shared_value) if shared_value else None
-    ids = _resource_ids(config.stacks, config.dies_per_stack, lanes, banks,
+    ids = _resource_ids(config.addressable_stack_count, config.addressable_die_count, lanes, banks,
                         config.bank_groups_per_rank, config.banks_per_group,
-                        bank_prefix, command_prefix, data_prefix, shared)
+                        bank_prefix, command_prefix, data_prefix, shared,
+                        config.lanes_per_stack if config.stack_interface_mode == "independent" else 0)
     if len(set(ids)) != len(ids):
         return None
     read = request.operation is Operation.READ
     geometry = np.array([lanes, banks, (config.interleave_bytes or burst) // burst,
-                         config.row_bytes // burst, config.rows_per_bank, config.dies_per_stack], dtype=np.int64)
+                         config.row_bytes // burst, config.rows_per_bank, config.addressable_die_count], dtype=np.int64)
     durations = np.array([
         burst, config.burst_interval_ns, burst / config.directional_lane_bandwidth_gb_s(request.operation),
         config.read_latency_ns if read else config.write_latency_ns,
@@ -174,19 +180,19 @@ def execute_compiled_many(core, requests):
     high = max(r.address + r.byte_count for r in requests)
     request = AccessRequest("batch-pack", requests[0].operation, low, high - low,
                             min(r.arrival_ns for r in requests))
-    from .dram_core import DramCore, _BankState
+    from .dram_core import DramCore, _BankState, MAX_ACCELERATED_BANKS
 
     if (type(core) is not DramCore or request.operation not in (Operation.READ, Operation.WRITE)
             or request.byte_count <= 0 or not core._can_accelerate()):
         return None
     config, timeline = core.config, core.timeline
     lanes, banks = config.lane_count, config.bank_count
-    total_banks = config.stacks * config.dies_per_stack * lanes * banks
+    total_banks = config.addressable_stack_count * config.addressable_die_count * lanes * banks
     burst = config.burst_bytes
     first = request.address // burst
     stop = (request.address + request.byte_count - 1) // burst + 1
     physical = (stop - first) * burst
-    if (total_banks > 8192 or burst > 2 ** 53 or config.computed_capacity_bytes > _INT64_MAX
+    if (total_banks > MAX_ACCELERATED_BANKS or burst > 2 ** 53 or config.computed_capacity_bytes > _INT64_MAX
             or request.address < 0 or request.address + request.byte_count > config.effective_capacity_bytes
             or stop > _INT64_MAX or physical > _INT64_MAX):
         return None
@@ -196,14 +202,20 @@ def execute_compiled_many(core, requests):
     data_prefix = str(metadata.get("data_resource_prefix", "dram:data"))
     shared_value = metadata.get("shared_command_resource")
     shared = str(shared_value) if shared_value else None
-    ids = _resource_ids(config.stacks, config.dies_per_stack, lanes, banks,
+    resource_count = total_banks + (1 if shared else lanes) + lanes
+    if len(requests) * resource_count > _MAX_BATCH_RESOURCE_CELLS:
+        # submit_many falls back to individually compiled requests, retaining
+        # acceleration without allocating unbounded batch result matrices.
+        return None
+    ids = _resource_ids(config.addressable_stack_count, config.addressable_die_count, lanes, banks,
                         config.bank_groups_per_rank, config.banks_per_group,
-                        bank_prefix, command_prefix, data_prefix, shared)
+                        bank_prefix, command_prefix, data_prefix, shared,
+                        config.lanes_per_stack if config.stack_interface_mode == "independent" else 0)
     if len(set(ids)) != len(ids):
         return None
     read = request.operation is Operation.READ
     geometry = np.array([lanes, banks, (config.interleave_bytes or burst) // burst,
-                         config.row_bytes // burst, config.rows_per_bank, config.dies_per_stack], dtype=np.int64)
+                         config.row_bytes // burst, config.rows_per_bank, config.addressable_die_count], dtype=np.int64)
     durations = np.array([
         burst, config.burst_interval_ns, burst / config.directional_lane_bandwidth_gb_s(request.operation),
         config.read_latency_ns if read else config.write_latency_ns,

@@ -3,3 +3,6 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Local JEDEC protocol copies; source references are recorded in code/docs.
+.refs/jedec/

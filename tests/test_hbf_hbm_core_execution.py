@@ -116,14 +116,15 @@ class PhysicalHbmServingTests(unittest.TestCase):
             self.assertGreater(sum(row["logical_read_bytes"] for row in kv), 0)
             self.assertGreater(sum(row["logical_write_bytes"] for row in kv), 0)
 
-    def test_hbm_array_latency_changes_actual_decode_not_just_reported_metadata(self):
+    def test_hbm_encoded_read_latency_changes_actual_decode_not_just_reported_metadata(self):
         base = scenario(prompt=32, count=1, output=3)
         components = []
         for component in base.hardware.components:
             if component.component_id == "hbm0":
                 physical = parse_physical_memory_config(component.metadata["physical_memory_config"])
                 component = replace(component, metadata={**component.metadata,
-                    "physical_memory_config": replace(physical, read_latency_ns=10000.)})
+                    "physical_memory_config": replace(physical,
+                        read_latency_ns=63 * physical.command_clock_ns)})
             components.append(component)
         slow = replace(base, hardware=replace(base.hardware, components=tuple(components)))
         normal = next(iter(run_scenario(base).serving.request_metrics.values()))

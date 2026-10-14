@@ -17,34 +17,14 @@ from heterollm_sim.dram_core import DramCore
 from heterollm_sim.memory_types import (
     AccessRequest,
     Operation,
-    make_hbf_config,
-    make_hbm_config,
 )
 from heterollm_sim.memory_transfer import ResourceTimeline
 from heterollm_sim.nand_core import NandCore
+from heterollm_sim.physical_presets import resolve_physical_config
 
 
 def _ideal_hbm():
-    return make_hbm_config(
-        channels=1,
-        pseudo_channels_per_channel=1,
-        data_lanes=1,
-        banks_per_group=1,
-        rows_per_bank=1024,
-        row_bytes=4096,
-        burst_bytes=64,
-        interface_bandwidth_gb_s=64.0,
-        read_bandwidth_gb_s=64.0,
-        write_bandwidth_gb_s=64.0,
-        open_ns=0.0,
-        close_ns=0.0,
-        read_latency_ns=0.0,
-        write_latency_ns=0.0,
-        burst_interval_ns=0.0,
-        read_recovery_ns=0.0,
-        write_recovery_ns=0.0,
-        capacity_bytes=4 * 1024 * 1024,
-    )
+    return resolve_physical_config("research_hbm_ideal")
 
 
 def _ideal_hbf():
@@ -52,26 +32,7 @@ def _ideal_hbf():
     # host granularity equal to one DRAM burst and zero media/front overhead.
     # Internal bandwidth is made much larger than the host link, so the
     # externally visible read service is the same 64 GB/s link.
-    return make_hbf_config(
-        channels=1,
-        targets_per_channel=1,
-        dies_per_target=1,
-        luns_per_die=1,
-        planes_per_lun=1,
-        blocks_per_plane=1024,
-        pages_per_block=64,
-        page_bytes=64,
-        host_granularity_bytes=64,
-        internal_transfer_bytes=64,
-        host_bandwidth_gb_s=64.0,
-        host_read_bandwidth_gb_s=64.0,
-        host_write_bandwidth_gb_s=64.0,
-        internal_bandwidth_gb_s=1.0e12,
-        page_read_ns=0.0,
-        page_program_ns=0.0,
-        front_ns=0.0,
-        capacity_bytes=4 * 1024 * 1024,
-    )
+    return resolve_physical_config("research_hbf_ideal")
 
 
 def _ratio(a: float, b: float) -> float:

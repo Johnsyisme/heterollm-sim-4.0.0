@@ -529,6 +529,48 @@ def decode_figure(groups,output):
         rows=rows,status='complete' if decode_matrix_complete([group] if group else []) else 'partial_data',observations=group.get('comparisons',[]))
 
 
+def bank_group_figure(groups, output):
+    from hbf_hbm_report import bank_group_variants
+    study = groups['20_bank_group_decode']
+    rows = [r for r in study.get('rows', []) if full_row(r)]
+    variants = bank_group_variants(study)
+    profiles = [v['profile'] for v in variants]
+    contexts = study['contexts']
+    fig, axes = plt.subplots(1, 3, figsize=(16, 6))
+    fig.subplots_adjust(top=.77, bottom=.25, left=.065, right=.98, wspace=.3)
+    fig.suptitle(tr('Bank group 对 Decode 的实际影响：小Dense完整服务',
+                   'Bank-group effect on Decode: full small-Dense serving'), fontsize=17, y=.97)
+    fig.text(.5, .86, tr('真实prefill后统计 · 分组与时序图例读取本次实际Core配置\n参考组织不代表已识别厂商器件；非零组时序为合成假设，不是8B/70B性能预测。',
+                        'Real prefill; geometry and timing labels come from saved Core configurations\nReference organization is not an identified vendor part; synthetic timing is not an 8B/70B prediction.'), ha='center', fontsize=10)
+    names = [tr(v['label_zh'].replace('，', '\n', 1), v['label_en'].replace(', ', '\n', 1)) for v in variants]
+    for axis, arch in zip(axes[:2], (A, B)):
+        for profile, name, color, marker in zip(profiles, names, ('#8C9BAB', '#2364AA', '#E07632'), ('s', 'o', '^')):
+            selected = sorted((r for r in rows if r['hardware_profile'] == profile and r['placement'] == arch), key=lambda r: r['prompt_tokens'])
+            axis.plot([contexts.index(r['prompt_tokens']) for r in selected],
+                      [r['decode_measurement']['node_decode_tps'] for r in selected],
+                      label=name, color=color, marker=marker, linestyle='--' if profile == profiles[0] else '-',
+                      markersize=8 if profile == profiles[0] else 5, markerfacecolor='none' if profile == profiles[0] else color)
+        axis.set_title(LABELS[arch]); axis.set_ylabel('Decode token/s'); axis.legend(frameon=False, fontsize=8)
+    for arch in (A, B):
+        selected = sorted((c for c in study.get('comparisons', []) if c['placement'] == arch), key=lambda c: c['prompt_tokens'])
+        axes[2].plot([contexts.index(c['prompt_tokens']) for c in selected], [c['timing_over_control_tps'] for c in selected],
+                     label=LABELS[arch], color=COLORS[arch], marker=MARKERS[arch])
+    axes[2].axhline(1., color='#8C9BAB', linestyle=':', linewidth=1)
+    axes[2].set_title(tr('非零组时序 / 分组控制', 'Nonzero timing / geometry control'))
+    axes[2].set_ylabel(tr('Decode TPS倍率', 'Decode TPS ratio')); axes[2].legend(frameon=False, fontsize=8)
+    for axis in axes:
+        axis.set_xticks(range(len(contexts)), [str(c) for c in contexts]); axis.set_xlabel(tr('输入上下文token', 'Prompt tokens')); style(axis)
+    fig.text(.065, .075, tr(f'1层合成Dense，hidden=256、FFN=512；每点{study["output_tokens"]}输出，完整prefill后测量{study["output_tokens"]-1}个Decode token。\n分组标为group×bank/group；“组时序关闭”不代表器件真实时序为零。HBM/HBF仍执行DRAM/NAND Core。\n完整几何、时序、参数来源和未知项见结果JSON；不按当前目录重新解释旧profile名称。',
+                           f'One synthetic Dense layer, hidden=256, FFN=512; {study["output_tokens"]} outputs, measuring {study["output_tokens"]-1} Decode tokens after real prefill.\nLabels show groups x banks/group. Disabled gates do not imply zero device timing. HBM/HBF execute DRAM/NAND Core.\nGeometry, timing, provenance and unknowns are saved in JSON; current catalog defaults do not reinterpret old profile names.'), fontsize=9)
+    caption = '小Dense完整服务；实际配置：'+'；'.join(v['label_zh'] for v in variants)+'。配置与来源读取保存的Core记录；参考组织和合成时序不能外推为目标器件或8B/70B性能。'
+    result = save(fig, output, '10_bank_group_decode', title='统一参数入口下的Bank group Decode敏感性',
+                caption=caption, rows=rows,
+                status='complete' if study.get('status') == 'passed' and all(v['records'] for v in variants) else 'partial_data',
+                observations=study.get('comparisons', []))
+    result['hardware_variant_labels'] = [{key: v[key] for key in ('profile', 'label_zh', 'label_en')} for v in variants]
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=ROOT / "artifacts/hbf_hbm/results.json")
@@ -544,6 +586,8 @@ def main():
     figures = [make(groups, args.output) for make in
                (small_batch_figure, named_context_figure, slo_figure, prefetch_figure,
                 system_figure,internal_feedback_figure,sustained_figure,bandwidth_figure,decode_figure)]
+    if '20_bank_group_decode' in groups:
+        figures.append(bank_group_figure(groups, args.output))
     def report_path(path):
         try:
             return Path(os.path.relpath(Path(path).resolve(), args.input.resolve().parent)).as_posix()

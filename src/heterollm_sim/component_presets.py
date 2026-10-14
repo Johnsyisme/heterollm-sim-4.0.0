@@ -672,8 +672,13 @@ def _hbm_preset(
     sources: Sequence[ComponentSource],
     protocol: str = "HBM",
     family: str = "HBM",
+    die_density_gbits: int | None = None,
+    dies_per_stack: int | None = None,
 ) -> ComponentPresetDefinition:
     component_id = preset_id.replace("-", "_")
+    # DRAM array density uses binary bit counts; interface GB/s is decimal.
+    # These raw stack templates are distinct from product-visible budgets.
+    raw_capacity_bytes = int(capacity_gb * 1024 ** 3)
     cost_profile_template, cost_profile_parameter_basis = _hbm_cost_profile_template(
         component_id,
         bandwidth_gbps,
@@ -687,6 +692,13 @@ def _hbm_preset(
         "kind_policy": "{} 介质代际写入 metadata；ComponentSpec.kind 固定保持为 hbm，以复用 GPU 本地显存服务模型。".format(generation),
         "interface_protocol": protocol,
     }
+    from .hbm_geometry import make_hbm_geometry_config
+    physical_config = make_hbm_geometry_config(
+        generation=generation, capacity_bytes=raw_capacity_bytes,
+        read_bandwidth_gbps=bandwidth_gbps, write_bandwidth_gbps=bandwidth_gbps,
+        channels=channels, die_density_gbits=die_density_gbits,
+        dies_per_stack=dies_per_stack, scope="single_hbm_raw_stack",
+    )
     component = ComponentSpec(
         component_id=component_id,
         kind="hbm",
@@ -697,7 +709,7 @@ def _hbm_preset(
             bandwidth_gbps=bandwidth_gbps,
             protocol=protocol,
         ),
-        capacity_bytes=_gb(capacity_gb),
+        capacity_bytes=raw_capacity_bytes,
         read_bandwidth_gbps=bandwidth_gbps,
         write_bandwidth_gbps=bandwidth_gbps,
         metadata=_component_metadata(
@@ -710,7 +722,10 @@ def _hbm_preset(
             measurement_basis="由公开速度档与接口宽度换算为 IR 内部带宽字段；详情页按十进制 GB/s/TB/s 展示。",
             extras={
                 "revision": {
-                    "HBM3": "JESD238B.01",
+                    "HBM2": "JESD235B",
+                    "HBM2E": "JESD235B",
+                    "HBM3": "JESD238",
+                    "HBM3E": "JESD238",
                     "HBM4": "JESD270-4A",
                 }.get(generation, "{}-{}".format(generation, CATALOG_VERSION)),
                 "value_scope": "单个 {} 本地显存介质的峰值读写带宽模板".format(generation),
@@ -727,14 +742,12 @@ def _hbm_preset(
                 "cost_profile_template": cost_profile_template,
                 "cost_profile_parameter_basis": cost_profile_parameter_basis,
                 "cost_profile_key": "hbm",
-                "physical_memory_config": make_analytical_dram_config(
-                    kind="HBM", generation=generation, capacity_bytes=_gb(capacity_gb),
-                    read_bandwidth_gbps=bandwidth_gbps, write_bandwidth_gbps=bandwidth_gbps,
-                    channels=channels, scope="single_hbm_stack_template",
-                ),
+                "physical_memory_config": physical_config,
             },
         ),
     )
+    component.metadata["capacity_unit"] = "GiB"
+    component.metadata["capacity_source_basis"] = "raw DRAM density in binary bits; bandwidth remains decimal GB/s"
     return ComponentPresetDefinition(
         preset_id=preset_id,
         name=name,
@@ -932,6 +945,7 @@ def _hbm_product_slice_preset(
         product_family
     )
     component_id = preset_id.replace("-", "_")
+    physical_channels = 8 if generation in {"HBM2", "HBM2E"} else 16
     cost_profile_template, cost_profile_parameter_basis = _hbm_cost_profile_template(
         component_id,
         bandwidth_gbps,
@@ -946,12 +960,12 @@ def _hbm_product_slice_preset(
                 protocol="HBM",
                 role="device",
                 version=generation,
-                lanes=16,
+                lanes=physical_channels,
                 bandwidth_gbps=bandwidth_gbps,
                 metadata=_port_metadata({
-                    "channels": 16,
-                    "physical_channel_total": 16,
-                    "channels_per_stack": 16,
+                    "channels": physical_channels,
+                    "physical_channel_total": physical_channels,
+                    "channels_per_stack": physical_channels,
                     "bandwidth_scope": "derived_product_stack_slice",
                 }),
             ),
@@ -996,15 +1010,11 @@ def _hbm_product_slice_preset(
                     "product_total_capacity_bytes": _gb(
                         visible_capacity_gb * product_stack_count
                     ),
-                    "unit_raw_capacity_bytes": _gb(raw_capacity_gb),
-                    "product_total_raw_capacity_bytes": _gb(
-                        raw_capacity_gb * product_stack_count
-                    ),
-                    "capacity_accounting": (
-                        "product_visible_and_raw_capacity_recorded_separately"
-                        if raw_capacity_gb != visible_capacity_gb
-                        else "product_visible_capacity_equals_modeled_raw_capacity"
-                    ),
+                    "unit_raw_capacity_bytes": None,
+                    "nominal_stack_capacity_budget_bytes": _gb(raw_capacity_gb),
+                    "raw_capacity_status": "unknown_product_die_organization",
+                    "product_total_raw_capacity_bytes": None,
+                    "capacity_accounting": "product_visible_budget_separate_from_selected_JEDEC_reference_raw_capacity",
                     "unit_bandwidth_gbps": bandwidth_gbps,
                     "product_total_bandwidth_gbps": bandwidth_gbps
                     * product_stack_count,
@@ -1042,11 +1052,16 @@ def _hbm_product_slice_preset(
                     capacity_bytes=_gb(visible_capacity_gb),
                     read_bandwidth_gbps=bandwidth_gbps,
                     write_bandwidth_gbps=bandwidth_gbps,
-                    channels=16, scope="derived_product_visible_hbm_stack_slice",
+                    channels=physical_channels, scope="derived_product_visible_hbm_stack_slice",
                 ),
             },
         ),
     )
+    geometry = component.metadata["physical_memory_config"]["metadata"]
+    composition = component.metadata["physical_composition"]
+    composition["unit_raw_capacity_bytes"] = geometry["raw_capacity_bytes"]
+    composition["product_total_raw_capacity_bytes"] = geometry["raw_capacity_bytes"] * product_stack_count
+    composition["raw_capacity_status"] = "selected_JEDEC_reference_not_verified_product_geometry"
     return ComponentPresetDefinition(
         preset_id=preset_id,
         name=name,
@@ -1309,8 +1324,8 @@ def _ssd_preset(
 
 
 JEDEC_HBM3_SOURCE = _source(
-    "JEDEC JESD238B.01 High Bandwidth Memory DRAM (HBM3)",
-    "https://www.jedec.org/standards-documents/docs/jesd238b01",
+    "JEDEC JESD238 (2022) High Bandwidth Memory DRAM (HBM3), original PDF mirror",
+    "https://gitcode.com/Open-source-documentation-tutorial/69c72",
     S1_STANDARD,
     publisher="JEDEC",
 )
@@ -2060,7 +2075,7 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
         generation="HBM2E",
         pin_speed_gbps=3.2,
         io_bits=1024,
-        channels=16,
+        channels=8,
         capacity_gb=16.0,
         bandwidth_gbps=3276.8,
         evidence_level=A_ANALYTICAL,
@@ -2631,6 +2646,7 @@ _SAMSUNG_HBM3E = _hbm_preset(
     "samsung-hbm3e-36gb-9_2",
     "Samsung HBM3E 12-High 36GB (9.2Gb/s per pin)",
     generation="HBM3E", pin_speed_gbps=9.2, io_bits=1024, channels=16,
+    die_density_gbits=24, dies_per_stack=12,
     capacity_gb=36.0, bandwidth_gbps=9.2 * 1024,
     evidence_level=S2_VENDOR_DECLARED,
     limitations=(
@@ -2645,7 +2661,7 @@ _SAMSUNG_HBM3E = _curated_clone(
     preset_id="samsung-hbm3e-36gb-9_2",
     name="Samsung HBM3E 12-High 36GB (9.2Gb/s per pin)",
     provenance={
-        "capacity_bytes": {"value": "36 GB", "unit": "GB_decimal", "source_field": "Samsung HBM3E 12-high product capacity"},
+        "capacity_bytes": {"value": 36 * 1024 ** 3, "unit": "bytes", "source_field": "Samsung 36GB 12-high raw DRAM density; JEDEC 24Gb x 12 / 8 = 36GiB"},
         "pin_speed_gbps": {"value": 9.2, "unit": "Gb/s_per_pin", "source_field": "Samsung HBM3E speed grade"},
         "interface_bits": {"value": 1024, "unit": "bit", "source_field": "HBM3E standard interface width"},
         "read_bandwidth_gbps": {"formula": "9.2 Gb/s/pin × 1024 bit ÷ 8 = 1177.6 GB/s = 9420.8 Gb/s", "unit": "Gb/s_decimal_one_way"},
@@ -2672,7 +2688,7 @@ _GENERIC_HBM3E = _curated_clone(
     preset_id="hbm3e-standard-24gb-8_0",
     name="HBM3E Standard 24GB 1.024TB/s Analytical Stack",
     provenance={
-        "capacity_bytes": {"value": "24 GB", "unit": "GB_decimal", "status": "analytical_common_stack_class"},
+        "capacity_bytes": {"value": 24 * 1024 ** 3, "unit": "bytes", "status": "selected_standard_raw_stack", "basis": "JEDEC binary DRAM density; 24 GiB raw stack reference"},
         "pin_speed_gbps": {"value": 8.0, "unit": "Gb/s_per_pin", "status": "analytical_speed_grade"},
         "interface_bits": {"value": 1024, "unit": "bit", "status": "HBM interface convention"},
         "read_bandwidth_gbps": {"formula": "8.0 Gb/s/pin × 1024 bit ÷ 8 = 1024 GB/s = 8192 Gb/s", "unit": "Gb/s_decimal_one_way"},

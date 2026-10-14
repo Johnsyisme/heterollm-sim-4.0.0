@@ -127,8 +127,13 @@ class CalibratedHbfProfileTests(unittest.TestCase):
             profile, use_hbf=True, request_count=1, prompt_tokens=32, output_tokens=4,
             interconnect_bandwidth_gbps=8.0,
         )
-        self.assertNotEqual(
-            baseline["summary"]["makespan_ns"], slower_gpu["summary"]["makespan_ns"]
+        self.assertGreater(
+            slower_gpu["resources"]["gpu_resource_busy_ns"]["gpu0.tensor_core"],
+            baseline["resources"]["gpu_resource_busy_ns"]["gpu0.tensor_core"],
+        )
+        self.assertGreater(baseline["resources"]["gpu_busy_recorded_batches"], 0)
+        self.assertGreaterEqual(
+            slower_gpu["summary"]["makespan_ns"], baseline["summary"]["makespan_ns"]
         )
         self.assertEqual(
             baseline["resources"]["dram_traffic"]["logical_read_bytes"],

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import __version__
+from .memory_service import DRAM_OPTIONAL_COUNTER_FIELDS, DRAM_OPTIONAL_TIME_FIELDS, DRAM_SERVICE_TIME_SCOPE
 from .config import ScenarioConfig, normalize_cost_profile_kind
 from .cost_models import (
     CPUProfile,
@@ -703,7 +704,7 @@ def _sum_batch_dram_traffic(result: OnlineScenarioResult) -> Dict[str, Any]:
         "logical_bytes": 0, "burst_count": 0, "row_hits": 0, "row_misses": 0,
         "row_conflicts": 0, "queue_wait_ns": 0.0, "service_ns": 0.0,
     }
-    optional = {"read_write_switches": 0, "refresh_wait_ns": 0.0, "turnaround_wait_ns": 0.0}
+    optional = {key: 0.0 if key in DRAM_OPTIONAL_TIME_FIELDS else 0 for key in DRAM_OPTIONAL_COUNTER_FIELDS}
     observed = {key: 0 for key in optional}
     source_statuses = {key: [] for key in optional}
     physical_batches = 0
@@ -764,6 +765,7 @@ def _sum_batch_dram_traffic(result: OnlineScenarioResult) -> Dict[str, Any]:
         "resource_totals": dict(sorted(resources.items())),
         "owner_ids": sorted({str(row.get("owner", "unknown")) for row in resources.values()}),
         "organization_profiles": profiles, "organization_profile_limit": 32,
+        "service_time_scope": DRAM_SERVICE_TIME_SCOPE,
         "accounting_semantics": (
             "resolved analytical burst bytes and controller waits; null means not fully recorded; "
             "empty organization_profiles is not evidence of complete geometry reporting; no device accuracy claim"

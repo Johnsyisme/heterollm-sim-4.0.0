@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT/"src"),str(ROOT/"scripts")]
 
 from heterollm_sim.memory_transfer import ResourceTimeline, TransferResource
-from heterollm_sim.memory_types import AccessRequest, Operation, make_hbf_config
+from heterollm_sim.memory_types import AccessRequest, Operation
+from heterollm_sim.physical_presets import resolve_physical_config
 from heterollm_sim.nand_core import NandCore
 
 MIB = 1024**2
@@ -43,15 +44,11 @@ def run_read_benchmark(*, port_gb_s=3000., link_gb_s=3000., page_bytes=16384,
         raise ValueError("fixed workload must have whole physical pages and whole transfer chunks")
     # Explicitly generous hypothetical geometry; parallel_units alone cannot
     # create physical units absent from the address mapping.
-    config = make_hbf_config(channels=64,targets_per_channel=4,dies_per_target=2,
-        luns_per_die=2,planes_per_lun=2,planes_independent=True,parallel_units=2048,
-        blocks_per_plane=max(1,math.ceil(payload_bytes/(2048*1024*page_bytes))),
-        pages_per_block=1024,page_bytes=page_bytes,host_granularity_bytes=1,
-        capacity_bytes=payload_bytes,host_bandwidth_gb_s=port_gb_s,
-        host_read_bandwidth_gb_s=port_gb_s,host_write_bandwidth_gb_s=port_gb_s,
-        internal_bandwidth_gb_s=12000.,page_read_ns=page_read_ns,
-        page_program_ns=75000.,front_ns=0.,max_outstanding_requests=buffer_slots,
-        max_expanded_segments=1)
+    config = resolve_physical_config("research_hbf_bandwidth", overrides={
+        "page_bytes": page_bytes, "capacity_bytes": payload_bytes,
+        "host_bandwidth_gb_s": port_gb_s, "host_read_bandwidth_gb_s": port_gb_s,
+        "host_write_bandwidth_gb_s": port_gb_s, "page_read_ns": page_read_ns,
+        "max_outstanding_requests": buffer_slots}, expand_geometry=True)
     timeline = ResourceTimeline()
     # True selects the actual per-page execution loop; limiting retained stage
     # detail does not change reservations. No bulk acceleration is used here.

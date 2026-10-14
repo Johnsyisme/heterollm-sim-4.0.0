@@ -37,6 +37,7 @@ from heterollm_sim.memory_types import (
     make_hbf_config, make_hbm_config, make_ssd_config,
 )
 from heterollm_sim.nand_core import NandCore
+from heterollm_sim.physical_presets import resolve_physical_config
 from heterollm_sim.reference import build_reference_scenario
 from heterollm_sim.serving import BatchCost, _OnlineRuntime, compile_serving_plan
 
@@ -57,21 +58,12 @@ def _serving_paged_scenario(
         capacity_bytes=hbm_capacity,
         metadata={
             **hbm.metadata,
-            "physical_memory_config": make_hbm_config(
-                capacity_bytes=hbm_capacity,
-                interface_bandwidth_gb_s=512.0,
-                burst_interval_ns=0.0,
-            ),
+            "physical_memory_config": resolve_physical_config(
+                "research_hbm_sessions", overrides={"capacity_bytes": hbm_capacity}),
         },
     )
-    hbf_physical = make_hbf_config(
-        capacity_bytes=hbf_capacity,
-        channels=8,
-        parallel_units=8,
-        host_bandwidth_gb_s=488.0,
-        host_read_bandwidth_gb_s=488.0,
-        host_write_bandwidth_gb_s=27.2,
-    )
+    hbf_physical = resolve_physical_config(
+        "research_hbf_sessions", overrides={"capacity_bytes": hbf_capacity})
     hbf = ComponentSpec(
         component_id="hbf0",
         kind="hbf",
@@ -651,16 +643,11 @@ def equal(left: float, right: float) -> bool:
 
 
 def hbm_config(**changes: Any) -> DramConfig:
-    return replace(make_hbm_config(
-        capacity_bytes=CAPACITY, interface_bandwidth_gb_s=488.0,
-        burst_interval_ns=0.0,
-    ), **changes)
+    return resolve_physical_config("research_hbm_acceptance", overrides=changes)
 
 
 def hbf_config(**changes: Any) -> NandConfig:
-    return replace(make_hbf_config(
-        capacity_bytes=CAPACITY, channels=8, parallel_units=8,
-    ), **changes)
+    return resolve_physical_config("research_hbf_sessions", overrides=changes)
 
 
 def access(core: Any, operation: str, *, size: int = PAGE,
@@ -686,6 +673,8 @@ def check_directional_bandwidth() -> dict[str, Any]:
 
 
 def check_legacy_configs() -> dict[str, Any]:
+    # Deliberate compatibility-test exception: this check exercises the old
+    # maker API itself. All study/simulation construction uses the catalog.
     old = make_ssd_config(host_bandwidth_gb_s=112.0)
     explicit = replace(old, host_read_bandwidth_gb_s=112.0, host_write_bandwidth_gb_s=112.0)
     for operation in ("read", "write"):
@@ -859,17 +848,10 @@ def _migration_hardware(*, relay: bool, storage: bool = False) -> HardwareSpec:
 
     hbm_capacity = 4 * PAGE
     hbf_capacity = 4 * PAGE
-    hbm_physical = make_hbm_config(
-        capacity_bytes=hbm_capacity,
-        interface_bandwidth_gb_s=488.0,
-        burst_interval_ns=0.0,
-    )
-    hbf_physical = make_hbf_config(
-        capacity_bytes=hbf_capacity,
-        channels=8,
-        parallel_units=8,
-        write_buffer_bytes=2 * PAGE,
-    )
+    hbm_physical = resolve_physical_config(
+        "research_hbm_acceptance", overrides={"capacity_bytes": hbm_capacity})
+    hbf_physical = resolve_physical_config("research_hbf_sessions", overrides={
+        "capacity_bytes": hbf_capacity, "write_buffer_bytes": 2 * PAGE})
     components = [
         ComponentSpec(
             "hbm", "hbm", capacity_bytes=hbm_capacity,
@@ -897,11 +879,8 @@ def _migration_hardware(*, relay: bool, storage: bool = False) -> HardwareSpec:
     links = []
     if relay:
         relay_capacity = 4 * PAGE
-        relay_physical = make_hbm_config(
-            capacity_bytes=relay_capacity,
-            interface_bandwidth_gb_s=256.0,
-            burst_interval_ns=0.0,
-        )
+        relay_physical = resolve_physical_config(
+            "research_hbm_relay", overrides={"capacity_bytes": relay_capacity})
         components.insert(
             1,
             ComponentSpec(
@@ -1295,8 +1274,17 @@ def check_backend_policy_sensitivity() -> dict[str, Any]:
         profile, use_hbf=True, request_count=1, prompt_tokens=32, output_tokens=4,
         interconnect_bandwidth_gbps=8.0,
     )
-    require(gpu["summary"]["makespan_ns"] != baseline["summary"]["makespan_ns"],
-            "GPU compute override must change full-backend makespan")
+    baseline_tensor_busy = baseline["resources"]["gpu_resource_busy_ns"].get("gpu0.tensor_core", 0.0)
+    override_tensor_busy = gpu["resources"]["gpu_resource_busy_ns"].get("gpu0.tensor_core", 0.0)
+    require(baseline["resources"]["gpu_busy_recorded_batches"] > 0
+            and gpu["resources"]["gpu_busy_recorded_batches"] > 0,
+            "GPU occupancy must come from actual persistent-live-kernel batches")
+    require(override_tensor_busy > baseline_tensor_busy > 0.0,
+            "slower GPU compute must increase actually executed tensor-core occupancy")
+    # Memory and compute overlap. A slower GPU can consume more compute time
+    # without changing makespan while physical HBM service remains limiting.
+    require(gpu["summary"]["makespan_ns"] >= baseline["summary"]["makespan_ns"],
+            "slower GPU compute must not shorten the fixed full-backend trace")
     require(gpu["resources"]["dram_traffic"]["logical_read_bytes"] == baseline["resources"]["dram_traffic"]["logical_read_bytes"],
             "GPU compute override must not change logical DRAM traffic")
     require(host["summary"]["makespan_ns"] > baseline["summary"]["makespan_ns"],
@@ -1308,6 +1296,11 @@ def check_backend_policy_sensitivity() -> dict[str, Any]:
         "hbm_backend": "DramCore",
         "gpu_reference_makespan_ns": baseline["summary"]["makespan_ns"],
         "gpu_override_makespan_ns": gpu["summary"]["makespan_ns"],
+        "gpu_reference_tensor_busy_ns": baseline_tensor_busy,
+        "gpu_override_tensor_busy_ns": override_tensor_busy,
+        "gpu_makespan_unchanged": gpu["summary"]["makespan_ns"] == baseline["summary"]["makespan_ns"],
+        "gpu_check_scope": "actual tensor-core occupancy must increase; overlapped HBM service can leave total makespan unchanged",
+        "gpu_busy_scope": baseline["resources"]["gpu_busy_scope"],
         "host_scaled_makespan_ns": host["summary"]["makespan_ns"],
         "hbf_slow_link_makespan_ns": link["summary"]["makespan_ns"],
         "live_hbm_core_observations": live_hbm,

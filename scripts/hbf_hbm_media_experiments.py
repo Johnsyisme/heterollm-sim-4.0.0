@@ -36,10 +36,11 @@ from heterollm_sim.memory_transfer import ResourceTimeline, summarize_batch
 from heterollm_sim.memory_types import (
     AccessRequest,
     Operation,
-    make_hbf_config,
-    make_hbm_config,
 )
 from heterollm_sim.nand_core import NandCore
+from heterollm_sim.physical_presets import resolve_physical_config
+from heterollm_sim.physical_contract import reconfigure_physical_config
+from hbf_hbm_sessions import _executed_core_configurations
 
 PAGE = 16_384
 LARGE_PAGE_ASSUMPTION = 1_572_864
@@ -68,20 +69,10 @@ def _microbenchmark_availability() -> dict[str, str]:
 
 def _write_core(*, write_buffer_bytes: int, program_ns: float,
                 page_bytes: int = PAGE, total_bytes: int = 8 * PAGE) -> NandCore:
-    config = make_hbf_config(
-        capacity_bytes=max(16, (total_bytes + page_bytes - 1) // page_bytes) * page_bytes,
-        page_bytes=page_bytes,
-        channels=4,
-        parallel_units=4,
-        host_bandwidth_gb_s=64.0,
-        host_read_bandwidth_gb_s=64.0,
-        host_write_bandwidth_gb_s=16.0,
-        internal_bandwidth_gb_s=128.0,
-        page_program_ns=float(program_ns),
-        write_buffer_bytes=int(write_buffer_bytes),
-        # This switch is the explicit host-ack/media-drain model.
-        metadata={"buffered_write_mode": True},
-    )
+    config = resolve_physical_config("research_hbf_media_write", overrides={
+        "capacity_bytes": max(16, (total_bytes + page_bytes - 1) // page_bytes) * page_bytes,
+        "page_bytes": page_bytes, "page_program_ns": float(program_ns),
+        "write_buffer_bytes": int(write_buffer_bytes)})
     return NandCore(config, timeline=ResourceTimeline(), capture_details=True)
 
 
@@ -296,11 +287,8 @@ def run_group_05_write_buffer() -> dict[str, Any]:
 def _migration_hardware(*, relay_capacity_bytes: int | None = None,
                         minimum_capacity_bytes: int = 0) -> HardwareSpec:
     capacity = max(128 * PAGE, ((minimum_capacity_bytes + PAGE - 1) // PAGE) * PAGE)
-    hbm = make_hbm_config(capacity_bytes=capacity, interface_bandwidth_gb_s=256.0,
-                          burst_interval_ns=0.0)
-    hbf = make_hbf_config(capacity_bytes=capacity, channels=32, parallel_units=32,
-                          host_bandwidth_gb_s=128.0, internal_bandwidth_gb_s=128.0,
-                          host_read_bandwidth_gb_s=128.0, host_write_bandwidth_gb_s=32.0)
+    hbm = resolve_physical_config("research_hbm_relay", overrides={"capacity_bytes": capacity})
+    hbf = resolve_physical_config("research_hbf_migration", overrides={"capacity_bytes": capacity})
     components = (
         ComponentSpec("hbf", "hbf", capacity_bytes=capacity,
                       read_bandwidth_gbps=1024.0, write_bandwidth_gbps=256.0,
@@ -308,7 +296,8 @@ def _migration_hardware(*, relay_capacity_bytes: int | None = None,
         ComponentSpec("gpu_hbm", "hbm", capacity_bytes=capacity,
                       bandwidth_gbps=2048.0, metadata={"physical_memory_config": hbm}),
         ComponentSpec("relay_hbm", "hbm", capacity_bytes=relay_capacity_bytes or capacity,
-                      bandwidth_gbps=2048.0, metadata={"physical_memory_config": replace(hbm, capacity_bytes=relay_capacity_bytes or capacity)}),
+                      bandwidth_gbps=2048.0, metadata={"physical_memory_config": reconfigure_physical_config(
+                          hbm, overrides={"capacity_bytes": relay_capacity_bytes or capacity})}),
     )
     links = (
         LinkSpec("direct", "hbf", "d", "gpu_hbm", "d", "pcie",
@@ -371,6 +360,7 @@ def _run_path_row(path: str, payload_bytes: int = 16 * PAGE, *, relay_capacity_b
             "physical_write_bytes": sum(row["physical_write_bytes"] for row in rows),
             "resource_bytes": dict(runtime.timeline.bytes_moved),
             "resource_busy_ns": dict(runtime.timeline.busy_ns),
+            "executed_physical_configurations": _executed_core_configurations(runtime),
             "observed_metrics": {
                 "measurement_window_ns": makespan,
                 "measurement_window": "both flows released at zero through last target-memory completion",

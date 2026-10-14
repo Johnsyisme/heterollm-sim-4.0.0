@@ -4,11 +4,13 @@ Incomplete components may exist in the editor. They must never execute by
 substituting a bandwidth-only service or the memory core's example defaults.
 """
 
-from dataclasses import asdict, is_dataclass
+from copy import deepcopy
+from dataclasses import asdict, fields, is_dataclass, replace
+from math import gcd
 from typing import Mapping
 
 from .memory_types import (
-    DRAM_BANK_GROUP_TIMING_FIELDS,
+    DRAM_BANK_GROUP_TIMING_FIELDS, HBM_CONTROL_TIMING_FIELDS,
     DramConfig, NandConfig, Operation, parse_physical_memory_config,
 )
 
@@ -42,6 +44,47 @@ _NAND_REQUIRED = frozenset({
 })
 
 
+def _validate_standard_hbm_organization(config, prefix):
+    """A retained standard label must still match its selected organization.
+
+    This checks the limited organization tables represented by the HBM
+    builder. It does not verify a vendor part, timing values, or provenance
+    supplied by an external author. Synthetic and legacy inputs are untouched.
+    """
+    if (isinstance(config, DramConfig)
+            and str(config.metadata.get("control_status", "")).startswith("jedec_")
+            and config.control_mode != "jedec_hbm"):
+        raise ValueError(prefix + "JEDEC control status requires control_mode=jedec_hbm")
+    if (not isinstance(config, DramConfig) or config.kind.value != "HBM"
+            or config.metadata.get("geometry_status") != "standard_organization"):
+        return
+    density = config.metadata.get("die_density_gbits")
+    hbm4 = config.generation == "HBM4"
+    hbm3 = config.generation in {"HBM3", "HBM3E"}
+    hbm2 = config.generation in {"HBM2", "HBM2E"}
+    densities = (24, 32) if hbm4 else (8, 16, 24, 32) if hbm3 else (16,)
+    heights = (4, 8, 12, 16) if hbm4 or hbm3 else (4, 8)
+    if (not (hbm4 or hbm3 or hbm2) or isinstance(density, bool) or not isinstance(density, int)
+            or density not in densities or config.dies_per_stack not in heights):
+        raise ValueError(prefix + "standard HBM organization requires a supported generation, die_density_gbits and dies_per_stack")
+    expected = {
+        "channels": 32 if hbm4 else 16 if hbm3 else 8,
+        "subchannels_per_channel": 1, "pseudo_channels_per_channel": 2,
+        "ranks_per_channel": 1,
+        "bank_groups_per_rank": config.dies_per_stack // 2 if hbm4 else config.dies_per_stack,
+        "banks_per_group": 8 if hbm4 else 4,
+        "rows_per_bank": density * 512 if hbm4 else density * 1024 if hbm3 else 32768,
+        "row_bytes": 1024, "burst_bytes": 32, "data_width_bits": 64 if hbm2 else 32,
+        "bank_geometry_scope": "per_stack", "stack_interface_mode": "independent",
+    }
+    conflicts = [name for name, value in expected.items() if getattr(config, name) != value]
+    if config.data_lanes is not None and config.data_lanes != expected["channels"] * 2:
+        conflicts.append("data_lanes")
+    if conflicts:
+        raise ValueError(prefix + "standard HBM organization conflicts with " + ", ".join(sorted(conflicts))
+                         + "; custom geometry must be marked explicit_assumption")
+
+
 def parse_required_physical_config(component_id, kind, raw):
     """Validate authored fields before dataclass defaults can fill omissions."""
     prefix = "component {} ({}): ".format(component_id, kind)
@@ -53,6 +96,9 @@ def parse_required_physical_config(component_id, kind, raw):
         raise ValueError(prefix + "physical_memory_config is required; reload a complete hardware preset or configure the physical memory core. Aggregate-cost fallback is disabled")
     required = _NAND_REQUIRED if kind in NAND_COMPONENT_KINDS else _DRAM_REQUIRED
     missing = sorted(name for name in required if raw.get(name) is None)
+    if raw.get("control_mode") == "jedec_hbm":
+        missing += sorted(name for name in (*HBM_CONTROL_TIMING_FIELDS, "activated_row_msb", "refresh_policy")
+                          if name not in raw)
     if kind in DRAM_COMPONENT_KINDS and not (
         raw.get("interface_bandwidth_gb_s") is not None
         or raw.get("lane_bandwidth_gb_s") is not None
@@ -77,6 +123,7 @@ def parse_required_physical_config(component_id, kind, raw):
     )
     if parsed.kind.value not in allowed:
         raise ValueError(prefix + "physical_memory_config.kind must be " + "/".join(sorted(allowed)))
+    _validate_standard_hbm_organization(parsed, prefix)
     return parsed
 
 
@@ -139,6 +186,7 @@ def parse_execution_physical_config(raw):
     than silently acquiring a different geometry or timing configuration.
     """
     if isinstance(raw, (DramConfig, NandConfig)):
+        _validate_standard_hbm_organization(raw, "execution: ")
         return raw
     if not isinstance(raw, Mapping) or raw.get("kind") is None:
         raise ValueError("physical_memory_config missing explicit fields: kind")
@@ -146,3 +194,170 @@ def parse_execution_physical_config(raw):
     kind = str(getattr(value, "value", value)).strip().upper().replace("-", "")
     component_kind = "gddr" if kind in {"GDDR6", "GDDR6X", "GDDR7"} else kind.lower()
     return parse_required_physical_config("execution", component_kind, raw)
+
+
+def reconfigure_physical_config(config, *, overrides=None, expand_geometry=False):
+    """Update a complete physical config through the execution contract.
+
+    Overrides use the native DRAM/NAND field names and units. Metadata is
+    merged without sharing caller-owned dictionaries. Capacity is never
+    rounded or silently increased. With ``expand_geometry=True``, only the
+    number of rows per bank or blocks per plane may grow to fit that declared
+    capacity; all other geometry remains explicitly authored.
+    """
+    if not isinstance(expand_geometry, bool):
+        raise ValueError("expand_geometry must be a boolean")
+    parsed = parse_execution_physical_config(config)
+    if overrides is None:
+        overrides = {}
+    if not isinstance(overrides, Mapping):
+        raise ValueError("physical config overrides must be a mapping")
+    allowed = {item.name for item in fields(parsed)}
+    unknown = set(overrides) - allowed
+    if unknown:
+        raise ValueError("unknown physical config override fields: " + ", ".join(sorted(map(str, unknown))))
+    payload = asdict(parsed)
+    updates = deepcopy(dict(overrides))
+    if isinstance(parsed, DramConfig) and updates.get("control_mode", parsed.control_mode) == "jedec_hbm":
+        # Preserve the meaning of old experiment knobs while giving the new
+        # command-anchored fields precedence when both are explicitly supplied.
+        for old, targets in {
+            "open_ns": ("activate_to_read_ns", "activate_to_write_ns"),
+            "close_ns": ("precharge_to_activate_ns",),
+            "write_recovery_ns": ("write_to_precharge_ns",),
+        }.items():
+            if old in updates:
+                for name in targets:
+                    updates.setdefault(name, updates[old])
+        if ("minimum_active_ns" in updates or "precharge_to_activate_ns" in updates) and "activate_cycle_ns" not in updates:
+            updates["activate_cycle_ns"] = (updates.get("minimum_active_ns", parsed.minimum_active_ns)
+                                            + updates.get("precharge_to_activate_ns", parsed.precharge_to_activate_ns))
+        interval = updates.get("refresh_interval_ns")
+        if (isinstance(interval, (int, float)) and not isinstance(interval, bool) and interval > 0
+                and "maximum_active_ns" not in updates):
+            updates["maximum_active_ns"] = 9 * interval
+    if "metadata" in updates:
+        if not isinstance(updates["metadata"], Mapping):
+            raise ValueError("physical config metadata must be a mapping")
+        updates["metadata"] = {**payload["metadata"], **updates["metadata"]}
+    payload.update(updates)
+    if expand_geometry:
+        def positive(name):
+            value = payload[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(name + " must be a positive integer")
+            return value
+
+        capacity = payload.get("capacity_bytes")
+        if capacity is not None:
+            capacity = positive("capacity_bytes")
+            if isinstance(parsed, DramConfig):
+                lanes = (positive("data_lanes") if payload.get("data_lanes") is not None else
+                         positive("channels") * positive("subchannels_per_channel") * positive("pseudo_channels_per_channel"))
+                row_bytes = positive("row_bytes")
+                addressable_dies = (1 if payload.get("bank_geometry_scope", "per_die") == "per_stack"
+                                    else positive("dies_per_stack"))
+                # lanes here is per stack. Independent interfaces flatten
+                # stacks into execution lanes, without another capacity copy.
+                stripe = (positive("stacks") * addressable_dies * lanes *
+                          positive("ranks_per_channel") * positive("bank_groups_per_rank") *
+                          positive("banks_per_group") * row_bytes)
+                rows = max(positive("rows_per_bank"), (capacity + stripe - 1) // stripe)
+                # The address mapper requires the interleave quantum to divide
+                # every bank, including when it spans more than one row.
+                if payload.get("interleave_bytes") is not None:
+                    interleave = positive("interleave_bytes")
+                    row_multiple = interleave // gcd(interleave, row_bytes)
+                    rows = ((rows + row_multiple - 1) // row_multiple) * row_multiple
+                payload["rows_per_bank"] = rows
+            else:
+                stripe = 1
+                for name in ("channels", "targets_per_channel", "dies_per_target", "luns_per_die",
+                             "planes_per_lun", "pages_per_block", "page_bytes"):
+                    stripe *= positive(name)
+                payload["blocks_per_plane"] = max(positive("blocks_per_plane"), (capacity + stripe - 1) // stripe)
+    if isinstance(parsed, DramConfig):
+        geometry_fields = {
+            "kind", "generation", "channels", "subchannels_per_channel",
+            "pseudo_channels_per_channel", "stacks", "dies_per_stack",
+            "ranks_per_channel", "bank_groups_per_rank", "banks_per_group",
+            "rows_per_bank", "row_bytes", "burst_bytes", "data_width_bits",
+            "data_lanes", "interleave_bytes", "bank_geometry_scope", "stack_interface_mode",
+        }
+        changed = {name for name in geometry_fields if payload[name] != getattr(parsed, name)}
+        sourced_statuses = {"standard_organization", "explicit_assumption"}
+        if changed and (parsed.metadata.get("geometry_status") in sourced_statuses
+                        or payload["metadata"].get("geometry_status") in sourced_statuses):
+            metadata = deepcopy(payload["metadata"])
+            metadata["geometry_status"] = "explicit_assumption"
+            metadata["parameter_basis"] = "explicit_organization_with_analytical_timing"
+            metadata["vendor_verified"] = False
+            metadata["geometry_basis"] = "explicitly modified organization; no longer a standard organization preset"
+            # These keys describe the whole organization. Field-level sources
+            # for unchanged facts remain useful, but cannot certify overrides.
+            for name in ("geometry_source", "geometry_sources", "geometry_standard",
+                         "geometry_verified", "organization_source", "organization_basis",
+                         "organization_selection", "die_density_gbits", "sid_count",
+                         "physical_channels_per_stack", "physical_channel_width_bits",
+                         "pseudo_channel_width_bits", "stack_data_width_bits",
+                         "banks_per_pseudo_channel", "bank_groups_per_pseudo_channel",
+                         "capacity_formula", "jedec_standard", "jedec_reference_file",
+                         "source_provenance"):
+                metadata.pop(name, None)
+            provenance = dict(metadata.get("parameter_provenance", {}))
+            if changed & {"kind", "generation", "pseudo_channels_per_channel"}:
+                for name in ("channel_operation_mode", "channel_operation_mode_basis"):
+                    metadata.pop(name, None)
+                    provenance.pop(name, None)
+            if changed & {"kind", "generation", "row_bytes"}:
+                # Effective and activated page sizes describe the original
+                # organization. They no longer explain a different row size
+                # or generation; source_documents retains the source itself.
+                for name in ("effective_addressed_page_bytes", "activated_page_bytes",
+                             "row_bytes_basis", "geometry_limitations"):
+                    metadata.pop(name, None)
+                    provenance.pop(name, None)
+            for name in changed:
+                automatic = name == "rows_per_bank" and payload[name] != updates.get(name, getattr(parsed, name))
+                provenance[name] = {
+                    "status": "explicit_assumption",
+                    "source": "capacity_expansion" if automatic else "physical_config_override",
+                }
+            metadata["parameter_provenance"] = provenance
+            payload["metadata"] = metadata
+        if parsed.control_mode == "jedec_hbm" or payload["control_mode"] == "jedec_hbm":
+            metadata = deepcopy(payload["metadata"])
+            provenance = dict(metadata.get("parameter_provenance", {}))
+            timing_fields = set(HBM_CONTROL_TIMING_FIELDS) | set(DRAM_BANK_GROUP_TIMING_FIELDS) | {
+                "read_latency_ns", "write_latency_ns", "open_ns", "close_ns", "burst_interval_ns",
+                "read_recovery_ns", "write_recovery_ns", "read_to_write_ns", "write_to_read_ns",
+                "refresh_policy", "control_mode", "activated_row_msb",
+            }
+            for name in timing_fields.intersection(updates):
+                if payload[name] != getattr(parsed, name):
+                    provenance[name] = {"status": "explicit_assumption", "source": "physical_config_override",
+                                        "basis": "authored timing/control experiment; not a JEDEC or vendor timing value"}
+            unknown = metadata.get("unconfigured_timing_parameters", [])
+            metadata["unconfigured_timing_parameters"] = [name for name in unknown if not payload.get(name)]
+            if payload["control_mode"] != "jedec_hbm":
+                metadata["control_status"] = "legacy_analytical_control"
+                metadata["control_basis"] = "explicit legacy model selection; JEDEC command rules are not executed"
+            elif changed:
+                metadata["control_status"] = "jedec_command_model_on_custom_geometry"
+            metadata["parameter_provenance"] = provenance
+            payload["metadata"] = metadata
+    # A complete serialized round-trip deliberately reuses the same strict
+    # boundary as execution, rather than dataclass or example-helper defaults.
+    result = parse_execution_physical_config(payload)
+    if isinstance(result, DramConfig) and "raw_capacity_bytes" in result.metadata:
+        # Visible-capacity overrides can leave geometry unchanged. Keep this
+        # sourced organization's displayed capacity accounting synchronized.
+        metadata = deepcopy(result.metadata)
+        metadata.update(
+            raw_capacity_bytes=result.computed_capacity_bytes,
+            raw_stack_capacity_bytes=result.computed_capacity_bytes // result.stacks,
+            visible_capacity_bytes=result.capacity_bytes,
+            unexposed_capacity_bytes=result.computed_capacity_bytes - result.capacity_bytes,
+        )
+        result = replace(result, metadata=metadata)
+    return result

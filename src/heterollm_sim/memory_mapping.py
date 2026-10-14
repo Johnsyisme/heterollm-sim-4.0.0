@@ -24,7 +24,7 @@ def map_dram_address(config: DramConfig, address: int) -> AddressMapping:
     _check_address(address, config.effective_capacity_bytes)
     interleave = config.interleave_bytes or config.burst_bytes
     per_die = config.lane_count * config.bank_count * config.rows_per_bank * config.row_bytes
-    per_stack = per_die * config.dies_per_stack
+    per_stack = per_die * config.addressable_die_count
     stack, stack_local = divmod(address, per_stack)
     die, local = divmod(stack_local, per_die)
     interleave_bursts = interleave // config.burst_bytes
@@ -32,6 +32,8 @@ def map_dram_address(config: DramConfig, address: int) -> AddressMapping:
         local // config.burst_bytes, interleave_bursts
     )
     lane = interleave_block % config.lane_count
+    if config.stack_interface_mode == "independent":
+        stack = lane // config.lanes_per_stack
     bank_linear = interleave_block // config.lane_count
     bank = bank_linear % config.bank_count
     # ``bank_linear`` contains both the bank coordinate and the index inside
@@ -45,14 +47,14 @@ def map_dram_address(config: DramConfig, address: int) -> AddressMapping:
     # Decode the flat lane while allowing data_lanes to describe an arbitrary
     # package connection.  Coordinates are descriptive; lane remains the
     # authoritative data resource id.
-    rem = lane
+    rem = lane % config.lanes_per_stack
     pseudo = rem % config.pseudo_channels_per_channel
     rem //= config.pseudo_channels_per_channel
     subchannel = rem % config.subchannels_per_channel
     rem //= config.subchannels_per_channel
     channel = rem % config.channels
-    # ``stack`` was decoded above from capacity; lane coordinates remain
-    # interface coordinates and therefore do not multiply with stack count.
+    # Independent stacks are interleaved in the global lane number; channel
+    # and pseudo-channel coordinates remain local to their physical stack.
     rank = bank // (config.bank_groups_per_rank * config.banks_per_group)
     bank_in_rank = bank % (config.bank_groups_per_rank * config.banks_per_group)
     bank_group = bank_in_rank // config.banks_per_group

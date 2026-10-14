@@ -13,6 +13,7 @@
 </style>
 </head>
 <body>
+<aside role="note" style="padding:16px 24px;background:#fff1cd;color:#392a00;font:16px/1.6 sans-serif">历史模型说明：本页保留的是旧版等效几何示例，16 lane、8 KiB 行和 64 B burst 等数值不代表 JEDEC HBM3/E 规格，也不再是当前预设。当前配置已改按 JEDEC 原协议表格生成；请参见项目 docs/hbm_geometry.md。此页交互结果不可用于解释更新后的实验。</aside>
 <header>
 <div class="top"><span class="brand">HETEROLLM SIM / MODEL NOTES</span><span class="edition">后端代码解读 · 2026.10.13<br>可离线打开 · 无外部依赖</span></div>
 <div class="hero"><div><div class="eyebrow">Inside the memory model</div><h1>一笔 HBM 访问，<br>如何变成<em>时间与成本</em>。</h1></div><p>以当前工作区实现为准，从请求地址到资源时间线逐步拆解。点击章节、切换例子、播放访问过程；所有数值都标明所属模型与假设。</p></div>

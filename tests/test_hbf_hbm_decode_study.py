@@ -83,3 +83,38 @@ def test_failed_point_does_not_discard_other_completed_points(monkeypatch,tmp_pa
         study.run_decode_study(models=('fixture',),contexts=(1,),output=2,point_dir=tmp_path)
     assert len(failure.value.completed_rows)==1
     assert (tmp_path/'fixture-1-B_all_kv_hbf-2.json').exists()
+
+
+@pytest.mark.parametrize('stale_contract', [
+    'physical_core_unified_hardware_catalog_v2',
+    'physical_core_unified_hardware_catalog_v3/serving-points-v4',
+])
+def test_geometry_revision_invalidates_decode_resume(monkeypatch, tmp_path, stale_contract):
+    import json
+    from concurrent.futures import Future
+    import hbf_hbm_decode_study as study
+    submissions = []
+    for architecture in study.ARCHITECTURES:
+        point = ('fixture', 1, architecture, 2)
+        saved = {'memory_execution_contract': stale_contract,
+                 'core_execution_audit': {'executed_physical_configurations': {'hbm0': {}}},
+                 'parameters': study.point_parameters(point)}
+        (tmp_path / ('-'.join(map(str, point)) + '.json')).write_text(json.dumps(saved), encoding='utf-8')
+    class ImmediatePool:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def submit(self, function, point):
+            submissions.append(point)
+            future = Future()
+            future.set_result({'id': point[2], 'memory_execution_contract': study.EXECUTION_CONTRACT,
+                               'decode_measurement': {'node_decode_tps': 1.},
+                               'tpot_ns': {'p50': 1e9}, 'wall_seconds': 1.})
+            return future
+    monkeypatch.setattr(study, 'ProcessPoolExecutor', ImmediatePool)
+    monkeypatch.setattr(study, 'core_checks', lambda row: {'valid': True})
+    monkeypatch.setattr(study, 'summarize_decode', lambda rows, **kwargs: {'rows': rows})
+    result = study.run_decode_study(models=('fixture',), contexts=(1,), output=2,
+                                    point_dir=tmp_path, resume=True)
+    assert len(submissions) == len(result['rows']) == 2
+    assert all(row['memory_execution_contract'] == study.EXECUTION_CONTRACT for row in result['rows'])

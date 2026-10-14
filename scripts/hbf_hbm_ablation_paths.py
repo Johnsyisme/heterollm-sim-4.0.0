@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from heterollm_sim.communication import TopologyRouter
 from heterollm_sim.cost_models import HBMProfile, HostMemoryProfile
 from heterollm_sim.ir import LinkSpec, PortSpec
-from heterollm_sim.memory_types import make_hbf_config, make_hbm_config, parse_physical_memory_config
+from heterollm_sim.physical_presets import resolve_physical_config
+from heterollm_sim.physical_contract import require_physical_memory_config, reconfigure_physical_config
 from hbf_hbm_serving_study import build_study_scenario
 from hbf_hbm_experiments import group, serving_row
 
@@ -53,16 +54,12 @@ def build_ablation_scenario(medium="hbf", ablation="ideal", *, batch=4, prompt=1
         raise ValueError("HBM is the unchanged ideal comparator")
     s = build_study_scenario("B_all_kv_hbf", batch=batch, prompt=prompt, output=output)
     ident = "hbf0" if medium == "hbf" else "hbm_kv"
-    capacity, bandwidth = 16 * MIB, 64.
-    common = dict(capacity_bytes=capacity, max_outstanding_requests=4096, max_expanded_segments=128)
+    physical = resolve_physical_config("research_" + medium + "_ablation",
+                                       overrides=ABLATIONS[ablation])
+    capacity = physical.capacity_bytes
+    bandwidth = (physical.host_bandwidth_gb_s if medium == "hbf"
+                 else physical.physical_interface_bandwidth_gb_s)
     if medium == "hbf":
-        physical = make_hbf_config(channels=1, targets_per_channel=1, dies_per_target=1,
-            luns_per_die=1, planes_per_lun=1, parallel_units=64, blocks_per_plane=4096,
-            pages_per_block=64, page_bytes=64, host_granularity_bytes=64, internal_transfer_bytes=64,
-            host_bandwidth_gb_s=bandwidth, host_read_bandwidth_gb_s=bandwidth,
-            host_write_bandwidth_gb_s=bandwidth, internal_bandwidth_gb_s=1e12,
-            page_read_ns=0., page_program_ns=0., front_ns=0., **common)
-        physical = replace(physical, **ABLATIONS[ablation])
         profile = HostMemoryProfile(bandwidth_gb_s=bandwidth, efficiency=1.,
             read_bandwidth_gb_s=bandwidth, write_bandwidth_gb_s=physical.host_write_bandwidth_gb_s,
             resource_id=ident+".memory", transaction_bytes=64,
@@ -72,11 +69,6 @@ def build_ablation_scenario(medium="hbf", ablation="ideal", *, batch=4, prompt=1
             parallel_lanes=physical.parallel_units, max_outstanding_requests=physical.max_outstanding_requests)
         profile_kind = "host_memory"
     else:
-        physical = make_hbm_config(channels=1, pseudo_channels_per_channel=1, data_lanes=1,
-            banks_per_group=1, rows_per_bank=4096, row_bytes=4096, burst_bytes=64,
-            interface_bandwidth_gb_s=bandwidth, read_bandwidth_gb_s=bandwidth, write_bandwidth_gb_s=bandwidth,
-            open_ns=0., close_ns=0., read_latency_ns=0., write_latency_ns=0., burst_interval_ns=0.,
-            read_recovery_ns=0., write_recovery_ns=0., read_to_write_ns=0., write_to_read_ns=0., **common)
         profile = HBMProfile(bandwidth_gb_s=bandwidth, efficiency=1., read_bandwidth_gb_s=bandwidth,
             write_bandwidth_gb_s=bandwidth, resource_id=ident+".memory", transaction_bytes=64,
             max_outstanding_requests=4096, parallel_lanes=64)
@@ -119,7 +111,7 @@ def run_ablation_case(medium, ablation, **parameters):
     endpoint = s.hardware.get_component(s.placement.kv_policy.cache_component)
     row["parameters"] = {"medium":medium,"ablation":ablation,**parameters}
     row["ablation_contract"] = {"kv_capacity_bytes":endpoint.capacity_bytes,
-        "physical_config":asdict(parse_physical_memory_config(endpoint.metadata["physical_memory_config"])),
+        "physical_config":asdict(require_physical_memory_config(endpoint)),
         "changed_fields_from_hbf_ideal":ABLATIONS[ablation],
         "common_weights_and_workspace":"hbm0", "extra_link_serialization":False,
         "scope":"Ideal 64-byte KV media equivalence, not realistic NAND pages or production HBM calibration"}
@@ -155,8 +147,7 @@ def build_path_scenario(path_mode="direct", *, total_link_gb_s=64., weight_share
         package_id="package0",die_id="path-relay-die",
         bandwidth_gbps=1024.,read_bandwidth_gbps=1024.,write_bandwidth_gbps=1024.,
         ports=(),metadata={"memory_service_owner":"relaymem.memory",
-            "physical_memory_config":make_hbm_config(capacity_bytes=16*MIB,interface_bandwidth_gb_s=128.,
-                read_bandwidth_gb_s=128.,write_bandwidth_gb_s=128.,burst_interval_ns=0.)})
+            "physical_memory_config":resolve_physical_config("research_hbm_path_relay")})
     components={c.component_id:c for c in (*s.hardware.components,relay)}
     metadata=copy.deepcopy(s.placement.metadata)
     if mixed_weights:
@@ -164,12 +155,14 @@ def build_path_scenario(path_mode="direct", *, total_link_gb_s=64., weight_share
         # memory classes. Use two explicit fixed physical partitions rather
         # than silently assigning one component incompatible roles.
         hbf=components["hbf0"]
-        physical=parse_physical_memory_config(hbf.metadata["physical_memory_config"])
-        partition=replace(physical,capacity_bytes=hbf.capacity_bytes//2,channels=physical.channels//2,
-            parallel_units=physical.parallel_units//2,host_bandwidth_gb_s=physical.host_bandwidth_gb_s/2,
-            host_read_bandwidth_gb_s=physical.host_read_bandwidth_gb_s/2,
-            host_write_bandwidth_gb_s=physical.host_write_bandwidth_gb_s/2,
-            internal_bandwidth_gb_s=physical.internal_bandwidth_gb_s/2)
+        physical=require_physical_memory_config(hbf)
+        partition=reconfigure_physical_config(physical, overrides={
+            "capacity_bytes": hbf.capacity_bytes//2, "channels": physical.channels//2,
+            "parallel_units": physical.parallel_units//2,
+            "host_bandwidth_gb_s": physical.host_bandwidth_gb_s/2,
+            "host_read_bandwidth_gb_s": physical.host_read_bandwidth_gb_s/2,
+            "host_write_bandwidth_gb_s": physical.host_write_bandwidth_gb_s/2,
+            "internal_bandwidth_gb_s": physical.internal_bandwidth_gb_s/2})
         hbf=replace(hbf,capacity_bytes=partition.capacity_bytes,bandwidth_gbps=hbf.bandwidth_gbps/2,
             read_bandwidth_gbps=hbf.read_bandwidth_gbps/2,write_bandwidth_gbps=hbf.write_bandwidth_gbps/2,
             metadata={**{k:v for k,v in hbf.metadata.items() if k!="memory_service"},

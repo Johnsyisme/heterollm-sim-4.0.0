@@ -30,7 +30,8 @@ def test_hbm_builder_retains_declared_channels_width_and_rate(generation, channe
     item = _component("memory", "hbm", (port,), capacity_bytes=64_000_000_000,
         read_bandwidth_gbps=bandwidth, write_bandwidth_gbps=bandwidth, role="active_memory")
     config = parse_physical_memory_config(item.metadata["physical_memory_config"])
-    assert config.channels == config.lane_count == channels
+    assert config.channels == channels
+    assert config.lane_count == channels * 2
     assert config.generation == generation
     assert config.lane_count * config.data_width_bits == channels * 64
     assert config.data_rate_mt_s == rate
@@ -68,17 +69,19 @@ def test_explicit_physical_configuration_remains_authoritative():
     assert parse_physical_memory_config(item.metadata["physical_memory_config"]).channels == 5
 
 
-def test_bundled_reference_hbm_geometry_is_unchanged():
+def test_bundled_reference_hbm_uses_standard_organization():
     scenario = build_reference_scenario()
     hbm = scenario.hardware.get_component("hbm0")
     config = parse_physical_memory_config(hbm.metadata["physical_memory_config"])
     assert config.generation == "HBM3"
     assert (config.stacks, config.dies_per_stack, config.channels,
-            config.subchannels_per_channel, config.pseudo_channels_per_channel) == (1, 1, 16, 1, 1)
-    assert (config.bank_count, config.rows_per_bank, config.row_bytes) == (16, 8192, 8192)
+            config.subchannels_per_channel, config.pseudo_channels_per_channel) == (1, 8, 16, 1, 2)
+    assert (config.bank_count, config.rows_per_bank, config.row_bytes) == (32, 16384, 1024)
     assert config.capacity_bytes == config.computed_capacity_bytes == 16 * 1024**3
     assert config.physical_interface_bandwidth_gb_s == 512.
-    assert (config.data_width_bits, config.data_rate_mt_s, config.burst_interval_ns) == (64, 4000., 2.)
+    assert (config.data_width_bits, config.data_rate_mt_s, config.burst_interval_ns) == (32, 4000., 2.)
+    assert config.metadata["geometry_status"] == "standard_organization"
+    assert "dies_per_stack" in config.metadata["unknown_parameters"]
 
 
 @pytest.mark.parametrize("generation,channels", [("HBM3", 16), ("HBM4", 32)])

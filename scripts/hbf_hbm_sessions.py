@@ -7,7 +7,7 @@ Run ``python scripts/hbf_hbm_sessions.py`` for a small deterministic matrix.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import argparse
 import json
 from pathlib import Path
@@ -22,11 +22,24 @@ from heterollm_sim.data_motion import PhysicalRuntimeContext
 from heterollm_sim.ir import ComponentSpec, HardwareSpec, LinkSpec, PortSpec
 from heterollm_sim.kv_pool import DynamicKVPool, KvPoolComponent
 from heterollm_sim.kv_transfer import PhysicalKVTransferExecutor
-from heterollm_sim.memory_types import make_hbf_config, make_hbm_config
+from heterollm_sim.physical_presets import resolve_physical_config
 
 
 PAGE = 16_384
 TOKENS_PER_PAGE = 16
+
+
+def _executed_core_configurations(runtime: PhysicalRuntimeContext) -> dict[str, Any]:
+    """Read parameters from the live Cores that completed physical accesses.
+
+    Binding an allocation can create a runtime without issuing memory work;
+    its clock stays zero. Include actual initialization and measured accesses,
+    but never resolve a fresh catalog entry as evidence of execution.
+    """
+    return {owner: {"core": type(active.core).__name__,
+                    "physical_config": asdict(active.core.config),
+                    "last_completion_ns": active.clock_ns}
+            for owner, active in runtime.runtimes.items() if active.clock_ns > 0}
 
 
 @dataclass(frozen=True)
@@ -54,25 +67,16 @@ def _hardware(*, hbm_pages: int, hbf_pages: int) -> HardwareSpec:
         "hbm", "hbm", capacity_bytes=hbm_bytes,
         ports=(PortSpec("p0", "HBM", "endpoint", bandwidth_gbps=4096.0),),
         bandwidth_gbps=4096.0,
-        metadata={"physical_memory_config": make_hbm_config(
-            capacity_bytes=hbm_bytes,
-            interface_bandwidth_gb_s=512.0,
-            burst_interval_ns=0.0,
-        )},
+        metadata={"physical_memory_config": resolve_physical_config(
+            "research_hbm_sessions", overrides={"capacity_bytes": hbm_bytes})},
     )
     hbf = ComponentSpec(
         "hbf", "hbf", capacity_bytes=hbf_bytes,
         ports=(PortSpec("p0", "PCIe", "endpoint", bandwidth_gbps=512.0),),
         read_bandwidth_gbps=488.0 * 8.0,
         write_bandwidth_gbps=27.2 * 8.0,
-        metadata={"physical_memory_config": make_hbf_config(
-            capacity_bytes=hbf_bytes,
-            channels=8,
-            parallel_units=8,
-            host_bandwidth_gb_s=488.0,
-            host_read_bandwidth_gb_s=488.0,
-            host_write_bandwidth_gb_s=27.2,
-        )},
+        metadata={"physical_memory_config": resolve_physical_config(
+            "research_hbf_sessions", overrides={"capacity_bytes": hbf_bytes})},
     )
     return HardwareSpec(
         "session-hbm-hbf",
@@ -331,6 +335,7 @@ class SessionTrace:
             "physical_read_bytes": sum(int(phase.get("physical_read_bytes", 0)) for phase in memory_phases),
             "physical_write_bytes": sum(int(phase.get("physical_write_bytes", 0)) for phase in memory_phases),
             "makespan_ns": self.clock,
+            "executed_physical_configurations": _executed_core_configurations(self._physical_runtime),
         }
 
 

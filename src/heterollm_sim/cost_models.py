@@ -1621,7 +1621,7 @@ class HBMProfile:
         effective_bw = reference_bw if bandwidth_gb_s is None else bandwidth_gb_s
         _require_positive("bandwidth_gb_s", effective_bw)
         shape_factor = effective_bw / reference_bw
-        return _memory_service(
+        service = _memory_service(
             read_bytes=read_bytes,
             write_bytes=write_bytes,
             bandwidth_gb_s=effective_bw,
@@ -1636,6 +1636,9 @@ class HBMProfile:
             parallel_lanes=self.parallel_lanes,
             service_model=self.service_model,
         )
+        return {**service,
+                "parameter_basis": "analytical_cost_assumptions_not_jedec_protocol",
+                "execution_scope": "planner estimate; physical memory execution replaces this estimate with DramCore completion"}
 
 
 @dataclass(frozen=True)
