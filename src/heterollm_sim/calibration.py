@@ -797,7 +797,6 @@ def calibrate_cost_phase(
                     resource_id=demand.resource_id,
                     service_ns=phase_launch * instances,
                     bytes_moved=demand.bytes_moved,
-                    energy_pj=demand.energy_pj,
                     work_units=demand.work_units,
                 )
                 break
@@ -807,7 +806,6 @@ def calibrate_cost_phase(
             resource_id=demands[index].resource_id,
             service_ns=target_ns,
             bytes_moved=demands[index].bytes_moved,
-            energy_pj=demands[index].energy_pj,
             work_units=demands[index].work_units,
         )
     if memory_ns is not None:
@@ -815,7 +813,7 @@ def calibrate_cost_phase(
             if ".memory" in demand.resource_id.lower():
                 demands[i] = ResourceDemand(
                     resource_id=demand.resource_id, service_ns=memory_ns,
-                    bytes_moved=demand.bytes_moved, energy_pj=demand.energy_pj,
+                    bytes_moved=demand.bytes_moved,
                     work_units=demand.work_units,
                 )
                 break

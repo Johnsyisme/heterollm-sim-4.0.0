@@ -165,7 +165,6 @@ def serving_row(s, row_id, *, placement=None, result_observer=None):
     gpu_count = sum(str(c.normalized_kind).lower() == "gpu" for c in s.hardware.components)
     if not gpu_count:
         raise ValueError("serving study requires at least one GPU")
-    energy_j = float(summary.get("total_energy_pj", 0))*1e-12
     migrations = [{"completion_ns":float(e.timestamp_ns),**dict(e.details)}
                   for e in events if e.event_type == "kv_pool_transfer_complete"]
     return {
@@ -213,10 +212,6 @@ def serving_row(s, row_id, *, placement=None, result_observer=None):
             "semantics":"fraction of completed lookahead bytes consumed by resumed requests; not learned-router prediction accuracy"},
         "prefetch_overlap":study_metrics.prefetch_overlap(result.serving,
             {c.component_id for c in s.hardware.components if str(c.normalized_kind).lower()=='gpu'}),
-        "energy": {"analytical_dynamic_joules":energy_j,
-            "analytical_dynamic_joules_per_token":study_metrics.ratio(energy_j,token_count),
-            "analytical_average_dynamic_watts":study_metrics.ratio(energy_j*1e9,duration),
-            "scope":"sum of configured batch task energies; excludes unpriced components, initialization, idle/board/cooling; not calibrated node energy"},
         "request_metrics":[{"id":m.request_id,"arrival_ns":m.arrival_ns,"finish_ns":m.finish_ns,
             "first_token_ns":m.first_token_ns,"status":m.status.value,"output_tokens":m.visible_output_tokens,
             "ttft_ns":m.ttft_ns,"tpot_ns":m.tpot_ns,"qualified":m in good} for m in metrics],
@@ -235,7 +230,7 @@ def serving_row(s, row_id, *, placement=None, result_observer=None):
             "links":links,"kv_allocation_policy":s.placement.kv_policy.allocation_policy},
         "slo": {"ttft_ns":s.workload.scheduler.slo_ttft_ns,"tbt_ns":s.workload.scheduler.slo_tbt_ns},
         "wall_seconds": time.perf_counter()-started,
-        "unavailable": {"calibrated_node_energy":"no independent energy measurements", "lifetime":"not a stateful wear experiment"},
+        "unavailable": {"lifetime":"not a stateful wear experiment"},
     }
 
 
@@ -368,7 +363,7 @@ TITLES={1:"① 理想隔离",2:"② 固定工作量",3:"③ 容量与SLO",4:"④
         5:"⑤ 写缓冲与写放大",6:"⑥ Direct/relay/双路径",7:"⑦ 固定封装预算",8:"⑧ Dense/MoE权重",
         9:"⑨ 完整服务、命名模型与远端存储对照",10:"⑩ 精确热度、容量与读写比",
         11:"⑪ 预算约束下重新执行服务",12:"⑫ 完整服务消融与双路径QoS",
-        13:"⑬ 多轮agent与取消",14:"⑭ 动态热、磨损与物理页队列",
+        13:"⑬ 多轮agent与取消",14:"⑭ 磨损与物理页队列",
         15:"⑮ 多GPU与共享内存池",16:"⑯ 持续负载SLO与会话边界",
         17:"⑰ 扩展模型规格与工作负载",18:"⑱ 目标有效带宽与物理页扫描",
         19:"⑲ DRAM/NAND Core下的独立Decode对照"}
@@ -392,7 +387,7 @@ AUDIT_FIXES=[
     "修复任务metadata重放使用过期对象标识引起的deepcopy缓存碰撞，避免长实验中的物理地址绑定污染。",
     "多轮agent在同一服务时间线继承实际KV页；TTL过期重新计算，取消迁移保留已执行成本并等待安全释放。",
     "补充完整服务的等效A/B消融、同链路预算direct/relay/dual及实际混合流优先级比较。",
-    "NAND动态热状态与显式擦除计数影响后续服务，记录真实物理页队列和包含空闲plane的负载失衡。",
+    "NAND显式擦除计数与磨损影响后续服务，记录真实物理页队列和包含空闲plane的负载失衡。",
     "修复多GPU输出层集中到单GPU和服务汇总拒绝多GPU的问题；加入明确的多GPU共享内存暴露和端点路由约束。",
     "预取提交字节按实际提交事件计数，取消操作不再错误地报告为零提交。",
     "移除HBM按聚合带宽直接计时的旁路；算子访存和KV迁移均通过DRAM Core，GPU计算与启动仍保留原有简化模型。",
@@ -407,13 +402,13 @@ def completion_matrix(groups):
         ('理想A/B与逐项完整服务消融',(12,), '第12组独立读延迟/写限制以及并行度交互；零延迟下并行度可能无影响，保留零结果。'),
         ('direct/relay双路径与QoS',(12,), '同一64GB/s链路总预算；实际中继读写、静态带宽份额及请求优先级，不声称动态最优调度。'),
         ('多轮agent、预测放置和在途取消',(13,), '实际KV页继承、think time、TTL、写预算、预测失误和安全取消；采用可检查启发式，无训练精度声明。'),
-        ('动态热、磨损及真实物理队列',(14,), '温度与已用P/E条件影响后续NAND服务；显式擦除计数、read/program队列、物理plane失衡。'),
+        ('磨损及真实物理队列',(14,), '已用P/E条件影响后续NAND服务；显式擦除计数、read/program队列、物理plane失衡。'),
         ('多GPU与rack共享池',(15,), '1/2/4 GPU显式张量并行、实际通信和共享端点；机架带宽与时延进入实际路由。'),
         ('持续负载和session/GPU边界',(16,), '去除预热并延长轨迹，以SLO、完成率和积压变化搜索有限实验边界；不把有限实验当作无限期数学证明。'),
         ('原方案模型范围',(9,17), '完整算子服务与结构专属物理工作负载分别列出；复杂注意力未由GQA更名替代，逐模型公开执行范围。'),
         ('目标有效带宽与物理页扫描',(18,), '实际内存与链路服务后计算有效值；固定负载比较物理页和读延迟，保留带宽受限负对照。'),
         ('预算与SLO下配置选择',(11,), '枚举明确的九个固定4槽候选，重跑完整服务、共同预算上限和SLO；无可行解也是有效结果。'),
-        ('能量、成本、面积与3/5年TCO',(11,14), '参数作为内部假设；条件节点成本与实际候选栈数一致，均匀寿命推导与动态物理轨迹分别报告。'),
+        ('购置成本、面积与3/5年摊销',(11,14), '参数作为内部假设；条件节点成本与实际候选栈数一致，均匀寿命推导与动态物理轨迹分别报告。'),
         ('投机解码、热点、共享前缀和读写混合',(4,9,10,13), '分别保存真实接受/拒绝、精确物理访问比例和多轮生命周期；不伪造模型token或训练路由轨迹。'),
         ('独立Decode与实际Core执行',(19,), '8B/70B、2K/32K/128K/1M、A/B共16点，统一64输出；实际执行prefill后单独统计63个Decode token。')]
     return [{'item':item,'status':'已完成所述实验' if all(n in present and present[n]['status']=='passed' for n in numbers)
@@ -507,8 +502,8 @@ def checklist_progress(groups, economics):
          'reason':'超过模型原生上下文的结果只作架构压力外推，不作语义准确率声明。'},
         {'item':'A/B/C/D与命名模型','status':study['status'] if study else '本次未执行',
          'reason':'实际算子执行与物理放置检查见第9组；第13组另运行真正的多轮agent生命周期。'},
-        {'item':'成本/能耗/面积/寿命/热','status':'条件敏感性已输出' if economics else '本次未生成',
-         'reason':'明确内部假设；第14组另将动态温度与磨损直接反馈到服务时间线。'},
+        {'item':'购置成本/面积/寿命','status':'条件敏感性已输出' if economics else '本次未生成',
+         'reason':'明确内部假设；第14组另将磨损直接反馈到服务时间线。'},
     ]
 
 
@@ -574,7 +569,7 @@ def main():
         from hbf_hbm_decode_study import run_decode_study
         groups.append(run_decode_study(workers=args.workers,point_dir=args.output_dir/'decode_points',resume=args.resume_study))
     extensions={12:('hbf_hbm_ablation_paths','run_group'),13:('hbf_hbm_agent_study','run_agent_study'),
-        14:('hbf_hbm_thermal_wear_study','run_thermal_wear_study'),15:('hbf_hbm_system_study','run_system_study'),
+        14:('hbf_hbm_wear_study','run_wear_study'),15:('hbf_hbm_system_study','run_system_study'),
         16:('hbf_hbm_sustained_study','run_sustained_study'),17:('hbf_hbm_extended_models','run_extended_models_study'),
         18:('hbf_hbm_bandwidth_study','run_bandwidth_study')}
     import importlib

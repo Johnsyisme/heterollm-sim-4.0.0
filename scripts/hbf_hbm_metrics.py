@@ -91,9 +91,8 @@ def memory_metrics(report, duration_ns):
             "semantics": "busy-time imbalance among observed effective service lanes; not a physical-plane measurement and not all configured idle lanes"},
         "physical_plane_imbalance": page_observations.get("physical_plane_imbalance"),
         "physical_plane_loads": page_observations.get("physical_plane_loads"),
-        "dynamic_thermal_wear": {key:page_observations.get(key) for key in (
-            "thermal_enabled", "wear_enabled", "thermal_extra_ns", "thermal_throttle_plane_ns",
-            "peak_temperature_c", "idle_recoveries", "wear_blocks", "wear_extra_ns")},
+        "dynamic_wear": {key:page_observations.get(key) for key in (
+            "wear_enabled", "wear_blocks", "wear_extra_ns")},
         "read_queue_depth": storage.get("nand_read_queue_depth"),
         "program_queue_depth": storage.get("nand_program_queue_depth"),
         "page_observation_coverage": {key:storage.get("metric_availability", {}).get(key)

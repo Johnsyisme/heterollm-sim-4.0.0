@@ -29,9 +29,13 @@ class ProvisioningTests(unittest.TestCase):
     def test_independent_budget_limits_can_reject_different_candidates(self):
         hbm=budget_feasibility(conditional_node_cost(hbm_packages=4,hbf_packages=0))
         flash=budget_feasibility(conditional_node_cost(hbm_packages=0,hbf_packages=4))
-        self.assertFalse(hbm['cost_ceiling']); self.assertTrue(hbm['power_ceiling'])
-        self.assertTrue(flash['cost_ceiling']); self.assertFalse(flash['power_ceiling'])
+        self.assertTrue(hbm['cost_ceiling']); self.assertTrue(hbm['capacity_ceiling'])
+        self.assertTrue(flash['cost_ceiling']); self.assertTrue(flash['area_ceiling'])
         self.assertFalse(flash['capacity_ceiling'])
+        expensive=budget_feasibility(conditional_node_cost(hbm_packages=4,hbf_packages=0,
+            assumptions={'gpu_price_usd':10000.}))
+        self.assertFalse(expensive['cost_ceiling'])
+        self.assertTrue(expensive['capacity_ceiling'])
 
     def test_long_indexed_embedding_reads_do_not_enlarge_remote_table(self):
         s=build_package_scenario(2,2,'D_hbf_weights',model_id='small',output=4)

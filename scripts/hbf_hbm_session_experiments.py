@@ -258,7 +258,7 @@ class SessionExperiment:
             "status": "passed" if all(checks.values()) else "failed", "checks": checks,
             "scope": "physical_memory_session_lifecycle_microbenchmark",
             "llm_token_per_second": None, "ttft_ns": None, "tpot_ns": None,
-            "slo_goodput": None, "energy_per_token_j": None,
+            "slo_goodput": None,
             "admitted_sessions": len(self.admitted), "rejected_sessions": len(self.rejected),
             "active_peak": self.peak_active, "retained_peak": self.peak_retained,
             "live_peak": self.peak_live, "released_sessions": self.released_sessions,
@@ -317,15 +317,15 @@ def run_session_experiments() -> dict[str, Any]:
         "checks": checks, "rows": rows,
         "capability": {
             "supported": ["真实物理页读取、append、pause/resume迁移与前缀引用共享", "容量受限A/B/C会话数和恢复等待对比"] if passed else [],
-            "unsupported": ["完整LLM算子、GPU计算吞吐、TTFT/TPOT/goodput与每token能耗", "商用硬件session/GPU或论文容量倍数复现"],
+            "unsupported": ["完整LLM算子、GPU计算吞吐、TTFT/TPOT/goodput", "商用硬件session/GPU或论文容量倍数复现"],
         },
         "limitations": [
-            "Memory/session microbenchmark: no transformer operators, GPU execution or LLM TPS/TTFT/TPOT/goodput/energy claims.",
+            "Memory/session microbenchmark: no transformer operators, GPU execution or LLM TPS/TTFT/TPOT/goodput claims.",
             "B explicitly assumes memory-accessible HBF and executes active reads and appends there; C migrates private cold pages and keeps shared immutable prefixes hot.",
             "Small synthetic pages and one GPU-equivalent pool; no production session capacity claim or paper result reproduction.",
             "Sequential admission and page transfers; requested lifecycle timestamps are identical for A/B/C but observed pause duration includes queueing and cohort scheduling.",
             "The prefix scan offers 20 sessions at 0/25/50/90% exact requested reuse; offered and admitted denominators are reported separately. The initial prefix-producing session is in the offered denominator and does not itself count as a reuse hit.",
-            "No GC, endurance, thermal throttling or monetary cost model is enabled in this lifecycle group.",
+            "No GC, endurance or monetary cost model is enabled in this lifecycle group.",
         ],
     }
 

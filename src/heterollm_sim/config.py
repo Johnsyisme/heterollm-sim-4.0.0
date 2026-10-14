@@ -46,6 +46,10 @@ from .ir import (
 from .serde import read_json
 from .kernel_model import kernel_model_from_dict
 from .precision import dtype_bits
+from .physical_contract import (
+    physical_memory_bandwidth_caps_gbps,
+    require_physical_memory_config,
+)
 from .schema_v1 import model_graph_from_dict
 from .runtime_adapters import LlamaCppRuntimeConfig
 from .schema_v4 import (
@@ -63,6 +67,16 @@ ComponentCostProfile = Union[
     HostMemoryProfile,
     DigitalSramCimProfile,
 ]
+
+
+def _component_profile_bandwidth_caps(component, *, physical_config=None):
+    """Effective profile ceilings, distinct from the core's physical rates."""
+    physical = physical_memory_bandwidth_caps_gbps(
+        component, physical_config=physical_config)
+    shared = min(physical[0], component.shared_bandwidth_gbps or physical[0])
+    return (shared,
+            min(shared, physical[1], component.read_bandwidth_gbps or physical[1]),
+            min(shared, physical[2], component.write_bandwidth_gbps or physical[2]))
 
 _COMPONENT_PROFILE_TYPES: Mapping[str, Type[Any]] = {
     "gpu": GPUProfile,
@@ -126,7 +140,6 @@ class InterconnectProfile:
     resource_id: str
     bandwidth_gb_s: float
     latency_ns: float
-    energy_pj_per_byte: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.resource_id, str) or not self.resource_id.strip():
@@ -143,9 +156,9 @@ class InterconnectProfile:
             or not isinstance(value, (int, float))
             or not math.isfinite(float(value))
             or value < 0
-            for value in (self.latency_ns, self.energy_pj_per_byte)
+            for value in (self.latency_ns,)
         ):
-            raise ValueError("interconnect latency and energy must be non-negative")
+            raise ValueError("interconnect latency must be non-negative")
 
     def transfer_ns(self, byte_count: int) -> float:
         if byte_count < 0:
@@ -576,7 +589,7 @@ class ScenarioConfig:
             shared_cap, read_cap, write_cap = (value / 8.0 for value in caps)
             if profile.measured_effective_bandwidth_gb_s is not None:
                 measured = float(profile.measured_effective_bandwidth_gb_s)
-                limit = min(read_cap, write_cap) if component.metadata.get("bandwidth_mode") == "directional" else shared_cap
+                limit = min(shared_cap, read_cap, write_cap)
                 if measured > limit * (1.0 + 1e-12):
                     raise ValueError(
                         "component {} measured effective bandwidth exceeds physical cap"
@@ -588,19 +601,18 @@ class ScenarioConfig:
                     "component {} profile bandwidth exceeds physical cap"
                     .format(component.component_id)
                 )
-            if component.metadata.get("bandwidth_mode") == "directional":
-                for direction, limit in (("read", read_cap), ("write", write_cap)):
-                    effective = float(getattr(profile, "effective_" + direction + "_bandwidth_gb_s"))
-                    if effective > limit * (1.0 + 1e-12):
-                        raise ValueError(
-                            "component {} profile {} bandwidth exceeds physical cap"
-                            .format(component.component_id, direction)
-                        )
+            for direction, limit in (("read", read_cap), ("write", write_cap)):
+                effective = float(getattr(profile, "effective_" + direction + "_bandwidth_gb_s"))
+                if effective > limit * (1.0 + 1e-12):
+                    raise ValueError(
+                        "component {} profile {} bandwidth exceeds physical cap"
+                        .format(component.component_id, direction)
+                    )
             profile_resource_id = profile.resource_id
             owner = component.metadata.get("memory_service_owner")
             hbf_contract = component.normalized_kind == "hbf" and component.is_active_memory
-            if owner and profile_resource_id in {"hbm.channel", "gddr.channel"} and component.normalized_kind != "hbf":
-                profile_resource_id = str(owner)
+            if profile_resource_id in {"hbm.channel", "gddr.channel", "host.memory"} and not hbf_contract:
+                profile_resource_id = default_memory_resource_id(component)
             updates = {} if hbf_contract else {"resource_id": str(owner) if owner else profile_resource_id}
             if "memory_service_model" in component.metadata and hasattr(profile, "service_model"):
                 updates["service_model"] = str(component.metadata["memory_service_model"])
@@ -686,45 +698,29 @@ class ScenarioConfig:
             # Canonicalize the physical config at the service boundary.  This
             # is idempotent and preserves the authored profile values while
             # making aliases such as kind=GDDR7 explicit as GDDR+generation.
-            physical_raw = metadata.get("physical_memory_config")
-            if physical_raw is not None:
-                from dataclasses import asdict, is_dataclass
-                from .memory_types import DramConfig, parse_physical_memory_config
+            from dataclasses import asdict
+            from .memory_types import DramConfig
 
-                parsed = parse_physical_memory_config(physical_raw)
-                if isinstance(parsed, DramConfig):
-                    component_family = component.normalized_kind
-                    physical_family = str(parsed.kind.value).lower()
-                    if component_family == "gddr" and physical_family != "gddr":
-                        raise ValueError(
-                            "component {} kind=gddr conflicts with physical_memory_config.kind={}".format(
-                                component.component_id, parsed.kind.value
-                            )
+            parsed = require_physical_memory_config(component)
+            if isinstance(parsed, DramConfig):
+                declared_generation = str(
+                    metadata.get("generation", metadata.get("memory_generation", "")) or ""
+                ).strip().upper().replace("-", "")
+                parsed_generation = str(parsed.generation or "").strip().upper().replace("-", "")
+                if declared_generation and parsed_generation and declared_generation != parsed_generation:
+                    raise ValueError(
+                        "component {} generation {} conflicts with physical_memory_config.generation {}".format(
+                            component.component_id, declared_generation, parsed_generation
                         )
-                    if component_family in {"hbm", "hbm_stack"} and physical_family == "gddr":
-                        raise ValueError(
-                            "component {} kind=hbm conflicts with physical_memory_config.kind=GDDR".format(
-                                component.component_id
-                            )
-                        )
-                    declared_generation = str(
-                        metadata.get("generation", metadata.get("memory_generation", "")) or ""
-                    ).strip().upper().replace("-", "")
-                    parsed_generation = str(parsed.generation or "").strip().upper().replace("-", "")
-                    if declared_generation and parsed_generation and declared_generation != parsed_generation:
-                        raise ValueError(
-                            "component {} generation {} conflicts with physical_memory_config.generation {}".format(
-                                component.component_id, declared_generation, parsed_generation
-                            )
-                        )
-                    if parsed_generation and component_family == "gddr":
-                        metadata["generation"] = parsed_generation
-                    canonical = asdict(parsed) if is_dataclass(parsed) else dict(physical_raw)
-                    canonical["kind"] = parsed.kind.value
-                    metadata["physical_memory_config"] = canonical
+                    )
+                if parsed_generation and component.normalized_kind == "gddr":
+                    metadata["generation"] = parsed_generation
+                canonical = asdict(parsed)
+                canonical["kind"] = parsed.kind.value
+                metadata["physical_memory_config"] = canonical
             # Resolved values belong only in memory_service. Copying profile
             # defaults into authoring metadata would mask later profile edits.
-            caps = self._memory_bandwidth_caps(component)
+            caps = physical_memory_bandwidth_caps_gbps(component, physical_config=parsed)
             if caps[0] <= 0:
                 raise ValueError("component {} requires a physical memory bandwidth".format(component.component_id))
             metadata["memory_service"] = {
@@ -747,7 +743,6 @@ class ScenarioConfig:
                 "transaction_bytes": profile.transaction_bytes,
                 "max_outstanding_requests": profile.max_outstanding_requests,
                 "parallel_lanes": profile.parallel_lanes,
-                "energy_pj_per_byte": profile.energy_pj_per_byte,
                 "latency_scope": "memory_service",
                 "service_model": getattr(profile, "service_model", metadata.get("memory_service_model", "analytical")),
             }
@@ -798,7 +793,7 @@ class ScenarioConfig:
     def _memory_bandwidth_caps(
         self, component: ComponentSpec
     ) -> Tuple[float, float, float]:
-        """Return shared/read/write physical caps in Gb/s.
+        """Return shared/read/write effective-profile ceilings in Gb/s.
 
         Banks are aggregated only when the author explicitly marks the memory
         components with the same ``memory_aggregate_owner``.  Independent
@@ -810,33 +805,7 @@ class ScenarioConfig:
         if scope not in {"per_component", "aggregate"}:
             raise ValueError("component {} has invalid memory_bandwidth_scope".format(component.component_id))
         if scope != "aggregate":
-            shared = component.shared_bandwidth_gbps
-            physical = metadata.get("physical_memory_config")
-            if physical is not None:
-                from .memory_types import DramConfig, Operation, parse_physical_memory_config
-                parsed = parse_physical_memory_config(physical)
-                if isinstance(parsed, DramConfig):
-                    physical_read = parsed.directional_bandwidth_gb_s(Operation.READ) * 8.0
-                    physical_write = parsed.directional_bandwidth_gb_s(Operation.WRITE) * 8.0
-                    physical_shared = max(physical_read, physical_write)
-                    if shared > physical_shared * (1.0 + 1e-12):
-                        raise ValueError(
-                            "component {} bandwidth_gbps={} exceeds physical interface bandwidth {} Gb/s".format(
-                                component.component_id, shared, physical_shared
-                            )
-                        )
-                    if shared <= 0.0:
-                        shared = physical_shared
-                    return (
-                        shared,
-                        component.directional_bandwidth_gbps("read") or physical_read,
-                        component.directional_bandwidth_gbps("write") or physical_write,
-                    )
-            return (
-                shared,
-                component.directional_bandwidth_gbps("read") or shared,
-                component.directional_bandwidth_gbps("write") or shared,
-            )
+            return _component_profile_bandwidth_caps(component)
         owner = str(metadata.get("memory_aggregate_owner", "")).strip()
         if not owner:
             raise ValueError(
@@ -865,11 +834,8 @@ class ScenarioConfig:
         ]
         if not members:
             raise ValueError("aggregate memory owner {} has no connected members".format(owner))
-        return (
-            sum(item.shared_bandwidth_gbps for item in members),
-            sum(item.directional_bandwidth_gbps("read") or item.shared_bandwidth_gbps for item in members),
-            sum(item.directional_bandwidth_gbps("write") or item.shared_bandwidth_gbps for item in members),
-        )
+        member_caps = tuple(_component_profile_bandwidth_caps(item) for item in members)
+        return tuple(sum(caps[index] for caps in member_caps) for index in range(3))
 
     def _unique_compatibility_profile(
         self, kind: str, *, optional: bool = False
@@ -1889,7 +1855,6 @@ def _cache_level_profile_from_dict(
     for name in (
         "hit_latency_ns",
         "bandwidth_gb_s",
-        "energy_pj_per_byte",
     ):
         if name in values:
             values[name] = _number(
@@ -2111,10 +2076,6 @@ def _gpu_profile_from_dict(data: Mapping[str, Any]) -> GPUProfile:
         "occupancy",
         "attainable_efficiency",
         "kernel_launch_ns",
-        "tensor_energy_pj_per_op",
-        "scalar_energy_pj_per_op",
-        "special_function_energy_pj_per_op",
-        "launch_energy_pj",
     ):
         if name in values:
             values[name] = _number(values[name], "GPU profile {}".format(name))
@@ -2252,11 +2213,6 @@ def _cpu_profile_from_dict(data: Mapping[str, Any]) -> CPUProfile:
     for name in (
         "attainable_efficiency",
         "dispatch_ns",
-        "gemm_energy_pj_per_op",
-        "elementwise_energy_pj_per_op",
-        "reduction_energy_pj_per_op",
-        "special_function_energy_pj_per_op",
-        "dispatch_energy_pj",
     ):
         if name in values:
             values[name] = _number(values[name], "CPU profile {}".format(name))
@@ -2349,7 +2305,7 @@ def _fusion_policy_from_dict(data: Mapping[str, Any]) -> FusionPolicy:
 def _hbm_profile_from_dict(data: Mapping[str, Any]) -> HBMProfile:
     values = dict(data)
     _reject_dataclass_unknown_fields(values, "component HBM profile", HBMProfile)
-    for field_name in ("bandwidth_gb_s", "efficiency", "measured_effective_bandwidth_gb_s", "energy_pj_per_byte",
+    for field_name in ("bandwidth_gb_s", "efficiency", "measured_effective_bandwidth_gb_s",
                        "read_latency_ns", "write_latency_ns"):
         if field_name in values:
             values[field_name] = _number(
@@ -2369,7 +2325,7 @@ def _gddr_profile_from_dict(data: Mapping[str, Any]) -> GDDRProfile:
     _reject_dataclass_unknown_fields(values, "component GDDR profile", GDDRProfile)
     for field_name in (
         "bandwidth_gb_s", "efficiency", "measured_effective_bandwidth_gb_s",
-        "energy_pj_per_byte", "read_latency_ns", "write_latency_ns",
+        "read_latency_ns", "write_latency_ns",
     ):
         if field_name in values:
             values[field_name] = _number(values[field_name], "GDDR profile {}".format(field_name))
@@ -2391,7 +2347,7 @@ def _host_memory_profile_from_dict(
     _reject_dataclass_unknown_fields(
         values, "component host-memory profile", HostMemoryProfile
     )
-    for field_name in ("bandwidth_gb_s", "efficiency", "measured_effective_bandwidth_gb_s", "energy_pj_per_byte",
+    for field_name in ("bandwidth_gb_s", "efficiency", "measured_effective_bandwidth_gb_s",
                        "read_latency_ns", "write_latency_ns"):
         if field_name in values:
             values[field_name] = _number(
@@ -2435,8 +2391,6 @@ def _cim_profile_from_dict(
     numeric_fields = {
         "weight_decode_elements_per_ns",
         "activation_fp32_to_fp16_elements_per_ns",
-        "conversion_read_energy_pj_per_byte",
-        "conversion_write_energy_pj_per_byte",
         "frequency_ghz",
         "load_bandwidth_gb_s",
         "activation_bandwidth_gb_s",
@@ -2449,13 +2403,6 @@ def _cim_profile_from_dict(
         "load_latency_ns",
         "noc_hop_latency_ns",
         "peripheral_latency_ns",
-        "eval_energy_pj",
-        "load_energy_pj_per_byte",
-        "activation_energy_pj_per_byte",
-        "output_energy_pj_per_byte",
-        "noc_energy_pj_per_byte",
-        "accumulator_energy_pj_per_op",
-        "peripheral_energy_pj_per_element",
     }
     for field_name in integer_fields.intersection(values):
         values[field_name] = _integer(
@@ -2483,7 +2430,7 @@ def _interconnect_profile_from_dict(
     _reject_dataclass_unknown_fields(
         values, "profiles.cim_interconnect", InterconnectProfile
     )
-    for field_name in ("bandwidth_gb_s", "latency_ns", "energy_pj_per_byte"):
+    for field_name in ("bandwidth_gb_s", "latency_ns"):
         if field_name in values:
             values[field_name] = _number(
                 values[field_name],
@@ -2586,33 +2533,28 @@ def _seed_omitted_memory_profile_bandwidths(
                         and str(item.metadata.get("memory_aggregate_owner", "")).strip() in owners
                     )
                     source = source or matched
-                    bandwidth_gbps = sum(item.shared_bandwidth_gbps for item in source)
                 else:
-                    bandwidth_gbps = max(item.shared_bandwidth_gbps for item in matched)
+                    source = matched
+                member_caps = tuple(_component_profile_bandwidth_caps(item) for item in source)
+                combine = sum if aggregate else max
+                caps = tuple(combine(values[index] for values in member_caps) for index in range(3))
+                bandwidth_gbps = caps[0]
                 if bandwidth_gbps > 0:
                     payload["bandwidth_gb_s"] = bandwidth_gbps / 8.0
-                directional = any(
+                directional = caps[1:] != (caps[0], caps[0]) or any(
                     str(item.metadata.get("bandwidth_mode", "")).strip().lower()
                     == "directional"
                     for item in matched
                 )
                 if directional:
-                    for direction in ("read", "write"):
-                        values = [
-                            item.directional_bandwidth_gbps(direction)
-                            for item in matched
-                            if item.directional_bandwidth_gbps(direction) > 0
-                        ]
-                        if values:
-                            value = sum(values) if aggregate else max(values)
-                            payload[direction + "_bandwidth_gb_s"] = value / 8.0
+                    for direction, value in zip(("read", "write"), caps[1:]):
+                        payload.setdefault(direction + "_bandwidth_gb_s", value / 8.0)
             if "resource_id" not in payload:
                 owners = {
                     str(item.metadata.get("memory_service_owner", "")).strip()
                     for item in matched
-                    if str(item.metadata.get("memory_service_owner", "")).strip()
                 }
-                if len(owners) == 1:
+                if len(owners) == 1 and "" not in owners:
                     payload["resource_id"] = next(iter(owners))
             registry[profile_id] = payload
     return result

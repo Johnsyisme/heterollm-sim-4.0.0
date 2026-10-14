@@ -1,5 +1,4 @@
 """Actual physical feedback and queue semantics, without calibration claims."""
-from dataclasses import replace
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -8,12 +7,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"scripts"))
 from heterollm_sim.data_motion import PhysicalRuntimeContext, _PhysicalRuntime
-from heterollm_sim.memory_types import (AccessRequest, Operation, NandThermalConfig,
+from heterollm_sim.memory_types import (AccessRequest, Operation,
     NandWearConfig, make_hbf_config, parse_physical_memory_config)
 from heterollm_sim.nand_core import NandCore, summarize_nand_observations
 from heterollm_sim.planner import _summarize_nand_task_traffic
 from heterollm_sim.reporting import _sum_batch_storage_traffic
-from hbf_hbm_thermal_wear_study import run_controlled_trace, run_serving_feedback
+from hbf_hbm_wear_study import run_controlled_trace, run_serving_feedback
 
 PAGE = 4096
 
@@ -42,7 +41,7 @@ def test_disabled_feedback_and_diagnostic_only_preserve_detailed_timing():
         assert a.stages == b.stages
         assert "nand_observations" not in a.counters
         assert b.counters["nand_observations"]["events"]
-    assert not off._plane_thermal_state and not off._block_wear_state
+    assert not off._block_wear_state
 
 
 def test_physical_planes_are_not_shared_effective_slots_and_queue_is_exact():
@@ -90,26 +89,10 @@ def test_erase_advances_actual_block_pe_and_later_program_latency():
     assert event(later)["wear_extra_ns"] == 100.
 
 
-def test_temperature_state_delays_real_operations_and_cools_during_idle():
-    thermal = NandThermalConfig(capacitance_j_per_k=1e-7, ambient_c=35., initial_c=35.,
-        active_power_w=30.,idle_power_w=0.,throttle_threshold_c=45.,hysteresis_c=5.,
-        throttled_service_rate=.5,throttled_power_fraction=.8,assumption="synthetic test")
-    core = NandCore(config(dynamic_thermal=thermal))
-    first = core.submit(AccessRequest("hot",Operation.READ,0,PAGE))
-    second = core.submit(AccessRequest("hotter",Operation.READ,0,PAGE,first.completion_ns))
-    cool = core.submit(AccessRequest("cooled",Operation.READ,0,PAGE,second.completion_ns+10000.))
-    assert event(first)["thermal_extra_ns"] > 0
-    assert event(second)["temperature_start_c"] > event(first)["temperature_start_c"]
-    assert event(cool)["temperature_start_c"] == pytest.approx(35.)
-    assert event(cool)["idle_recoveries"] == 1
-    assert event(cool)["thermal_extra_ns"] == pytest.approx(event(first)["thermal_extra_ns"])
-
-
-def test_runtime_rollback_restores_temperature_and_erase_state():
-    thermal = NandThermalConfig(assumption="test")
+def test_runtime_rollback_restores_erase_state():
     wear = NandWearConfig(assumption="test")
     runtime = PhysicalRuntimeContext()
-    core = NandCore(config(dynamic_thermal=thermal,wear_model=wear),runtime.timeline)
+    core = NandCore(config(wear_model=wear),runtime.timeline)
     runtime.runtimes["hbf"] = _PhysicalRuntime(core)
     core.submit(AccessRequest("before",Operation.READ,0,PAGE))
     snapshot = runtime.snapshot()
@@ -121,18 +104,9 @@ def test_runtime_rollback_restores_temperature_and_erase_state():
     assert next(iter(core._block_wear_state.values()))["erases"] == 1
 
 
-@pytest.mark.parametrize("changes",[{"capacitance_j_per_k":float("nan")},
-    {"throttled_service_rate":0.},{"throttled_power_fraction":1.1},
-    {"hysteresis_c":30.},{"idle_power_w":100.},{"assumption":""}])
-def test_thermal_assumption_validation(changes):
-    with pytest.raises(ValueError):
-        NandThermalConfig(**{"assumption":"test",**changes})
-
-
 def test_typed_feedback_roundtrip_and_wear_validation():
     parsed = parse_physical_memory_config({"kind":"HBF",
-        "dynamic_thermal":{"assumption":"test"}, "wear_model":{"assumption":"test"}})
-    assert isinstance(parsed.dynamic_thermal,NandThermalConfig)
+        "wear_model":{"assumption":"test"}})
     assert isinstance(parsed.wear_model,NandWearConfig)
     for values in ({"rated_pe_cycles":True},{"initial_pe_cycles":-.1},
                    {"max_program_latency_scale":.5},{"program_latency_growth_at_rated_pe":float("inf")}):
@@ -154,22 +128,21 @@ def test_partial_physical_observations_remain_partial_after_batch_aggregation():
 
 
 def test_controlled_trace_conserves_work_and_exercises_online_feedback():
-    baseline = run_controlled_trace(thermal_enabled=False,wear_enabled=False,cycles=2)
+    baseline = run_controlled_trace(wear_enabled=False,cycles=2)
     feedback = run_controlled_trace(cycles=2)
     assert baseline["physical_read_bytes"] == feedback["physical_read_bytes"] == 64*PAGE
     assert baseline["physical_write_bytes"] == feedback["physical_write_bytes"] == 8*PAGE
     assert feedback["duration_ns"] > baseline["duration_ns"]
     observed = feedback["observations"]
     assert observed["actual_erase_operations"] == observed["actual_program_operations"] == 8
-    assert observed["idle_recoveries"] >= 4
     assert observed["read_queue_depth"]["peak"] > 0
     assert observed["program_queue_depth"]["peak"] > 0
 
 
-def test_full_serving_thermal_and_wear_each_change_actual_request_metrics():
-    a0,a1,b0,bt,bw,b1 = run_serving_feedback()
+def test_full_serving_wear_changes_actual_request_metrics():
+    a0,a1,b0,bw = run_serving_feedback()
     assert a0["node_tps"] == a1["node_tps"]
-    for row in (b0,bt,bw,b1):
+    for row in (b0,bw):
         assert row["completed_requests"] == 2
         assert row["visible_output_tokens"] == 16
         storage = row["resources"]["storage_traffic"]
@@ -178,9 +151,8 @@ def test_full_serving_thermal_and_wear_each_change_actual_request_metrics():
         assert sum(e["physical_bytes"] for e in observed["events"] if e["operation"]=="program") == storage["physical_write_bytes"]
         assert observed["actual_erase_operations"] == 0
         assert storage["metric_availability"]["nand_read_queue_depth"]["status"] == "recorded"
-    for row in (bt,bw,b1):
+    for row in (bw,):
         assert row["node_tps"] < b0["node_tps"]
         assert row["ttft_ns"]["p50"] > b0["ttft_ns"]["p50"]
         assert row["tpot_ns"]["p50"] > b0["tpot_ns"]["p50"]
-    assert bt["memory_metrics"]["dynamic_thermal_wear"]["thermal_extra_ns"] > 0
-    assert bw["memory_metrics"]["dynamic_thermal_wear"]["wear_extra_ns"] > 0
+    assert bw["memory_metrics"]["dynamic_wear"]["wear_extra_ns"] > 0

@@ -1104,7 +1104,7 @@ def hbm_hbf_ratio_experiment(
     Both tiers use their declared physical capacity; addresses are local to
     each tier so a split never accidentally aliases an out-of-range address.
     This is intentionally a small analytical ratio sweep, rather than a
-    product-level packaging or power model.
+    product-level packaging model.
     """
     hbm_pages = int(hbm_pages)
     hbf_pages = int(hbf_pages)
@@ -1366,7 +1366,7 @@ def run_acceptance() -> dict[str, Any]:
          "supported": passed["capacity_only_and_lifecycle"], "evidence": ["capacity_only_and_lifecycle"]},
         {"question": "Which HBM/HBF capacity split best serves the same fixed working set under the modeled directional bandwidths?",
          "supported": passed["hbm_hbf_ratio"], "evidence": ["hbm_hbf_ratio"],
-         "scope": "fixed 12-page traffic; capacity ratio only, no packaging/power budget"},
+         "scope": "fixed 12-page traffic; capacity ratio only, no packaging budget"},
         {"question": "How does the same fixed KV traffic change from short to long contexts when placed in HBM or HBF?",
          "supported": passed["fixed_workload_scan"], "evidence": ["fixed_workload_scan"],
          "scope": "2/4/8 pages; memory service only"},
@@ -1378,7 +1378,7 @@ def run_acceptance() -> dict[str, Any]:
          "supported": passed["core_invariants"], "evidence": ["core_invariants"]},
         {"question": "Under a fixed four-slot package budget, how do HBM/HBF capacity, bandwidth, parallelism and write buffering trade off?",
          "supported": passed["package_budget_sweep"], "evidence": ["package_budget_sweep"],
-         "scope": "hypothetical four-slot budget; no commercial packaging or power calibration"},
+         "scope": "hypothetical four-slot budget; no commercial packaging calibration"},
         {"question": "Can serving automatically preempt, swap a multi-page KV working set to HBF, resume it, and release it?",
          "supported": passed["serving_paged_swap"], "evidence": ["serving_paged_swap"]},
         {"question": "How does a scheduler active-slot limit change priority-preemption and swap pressure?",
@@ -1443,7 +1443,7 @@ def run_acceptance() -> dict[str, Any]:
             "scope": "memory-service scans and experiment entry points; does not certify all attachment section 6.3 metrics",
             "evidence": ["fixed_workload_scan", "hbm_hbf_ratio", "package_budget_sweep"],
             "remaining": ["completion_assessment_by_research_runner"],
-            "not_assessed_here": ["complete_section_6_3_metric_coverage", "representative_tail_latency_and_stable_goodput", "serving_session_capacity", "predictor_and_speculative_acceptance_metrics", "declared_assumption_energy_cost_area_lifetime_studies"],
+            "not_assessed_here": ["complete_section_6_3_metric_coverage", "representative_tail_latency_and_stable_goodput", "serving_session_capacity", "predictor_and_speculative_acceptance_metrics", "declared_assumption_cost_area_lifetime_studies"],
         },
         {
             "stage": "6_acceptance_and_question_matrix",
@@ -1490,7 +1490,7 @@ def run_acceptance() -> dict[str, Any]:
                             "Prefetch is modeled as fixed token lookahead rounded to pages in paged-pool serving; no predictive policy is included.",
                             "Page-merge, host-ack and media-drain write-buffer semantics are enabled by the explicit buffered_write_mode metadata switch; legacy write-through remains the default.",
                             "The four-slot package sweep is a coupled hypothetical budget, not commercial packaging calibration.",
-                            "No FTL/GC, wear, ECC, energy or multi-GPU model."]}
+                            "No FTL/GC, wear, ECC or multi-GPU model."]}
 
 
 def main() -> int:

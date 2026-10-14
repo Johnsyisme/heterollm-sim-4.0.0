@@ -40,8 +40,8 @@ def _graph_device_dispatch_config(profile):
 def _apply_graph_device_dispatch(launches, profile, *, captured):
     """Apply an explicitly calibrated device replay envelope.
 
-    The returned replacements only change frontend service time.  Bytes,
-    energy and useful work from all member launch tasks are aggregated onto the
+    The returned replacements only change frontend service time.  Bytes and
+    useful work from all member launch tasks are aggregated onto the
     charged replay owner so graph repricing cannot silently lose physical
     accounting.  With no explicit profile this is a no-op and the ordinary
     per-kernel device model remains authoritative.
@@ -78,7 +78,6 @@ def _apply_graph_device_dispatch(launches, profile, *, captured):
     first = launches[0]
     total = {
         'bytes_moved': sum(d.bytes_moved for task in launches for d in task.demands),
-        'energy_pj': sum(d.energy_pj for task in launches for d in task.demands),
         'work_units': sum(d.work_units for task in launches for d in task.demands),
     }
     charged = replace(first.demands[0], service_ns=configured, **total)
@@ -91,8 +90,7 @@ def _apply_graph_device_dispatch(launches, profile, *, captured):
         })}
     for task in launches[1:]:
         replacements[task.task_id] = replace(task, demands=tuple(
-            replace(demand, service_ns=0.0, bytes_moved=0,
-                   energy_pj=0.0, work_units=0.0)
+            replace(demand, service_ns=0.0, bytes_moved=0, work_units=0.0)
             for demand in task.demands), metadata={
                 **task.metadata,
                 'cuda_graph_device_dispatch': {**audit, 'applied': True,
@@ -187,7 +185,7 @@ def replace_measured_driver_submission_costs(tasks, profiles, submission_resourc
         if task.task_id not in ancestors_of(owner):
             raise ValueError('CUDA driver submission is not an input boundary of its measured invocation')
         if (len(task.demands) != 1 or task.demands[0].resource_id != submission_resource_id
-                or task.demands[0].bytes_moved != 0 or task.demands[0].energy_pj != 0
+                or task.demands[0].bytes_moved != 0
                 or task.demands[0].work_units != 1):
             raise ValueError('CUDA driver submission demand is not exclusively host driver service')
         result.append(replace(task, demands=(), metadata={**meta,

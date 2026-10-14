@@ -9,7 +9,7 @@ simulation.  Overlap is accepted only through an explicit alias declaration.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, Optional, Tuple
 
 
@@ -27,6 +27,7 @@ class PhysicalAllocation:
     alias_generation: Optional[int] = None
     alias_offset_bytes: int = 0
     inferred: bool = False
+    allocation_arena: Optional[str] = None
 
     def address(self, offset_bytes: int, size_bytes: int = 1) -> int:
         if type(offset_bytes) is not int or offset_bytes < 0:
@@ -102,21 +103,22 @@ class PhysicalAddressAllocator:
             if base < item.base_address + item.size_bytes and item.base_address < end:
                 yield item
 
-    def _arena(self, generation: int) -> Tuple[int, int]:
+    def _arena(self, generation: int, allocation_arena: Optional[str] = None) -> Tuple[int, int]:
         if not self.workspace_capacity_bytes:
             return 0, self.capacity_bytes
         boundary = self.capacity_bytes - self.workspace_capacity_bytes
-        return (0, boundary) if generation == 0 else (boundary, self.capacity_bytes)
+        resident = allocation_arena == "resident" if allocation_arena is not None else generation == 0
+        return (0, boundary) if resident else (boundary, self.capacity_bytes)
 
-    def _check_arena_extent(self, base: int, size: int, generation: int) -> None:
+    def _check_arena_extent(self, base: int, size: int, generation: int, allocation_arena: Optional[str] = None) -> None:
         self._check_extent(base, size)
-        lower, upper = self._arena(generation)
+        lower, upper = self._arena(generation, allocation_arena)
         if base < lower or base + size > upper:
             raise AllocationError("allocation generation {} range {} + {} exceeds its {} arena [{}, {})".format(
-                generation, base, size, "resident" if generation == 0 else "workspace", lower, upper))
+                generation, base, size, allocation_arena or ("resident" if generation == 0 else "workspace"), lower, upper))
 
-    def _find_first_fit(self, size: int, generation: int = 0) -> int:
-        lower, upper = self._arena(generation)
+    def _find_first_fit(self, size: int, generation: int = 0, allocation_arena: Optional[str] = None) -> int:
+        lower, upper = self._arena(generation, allocation_arena)
         cursor = lower
         if self.workspace_capacity_bytes:
             # Filtering a sorted list and sorting its retained subsequence
@@ -144,7 +146,7 @@ class PhysicalAddressAllocator:
         if cursor + size > upper:
             raise AllocationError(
                 "unable to allocate {} bytes in capacity {}{}".format(size, self.capacity_bytes,
-                    " ({} arena [{}, {}))".format("resident" if generation == 0 else "workspace", lower, upper)
+                    " ({} arena [{}, {}))".format(allocation_arena or ("resident" if generation == 0 else "workspace"), lower, upper)
                     if self.workspace_capacity_bytes else "")
             )
         return cursor
@@ -160,11 +162,14 @@ class PhysicalAddressAllocator:
         address: Optional[int] = None,
         alias_offset_bytes: int = 0,
         inferred: bool = False,
+        allocation_arena: Optional[str] = None,
     ) -> PhysicalAllocation:
         key = self._key(buffer_id, generation)
         if type(size_bytes) is not int or size_bytes <= 0:
             raise AllocationError("size_bytes must be a positive integer")
         existing = self._allocations.get(key)
+        if allocation_arena is not None and allocation_arena not in ("resident", "workspace"):
+            raise AllocationError("allocation_arena must be resident or workspace")
         if type(inferred) is not bool:
             raise AllocationError("inferred must be a boolean")
         if alias_generation is not None and (type(alias_generation) is not int or alias_generation < 0):
@@ -178,6 +183,14 @@ class PhysicalAddressAllocator:
         if type(alias_offset_bytes) is not int or alias_offset_bytes < 0:
             raise AllocationError("alias_offset_bytes must be non-negative")
         if existing is not None:
+            if (allocation_arena is not None and existing.allocation_arena is not None
+                    and allocation_arena != existing.allocation_arena):
+                raise AllocationError("allocation arena changed for {}".format(buffer_id))
+            arena = existing.allocation_arena if allocation_arena is None else allocation_arena
+            if allocation_arena is not None:
+                self._check_arena_extent(existing.base_address, existing.size_bytes, generation, arena)
+            if address is not None and (type(address) is not int or address != existing.base_address):
+                raise AllocationError("allocation address changed for {}".format(buffer_id))
             if existing.alias_of != alias_of or existing.alias_generation != alias_generation:
                 raise AllocationError("allocation alias changed for {}".format(buffer_id))
             if existing.alias_offset_bytes != alias_offset_bytes:
@@ -185,7 +198,7 @@ class PhysicalAddressAllocator:
             if size_bytes != existing.size_bytes and size_bytes > existing.size_bytes:
                 if existing.alias_of is not None or not existing.inferred or not inferred:
                     raise AllocationError("allocation {} cannot grow".format(buffer_id))
-                self._check_arena_extent(existing.base_address, size_bytes, generation)
+                self._check_arena_extent(existing.base_address, size_bytes, generation, arena)
                 if tuple(self._overlaps(existing.base_address, size_bytes, ignore=key)):
                     raise AllocationError(
                         "allocation {} generation {} cannot grow without moving".format(*key)
@@ -195,12 +208,13 @@ class PhysicalAddressAllocator:
                     size_bytes=size_bytes, generation=existing.generation,
                     alias_of=existing.alias_of, alias_generation=existing.alias_generation,
                     alias_offset_bytes=existing.alias_offset_bytes, inferred=existing.inferred,
+                    allocation_arena=existing.allocation_arena,
                 )
-                self._allocations[key] = existing
             elif size_bytes != existing.size_bytes and (not existing.inferred or not inferred):
                 raise AllocationError("allocation size changed for {}".format(buffer_id))
-            if address is not None and address != existing.base_address:
-                raise AllocationError("allocation address changed for {}".format(buffer_id))
+            if arena != existing.allocation_arena:
+                existing = replace(existing, allocation_arena=arena)
+            self._allocations[key] = existing
             return existing
 
         alias_key = None
@@ -210,6 +224,10 @@ class PhysicalAddressAllocator:
             target = self._allocations.get(target_key)
             if target is None:
                 raise AllocationError("alias target {} generation {} is not allocated".format(*target_key))
+            target_arena = target.allocation_arena or ("resident" if target.generation == 0 else "workspace")
+            if allocation_arena is not None and allocation_arena != target_arena:
+                raise AllocationError("alias arena differs from target allocation")
+            allocation_arena = target_arena
             if alias_offset_bytes + size_bytes > target.size_bytes:
                 raise AllocationError("alias range exceeds target allocation {} generation {}".format(*target_key))
             base = target.base_address + alias_offset_bytes
@@ -221,7 +239,7 @@ class PhysicalAddressAllocator:
             if type(address) is not int or address < 0:
                 raise AllocationError("address must be a non-negative integer")
             base = address
-            self._check_arena_extent(base, size_bytes, generation)
+            self._check_arena_extent(base, size_bytes, generation, allocation_arena)
             conflicts = tuple(self._overlaps(base, size_bytes))
             if conflicts:
                 raise AllocationError(
@@ -230,13 +248,13 @@ class PhysicalAddressAllocator:
                     )
                 )
         else:
-            base = self._find_first_fit(size_bytes, generation)
+            base = self._find_first_fit(size_bytes, generation, allocation_arena)
 
         allocation = PhysicalAllocation(buffer_id=key[0], base_address=base, size_bytes=size_bytes,
                                         generation=key[1], alias_of=alias_key,
                                         alias_generation=alias_generation,
                                         alias_offset_bytes=alias_offset_bytes,
-                                        inferred=inferred)
+                                        inferred=inferred, allocation_arena=allocation_arena)
         self._allocations[key] = allocation
         return allocation
 
@@ -260,6 +278,7 @@ class PhysicalAddressAllocator:
             alias_generation=declaration.get("alias_generation"),
             address=declaration.get("base_address"),
             alias_offset_bytes=declaration.get("alias_offset_bytes", 0),
+            allocation_arena=declaration.get("allocation_arena"),
         )
 
     def lookup(self, buffer_id: str, generation: int = 0) -> PhysicalAllocation:
@@ -338,7 +357,30 @@ class PhysicalAddressAllocator:
     def from_snapshot(cls, snapshot: dict) -> "PhysicalAddressAllocator":
         allocator = cls(snapshot["capacity_bytes"], snapshot["alignment_bytes"],
                         workspace_capacity_bytes=snapshot.get("workspace_capacity_bytes", 0))
-        for item in snapshot.get("allocations", ()):
+        # Serialized snapshots are address/name ordered, not alias ordered.
+        # Register targets before views, including chains of nested aliases.
+        pending = list(snapshot.get("allocations", ()))
+        ordered = []
+        available = set()
+        while pending:
+            deferred = []
+            for item in pending:
+                if isinstance(item, PhysicalAllocation):
+                    buffer_id, generation = item.buffer_id, item.generation
+                    alias_of, alias_generation = item.alias_of, item.alias_generation
+                else:
+                    item = dict(item)
+                    buffer_id, generation = item["buffer_id"], item.get("generation", 0)
+                    alias_of, alias_generation = item.get("alias_of"), item.get("alias_generation")
+                if alias_of is not None and (alias_of, generation if alias_generation is None else alias_generation) not in available:
+                    deferred.append(item)
+                    continue
+                ordered.append(item)
+                available.add((buffer_id, generation))
+            if len(deferred) == len(pending):
+                raise AllocationError("snapshot alias target is missing or aliases form a cycle")
+            pending = deferred
+        for item in ordered:
             if isinstance(item, PhysicalAllocation):
                 if item.alias_of is not None and item.alias_generation is None:
                     item = PhysicalAllocation(
@@ -346,6 +388,7 @@ class PhysicalAddressAllocator:
                         size_bytes=item.size_bytes, generation=item.generation,
                         alias_of=item.alias_of, alias_generation=item.generation,
                         alias_offset_bytes=item.alias_offset_bytes, inferred=item.inferred,
+                        allocation_arena=item.allocation_arena,
                     )
                 allocator._allocations[(item.buffer_id, item.generation)] = item
             else:
@@ -361,6 +404,7 @@ class PhysicalAddressAllocator:
                     alias_of=item.get("alias_of"), alias_generation=alias_generation,
                     address=item.get("base_address"), alias_offset_bytes=item.get("alias_offset_bytes", 0),
                     inferred=item.get("inferred", False),
+                    allocation_arena=item.get("allocation_arena"),
                 )
         return allocator
 

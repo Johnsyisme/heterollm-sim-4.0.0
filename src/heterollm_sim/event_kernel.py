@@ -891,6 +891,7 @@ class UnifiedEventKernel:
         # Page-pool allocations are borrowed by a cohort. The pool owns their
         # migration generations and release, even when the generation is > 0.
         self._external_physical_allocation_keys: Set[Tuple[str, str, int]] = set()
+        self._physical_allocation_arenas: Dict[Tuple[str, str, int], str] = {}
         self._physical_allocation_task_keys: Dict[
             str, Tuple[Tuple[str, str, int], ...]
         ] = {}
@@ -1131,6 +1132,14 @@ class UnifiedEventKernel:
                     continue
                 key = (str(owner), buffer_id, generation)
                 keys.add(key)
+                arena = row.get("allocation_arena")
+                if arena is not None:
+                    if arena not in ("resident", "workspace"):
+                        raise ValueError("allocation_arena must be resident or workspace")
+                    previous_arena = self._physical_allocation_arenas.get(key)
+                    if previous_arena is not None and previous_arena != arena:
+                        raise ValueError("physical allocation has conflicting arenas")
+                    self._physical_allocation_arenas[key] = arena
                 if row.get("alias_of"):
                     keys.add((
                         str(owner), str(row["alias_of"]),
@@ -1168,11 +1177,14 @@ class UnifiedEventKernel:
             # registered even when this cohort has no later use; the runtime
             # may consult resident weights through cache/L2 state after the
             # task that first touched them.
-            if key[2] > 0 and key not in self._external_physical_allocation_keys:
+            arena = self._physical_allocation_arenas.get(key)
+            if ((arena == "workspace" or (key[2] > 0 and arena != "resident"))
+                    and key not in self._external_physical_allocation_keys):
                 self._pending_physical_releases[key] = self._physical_allocation_last_end.pop(key)
             else:
                 self._physical_allocation_last_end.pop(key, None)
             self._external_physical_allocation_keys.discard(key)
+            self._physical_allocation_arenas.pop(key, None)
 
     def release_request_physical_allocations(self, request_id: str) -> None:
         """Release explicitly request-owned buffers after their last use.
@@ -1746,6 +1758,7 @@ class UnifiedEventKernel:
         # so stop automatic reclamation instead of guessing its final use.
         self._physical_allocation_uses.clear()
         self._external_physical_allocation_keys.clear()
+        self._physical_allocation_arenas.clear()
         self._physical_allocation_task_keys.clear()
         self._physical_allocation_last_end.clear()
         self._pending_physical_releases.clear()
@@ -1910,6 +1923,7 @@ class UnifiedEventKernel:
 
         self._physical_allocation_uses.clear()
         self._external_physical_allocation_keys.clear()
+        self._physical_allocation_arenas.clear()
         self._physical_allocation_task_keys.clear()
         self._physical_allocation_last_end.clear()
         self._pending_physical_releases.clear()

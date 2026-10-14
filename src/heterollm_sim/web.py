@@ -1770,7 +1770,6 @@ def simulation_score_payload(
             ).get("p50"),
             "throughput_requests_per_s": (throughput or {}).get("requests_per_s"),
             "throughput_tokens_per_s": (throughput or {}).get("visible_output_tokens_per_s"),
-            "total_energy_pj": summary.get("total_energy_pj"),
             "resource_accounted_bytes": summary.get("resource_accounted_bytes"),
         },
         "request_metrics": {

@@ -47,11 +47,11 @@ def extension_tables(group):
              str(r['prefetch']['submitted_bytes'])+'/'+str(r['prefetch'].get('cancelled_bytes',0)),
              r['cancelled_work']['physical_read_bytes'],number(r['prefetch_overlap']['decode_operator_overlap_ns']/1000),number(r['node_tps'],2)) for r in rows]))
     elif n==14:
-        parts.append('<p>热模型按实际物理plane的忙闲时段升温/冷却，后续访问因节流变慢。磨损只由显式erase更新P/E；完整服务的磨损对照采用预老化设备假设，没有暗中生成FTL擦除。</p>')
-        parts.append(table(('受控轨迹','时长ms','实际擦除次数','read/program队列峰值','物理plane变异系数','峰值温度°C'),[
+        parts.append('<p>磨损只由显式erase更新P/E；完整服务的磨损对照采用预老化设备假设，没有暗中生成FTL擦除。</p>')
+        parts.append(table(('受控轨迹','时长ms','实际擦除次数','read/program队列峰值','物理plane变异系数'),[
             (r['id'],number(r['duration_ns']/1e6),r['observations']['actual_erase_operations'],
              str(r['observations']['read_queue_depth']['peak'])+'/'+str(r['observations']['program_queue_depth']['peak']),
-             number(r['observations']['physical_plane_imbalance']['coefficient_of_variation']),number(r['observations'].get('peak_temperature_c'))) for r in group.get('trace_rows',[])]))
+             number(r['observations']['physical_plane_imbalance']['coefficient_of_variation'])) for r in group.get('trace_rows',[])]))
         parts.append(table(('完整服务对照','TPS反馈/基准','TTFT反馈/基准'),[
             (r['feedback_id'],number(r['feedback_over_baseline_tps'],5),number(r['feedback_over_baseline_ttft_p50'],5)) for r in group.get('serving_comparisons',[])]))
     elif n==15:
@@ -99,7 +99,7 @@ def render_report(report):
            '<h1>HBF/HBM：内部仿真实验与审计结果</h1>',
            '<p class="lead">机制检查与研究覆盖分别报告。当前完整服务结果 '+str(len(service))+' 行，配置或物理容量拒绝 '+str(len(rejected))+' 行；其余为微基准或明确假设下的分析。所有数值均为仿真或条件估计，尚无独立硬件预测精度验证。</p>',
            '<p><a href="results.json">完整结果 JSON</a> · <a href="acceptance.json">后端机制检查</a> · <a href="profiles.json">文献参数化探针</a> · <a href="core_path_audit.md">旧结果的Core路径审计</a> · <a href="gap_audit.html">修改前的审计清单（历史状态）</a></p>',
-           '<nav><a href="#decode">独立Decode结果</a><a href="#core">Core执行口径</a><a href="#coverage">审计完成清单</a><a href="#performance">完整服务性能</a><a href="#memory">内存与迁移指标</a><a href="#micro">各组实验</a><a href="#economics">能耗与成本</a><a href="#remaining">范围与限制</a></nav>',
+           '<nav><a href="#decode">独立Decode结果</a><a href="#core">Core执行口径</a><a href="#coverage">审计完成清单</a><a href="#performance">完整服务性能</a><a href="#memory">内存与迁移指标</a><a href="#micro">各组实验</a><a href="#economics">购置成本与磨损</a><a href="#remaining">范围与限制</a></nav>',
            '<p class="muted">完整复跑：<code>python -B scripts/hbf_hbm_experiments.py --output-dir artifacts/hbf_hbm --workers 4</code>；生成图表：<code>python -B scripts/plot_hbf_hbm_results.py --update-report</code>。使用项目虚拟环境。时间原始单位 ns，带宽十进制 GB/s，容量 bytes；表中延迟已转换为 ms/µs。</p>',
            '<h2 id="coverage">修改和覆盖范围</h2><ul>'+''.join('<li>'+esc(x)+'</li>' for x in report.get('audit_fixes',[]))+'</ul>',
            table(('实验组','检查状态','结果行数','检查支持的范围'),[(g.get('title',g['id']),g['status'],len(g.get('rows',[])),supported_scope(g)) for g in groups])]
@@ -148,11 +148,11 @@ def render_report(report):
             findings.append(('三轮agent的冷热启发式',
                 'TPS '+number(base['node_tps'],0)+' → '+number(heuristic['node_tps'],0)+'；冷迁移写 '+str(base['agent_lifecycle']['cold_write_bytes'])+' → '+str(heuristic['agent_lifecycle']['cold_write_bytes'])+' B',
                 '两者均复用'+str(heuristic['agent_lifecycle']['reused_tokens'])+'个历史token；含后台请求的实际prefill分别为'+str(base['computed_prefill_tokens'])+'/'+str(heuristic['computed_prefill_tokens'])+'。TPS差异来自冷迁移与预取策略。'))
-    thermal_group=next((g for g in groups if g['id']=='14_thermal_wear'),None)
-    if thermal_group:
-        pair=thermal_group['serving_comparisons'][-1]
-        findings.append(('动态热+磨损压力对照','B的TPS为关闭反馈时的 '+number(pair['feedback_over_baseline_tps'],4)+' 倍',
-            '人为压力参数真实改变后续NAND/GPU时间线；不是实际设备降额预测。'))
+    wear_group=next((g for g in groups if g['id']=='14_wear'),None)
+    if wear_group:
+        pair=wear_group['serving_comparisons'][-1]
+        findings.append(('磨损压力对照','B的TPS为关闭反馈时的 '+number(pair['feedback_over_baseline_tps'],4)+' 倍',
+            '人为压力参数真实改变后续NAND/GPU时间线；不是实际设备寿命预测。'))
     sustained_group=next((g for g in groups if g['id']=='16_sustained'),None)
     if sustained_group:
         for bound in sustained_group.get('arrival_boundaries',[]):
@@ -235,7 +235,7 @@ def render_report(report):
         '<p>第15组使用显式1/2/4 GPU，其余组按各行GPU数计。每GPU TPS = 节点TPS/GPU数；多GPU节点吞吐来自真实并行任务与通信调度。</p>',
         '<p>TPS 是每秒输出 token 数；goodput 是满足延迟目标的合格 TPS。TTFT 是首 token 等待时间，TPOT 是每请求首 token 后的平均输出间隔，TBT 是相邻 token 的间隔，E2E 是请求总时延；SLO 指本实验设定的延迟目标。每项延迟均保留独立样本数。</p>',
         '<p>主 TPS 和 goodput 使用<strong>最早请求到达至仿真结束</strong>的同一窗口，含请求在初始化期间的等待；另列初始化后 TPS。TTFT/E2E 均从各请求到达起算。下表prefill和decode列均以主请求窗口为分母，表示各阶段token对整段请求的速率贡献，<strong>不是独立Decode TPS</strong>。独立Decode窗口见上方第19组；原有batch忙时速率仍单独保存在JSON。</p>',
-        '<p>A=HBM 权重与 KV；B=全部 KV 在 HBF；C=HBM 活跃 KV/HBF 冷 KV；D=HBF 权重/HBM KV。具体目标与控制面实际放置分别保存在结果中。对照约束见每个场景；相同 GPU 或相同槽数不代表相同成本、面积和功耗。</p>',
+        '<p>A=HBM 权重与 KV；B=全部 KV 在 HBF；C=HBM 活跃 KV/HBF 冷 KV；D=HBF 权重/HBM KV。具体目标与控制面实际放置分别保存在结果中。对照约束见每个场景；相同 GPU 或相同槽数不代表相同购置成本和面积。</p>',
         '<p>补充对照 E=主机DRAM中的KV，F=NVMe SSD冷KV，G=CXL连接DRAM中的KV。第9组G是单GPU本地对照，第15组另建多GPU共享池和机架网络变体，路径假设分别保存。</p>',
         '<p>当前未提供真实 token-ID 轨迹；解析 embedding 的远端读取若超过权重表大小，使用明确的循环地址假设保留重复读流量，不扩大权重表驻留容量。不能据此声称复现了真实 token 局部性。</p>',
         '<p>组 02：1 层 hidden=256、4 Q 头/2 KV 头、INT8 小 Dense，每请求 4 输出 token。HBM/HBF 端口峰值同为 1600 GB/s，HBM 效率为 75%；HBF 默认 4µs 读、75µs program、16KiB 页、64 个有效并行单元、16GB/s 写。内部通道按非瓶颈参数假设，3TB/s 端口扫描仍受 1.6TB/s 互联限制。named 模型和研究扩展使用各行实际参数，不能套用此小模型说明。</p>'])
@@ -259,14 +259,13 @@ def render_report(report):
     parts.append(table(('ID','指标','样本数','p50 ms','p95 ms','p99 ms','p999 ms'),[
         (r['id'],metric,r[metric]['count'],*[number(r[metric][q]/1e6 if r[metric][q] is not None else None,4) for q in ('p50','p95','p99','p999')])
         for r in service for metric in ('ttft_ns','tpot_ns','tbt_ns','e2e_ns')]))
-    parts.append('<h2 id="memory">内存、迁移与能量计数</h2><p>分向有效带宽=逻辑读/写字节除以主请求窗口。算子 NAND 流量与 KV 迁移单独列出；尚未记录的队列或物理 plane 指标保持空值。有效并行单元的忙时失衡不等于真实物理 plane 失衡。</p>')
+    parts.append('<h2 id="memory">内存与迁移计数</h2><p>分向有效带宽=逻辑读/写字节除以主请求窗口。算子 NAND 流量与 KV 迁移单独列出；尚未记录的队列或物理 plane 指标保持空值。有效并行单元的忙时失衡不等于真实物理 plane 失衡。</p>')
     memory_rows=[]
     for r in service:
         m=r.get('memory_metrics',{}); d=m.get('directional_bandwidth',{}); migration=r.get('migration_ledger',{}).get('bytes_by_kind',{})
-        energy=r.get('energy',{})
         admission=m.get('host_admission_peak_depths',{})
-        memory_rows.append((r['id'],number(d.get('read',{}).get('effective_logical_gb_s')),number(d.get('write',{}).get('effective_logical_gb_s')),m.get('page_access_count'),number(m.get('page_access_payload_utilization')),m.get('pages_read'),m.get('pages_programmed'),number(m.get('write_amplification')),admission.get('host_read_outstanding_at_admission_peak'),admission.get('host_write_outstanding_at_admission_peak'),sum(migration.values()),number(energy.get('analytical_dynamic_joules_per_token'),8),number(r.get('speculative',{}).get('acceptance_rate'))))
-    parts.append(table(('ID','逻辑读GB/s','逻辑写GB/s','访问页数','每次访问页载荷率','读取页操作','编程页操作','写放大','host读在途峰值','host写在途峰值','KV迁移B','部分动态J/token','投机接受率'),memory_rows))
+        memory_rows.append((r['id'],number(d.get('read',{}).get('effective_logical_gb_s')),number(d.get('write',{}).get('effective_logical_gb_s')),m.get('page_access_count'),number(m.get('page_access_payload_utilization')),m.get('pages_read'),m.get('pages_programmed'),number(m.get('write_amplification')),admission.get('host_read_outstanding_at_admission_peak'),admission.get('host_write_outstanding_at_admission_peak'),sum(migration.values()),number(r.get('speculative',{}).get('acceptance_rate'))))
+    parts.append(table(('ID','逻辑读GB/s','逻辑写GB/s','访问页数','每次访问页载荷率','读取页操作','编程页操作','写放大','host读在途峰值','host写在途峰值','KV迁移B','投机接受率'),memory_rows))
     parts.append('<p>host 在途峰值按每个设备在接纳请求时采样，包含当前请求；缓冲写在主机确认时结束。它不是 NAND 页级读队列或编程队列深度。页载荷率是逻辑 payload/每次访问页跨度，重复访问重复计入，非唯一驻留容量利用率。</p>')
     channel_rows=[]
     for r in service:
@@ -289,7 +288,6 @@ def render_report(report):
         parts.append(table(('ID','TPS','提交/完成B','消费B','消费字节比例','其他GPU算子重叠µs','其中decode重叠µs','提前消费交叠µs'),[
             (r['id'],number(r['node_tps'],2),str(r['prefetch']['submitted_bytes'])+'/'+str(r['prefetch']['completed_bytes']),r['prefetch']['useful_bytes'],number(r['prefetch']['useful_byte_fraction']),number(r['prefetch_overlap']['operator_overlap_ns']/1000),number(r['prefetch_overlap']['decode_operator_overlap_ns']/1000),number(r['prefetch_overlap']['premature_consumer_overlap_ns']/1000)) for r in prefetched]))
         parts.append('<p>只与真实 GPU 算子阶段求交集，排除 host 准备和 GPU 前端/控制阶段；算子阶段可含内存等待，不能当作 tensor-core 忙时。零交集表示该场景没有隐藏 GPU 算子时延；固定 lookahead 的消费比例不代表学习型预测器准确率。</p>')
-    parts.append('<p>上述动态能量仅汇总已配置计费的算子任务，可能缺少 HBF/互联等未定价项，不含初始化、板卡空闲和冷却功率；不能当作校准后的整机 J/token。完整节点条件估计见后面的显式假设。</p>')
     parts.append('<h2 id="micro">各组机制、微基准及扫描</h2>')
     for g in groups:
         parts.append('<h3>'+esc(g.get('title',g['id']))+'</h3>')
@@ -315,9 +313,9 @@ def render_report(report):
         elif n==8:
             parts.append(table(('放置/模型','服务µs','HBF读KiB','HBM写B'),[(r['id'],number(r['service_ns']/1000),r['traffic']['hbf']['read']/1024,r['traffic']['hbm']['write']) for r in rows]))
         elif n==11:
-            parts.append('<p>下面每个可运行候选都重新执行完整服务；各候选按实际栈数单独计成本。约束是共同上限，不代表各点实际容量、功率或成本相等。</p>')
-            parts.append(table(('候选','执行/拒绝原因','合格TPS','功率W','面积mm²','购置$','条件$/百万合格token','所有预算+SLO可行'),[
-                (r['id'],r.get('reason',r['mode']),number(r.get('goodput_tps'),3),number(r['conditional_cost']['active_node_power_w'],1),number(r['conditional_cost']['memory_package_area_mm2'],1),number(r['conditional_cost']['capex_usd'],0),number(r.get('conditional_slo_cost',{}).get('conditional_usd_per_million_tokens'),3),r['jointly_feasible']) for r in rows]))
+            parts.append('<p>下面每个可运行候选都重新执行完整服务；各候选按实际栈数单独计成本。约束是共同上限，不代表各点实际容量、面积或购置成本相等。</p>')
+            parts.append(table(('候选','执行/拒绝原因','合格TPS','面积mm²','购置$','条件$/百万合格token','所有预算+SLO可行'),[
+                (r['id'],r.get('reason',r['mode']),number(r.get('goodput_tps'),3),number(r['conditional_cost']['memory_package_area_mm2'],1),number(r['conditional_cost']['capex_usd'],0),number(r.get('conditional_slo_cost',{}).get('conditional_usd_per_million_tokens'),3),r['jointly_feasible']) for r in rows]))
         elif n==10:
             parts.append(table(('扫描','HBM比例','目标/实际热读比例','实际读写比','可运行','内存服务µs','迁移KiB'),[
                 (r['id'],number(r.get('hbm_fraction')),str(r.get('requested_hot_read_fraction','—'))+'/'+str(r.get('observed_hot_read_fraction','—')),number(r.get('observed_read_write_ratio')),r['runnable'],number(r['memory_service_duration_ns']/1000 if r['memory_service_duration_ns'] is not None else None),number(r.get('migration_bytes',0)/1024)) for r in rows]))
@@ -327,23 +325,19 @@ def render_report(report):
                     'scope','ideal_equivalence','serving_comparisons','arrival_boundaries','concurrency_boundaries','measurement_criteria','model_coverage','specification_sources','specifications','bandwidth_targets'):
             if key in g: parts.append(details(key,g[key]))
         parts.append('<p><a href="'+esc(g['id'])+'.json">本组全部原始数据</a></p>')
-    parts.append('<h2 id="economics">明确假设下的能耗、成本、面积及长期敏感性</h2>')
+    parts.append('<h2 id="economics">明确假设下的购置成本、面积及长期磨损敏感性</h2>')
     economics=report.get('economics')
     if economics:
-        parts.append('<p>以下结果由显式假设与实测仿真吞吐推导，设备价格、功耗、面积及耐久参数均不代表实测或厂商报价。静态预算/长期分析与服务调度结果分别报告。</p><p><a href="economics.json">完整条件估计</a></p>')
-        parts.append(details('成本与功率输入假设',economics.get('assumptions',{})))
-        parts.append(table(('来源实验','假定节点平均W','条件J/token','条件$/百万token','3年TCO $'),[
-            (r['source_id'],number(r['cost']['average_node_power_w']),number(r['cost']['conditional_joules_per_token'],5),number(r['cost']['conditional_usd_per_million_tokens'],4),number(r['cost']['tco_usd_excluding_replacement'],2)) for r in economics.get('serving_tps_conditional_projections',[])]))
-        parts.append('<p>上述每行都把来源 TPS 条件性代入同一假想 2-HBM/2-HBF 节点价格公式，未按来源重新计算硬件成本；不能据此宣称某种架构具有真实成本优势。更换费用另列，不含人工、停机和税费。</p>')
-        parts.append('<h3>3/5 年运行成本与冷却敏感性</h3><p>以下固定工作时吞吐为 1000 token/s，分别改变运行年限、工作时间比例与 PUE（设施总功耗/节点功耗）。设施额外功耗包含冷却等开销，不能全部归因于液冷。液冷购置费用已计入购置成本，不重复相加；下表 TCO 尚不含介质更换。</p>')
-        parts.append(table(('年限','工作时间比例','PUE','节点平均W','设施额外W','液冷购置$','运行电费$','TCO $','条件$/百万token'),[
-            (r['years'],number(r['active_fraction'],1),number(r['pue'],1),number(r['average_node_power_w'],1),
-             number(r['facility_overhead_power_w'],1),number(r['liquid_cooling_capex_usd'],0),number(r['electricity_usd'],2),
-             number(r['tco_usd_excluding_replacement'],2),number(r['conditional_usd_per_million_tokens'],4))
-            for r in economics.get('operating_cost_rows',[])]))
-        parts.append(table(('HBF W/栈','阈值°C','热阻K/W','1小时节流秒','峰值°C','条件带宽比例'),[
-            (r['active_power_w'],r['threshold_c'],r['thermal_resistance_k_per_w'],number(r['thermal_throttle_time_s'],1),number(r['peak_temperature_c']),number(r['conditional_active_bandwidth_scale'])) for r in economics.get('thermal_rows',[])]))
-        parts.append('<p>本节为独立的一阶RC长期敏感性和均匀磨损条件推导；第14组另提供按实际NAND访问反馈到GPU服务时间线的动态实验。两者不混算，也不包含完整FTL、retention或坏块机制。</p>')
+        parts.append('<p>以下结果由显式假设与实测仿真吞吐推导，设备价格、面积及耐久参数均不代表实测或厂商报价。静态预算/长期分析与服务调度结果分别报告。</p><p><a href="economics.json">完整条件估计</a></p>')
+        parts.append(details('购置成本与面积输入假设',economics.get('assumptions',{})))
+        parts.append(table(('来源实验','条件购置$/百万token','购置成本$'),[
+            (r['source_id'],number(r['cost']['conditional_usd_per_million_tokens'],4),number(r['cost']['capex_usd'],2)) for r in economics.get('serving_tps_conditional_projections',[])]))
+        parts.append('<p>上述每行把来源 TPS 代入同一假想 2-HBM/2-HBF 节点购置价格公式，未按来源重新计算硬件成本；不能据此宣称某种架构具有真实成本优势。更换费用另列，不含运行费用、人工、停机和税费。</p>')
+        parts.append('<h3>3/5 年购置成本摊销</h3><p>以下固定工作时吞吐为 1000 token/s，改变使用年限与工作时间比例，将购置费用按条件输出 token 数摊销。</p>')
+        parts.append(table(('年限','工作时间比例','购置成本$','条件购置$/百万token'),[
+            (r['years'],number(r['active_fraction'],1),number(r['capex_usd'],2),number(r['conditional_usd_per_million_tokens'],4))
+            for r in economics.get('purchase_cost_amortization_rows',[])]))
+        parts.append('<p>均匀磨损为独立条件推导；第14组提供按实际 NAND 访问反馈到 GPU 服务时间线的磨损实验。两者不混算，也不包含完整 FTL、retention 或坏块机制。</p>')
         wear=[r for r in economics.get('uniform_wear_rows',[]) if r['capacity_bytes']==512_000_000_000 and r['rated_pe_cycles']==3000 and r['additional_gc_factor']==1 and r['study_years']==3]
         parts.append(table(('写率来源','每年P/E','均匀磨损寿命年','3年内更换成本$'),[
             (r['write_rate_source_id'],number(r['pe_cycles_per_year']),number(r['uniform_wear_lifetime_years']),number(r['replacement_cost_usd'])) for r in wear]))

@@ -477,7 +477,7 @@ def run_group_07_package_budget() -> dict[str, Any]:
                 "容量不足行及不可运行原因",
             ] if status == "passed" else [],
             "unsupported": [
-                "真实封装、功耗、面积和商业产品校准",
+                "真实封装、面积和商业产品校准",
                 "商用最优比例、完整GPU吞吐、成本或热约束下的配置选择",
                 "TPS、TTFT 不适用于预算微基准",
             ],

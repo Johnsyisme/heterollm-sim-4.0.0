@@ -179,7 +179,6 @@ class KvPoolTransfer:
     duration_ns: float
     start_ns: Optional[float] = None
     completion_ns: Optional[float] = None
-    energy_pj: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -219,14 +218,8 @@ class KvPoolTransferPlan:
     # Cancellation drains already-submitted work and releases only this copy's
     # destination. Unlike admission rollback it never rewinds shared calendars.
     cancel: Optional[Callable[[], Mapping[str, Any]]] = field(default=None, repr=False, compare=False)
-    energy_pj: Optional[float] = None
 
     def __post_init__(self) -> None:
-        if self.energy_pj is not None:
-            energy = float(self.energy_pj)
-            if not isfinite(energy) or energy < 0:
-                raise KvPoolError("transfer plan energy_pj must be finite and non-negative")
-            object.__setattr__(self, "energy_pj", energy)
         try:
             duration = float(self.duration_ns)
         except (TypeError, ValueError) as error:
@@ -466,7 +459,26 @@ class DynamicKVPool:
             raw_components = components.values()
         else:
             raw_components = components
-        normalized = [KvPoolComponent.from_component(item) for item in raw_components]
+        from .ir import ComponentSpec
+        from .physical_contract import (
+            parse_execution_physical_config, require_physical_memory_config,
+        )
+
+        normalized = []
+        physical_configs = {}
+        for component in raw_components:
+            item = KvPoolComponent.from_component(component)
+            raw = item.metadata.get("physical_memory_config")
+            if raw is not None:
+                # An IR component carries the physical capacity contract. A
+                # pool descriptor may instead carry a smaller logical budget;
+                # require complete core geometry without equating the two.
+                physical_configs[item.component_id] = (
+                    require_physical_memory_config(component)
+                    if isinstance(component, ComponentSpec)
+                    else parse_execution_physical_config(raw)
+                )
+            normalized.append(item)
         if not normalized:
             raise KvPoolError("paged KV pool needs at least one component")
         if len({item.component_id for item in normalized}) != len(normalized):
@@ -480,11 +492,10 @@ class DynamicKVPool:
         self.components: Dict[str, KvPoolComponent] = {item.component_id: item for item in normalized}
         self._allocation_granularity = {}
         for item in normalized:
-            raw = item.metadata.get("physical_memory_config")
+            config = physical_configs.get(item.component_id)
             alignment = 1
-            if raw is not None:
-                from .memory_types import DramConfig, NandConfig, parse_physical_memory_config
-                config = raw if isinstance(raw, (DramConfig, NandConfig)) else parse_physical_memory_config(raw)
+            if config is not None:
+                from .memory_types import DramConfig
                 alignment = config.burst_bytes if isinstance(config, DramConfig) else config.page_bytes
             self._allocation_granularity[item.component_id] = int(alignment)
         self.tokens_per_page = int(tokens_per_page)
@@ -1118,6 +1129,12 @@ class DynamicKVPool:
             if access.operation == "write" and page.ref_count > 1:
                 raise KvPoolUnsupported(
                     "shared KV page writes require explicit copy-on-write; the pool only reuses read-only prefixes")
+            export = getattr(self._transfer_executor, "cache_access", None)
+            if callable(export):
+                result.append((page.owner_component, export(page,
+                    offset_bytes=access.offset_bytes, size_bytes=access.size_bytes,
+                    operation=access.operation)))
+                continue
             identity = (f"{page.owner_component}:{self._cache_namespace}:"
                         f"generation:{page.allocation_generation}:page:{page.logical_page_id}")
             result.append((page.owner_component, replace(access, buffer_id=identity)))
@@ -1319,7 +1336,6 @@ class DynamicKVPool:
             plan.duration_ns,
             plan.start_ns,
             plan.completion_ns,
-            plan.energy_pj,
         ))
         self._last_error = None
         return True
@@ -1407,7 +1423,7 @@ class DynamicKVPool:
         del self._pending_moves[logical_page_id]
         self._events.append(KvPoolTransfer(
             kind, logical_page_id, source, target, page.bytes,
-            plan.duration_ns, plan.start_ns, plan.completion_ns, plan.energy_pj))
+            plan.duration_ns, plan.start_ns, plan.completion_ns))
 
     def cancel_prepared_restore(self, logical_page_id: int, plan: KvPoolTransferPlan,
                                 *, now_ns: float) -> Mapping[str, Any]:

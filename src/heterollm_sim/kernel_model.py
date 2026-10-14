@@ -804,7 +804,7 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
         old = resources.get(resource, ResourceDemand(resource, 0))
         resources[resource] = ResourceDemand(resource, old.service_ns + ns, bytes_moved=old.bytes_moved + byte_count, work_units=old.work_units + work)
     # The tensor service above executes padded MMA tiles. Charge the same
-    # issued arithmetic in its work/energy ledger; logical FLOPs stay in the
+    # issued arithmetic in its work ledger; logical FLOPs stay in the
     # CostEstimate. Source MMQ work already supplies its executed extent.
     add(dot_resource, dot_ns, work=issued if kernel.compute_primitive == 'tensor' else operations)
     add(gpu.scalar_resource_id, unpack_ns + scale_ns + reduce_ns + (0 if attention else workload.source_partial_service_ns), work=unpack + scalar_ops + reduce_ops)
@@ -848,10 +848,7 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
         bw = measured_bw
     # Dependency/overlap stalls occupy the stream, not every hardware resource.
     factor = predicted / analytical if prediction['model'] != 'analytical' else 1.0
-    demands = tuple(replace(d, energy_pj=(d.bytes_moved * hbm.energy_pj_per_byte if d.resource_id == hbm.resource_id else
-                            d.work_units * (gpu.tensor_energy_pj_per_op if d.resource_id == gpu.tensor_core.resource_id else
-                                            gpu.special_function_energy_pj_per_op if d.resource_id == gpu.special_function_resource_id else gpu.scalar_energy_pj_per_op)),
-                            service_ns=d.service_ns * kernel.overlap_factor * factor)
+    demands = tuple(replace(d, service_ns=d.service_ns * kernel.overlap_factor * factor)
                     for d in resources.values())
     envelope = max(predicted, max(d.service_ns for d in demands))
     device_launch = gpu.kernel_launch_ns if profile.launch_ns is None else profile.launch_ns
@@ -912,8 +909,8 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
     # A profile flag alone is not proof that this invocation is captured.
     if profile.graph_enabled:
         prediction['graph_launch_status'] = 'requires_runtime_capture_binding_per_node_launch_preserved'
-    if launch or gpu.launch_energy_pj:
-        phases.append(CostPhase('kernel_launch', TaskCategory.COMPUTE, (ResourceDemand(gpu.launch_resource_id, launch, energy_pj=gpu.launch_energy_pj),), {'launch_evidence': profile.launch_evidence, 'kernel_count': 1}))
+    if launch:
+        phases.append(CostPhase('kernel_launch', TaskCategory.COMPUTE, (ResourceDemand(gpu.launch_resource_id, launch),), {'launch_evidence': profile.launch_evidence, 'kernel_count': 1}))
     phases.append(CostPhase('gpu_fused_attention' if attention else 'gpu_gemm', TaskCategory.COMPUTE, demands, {'kernel_model': audit}))
     if scratch_bytes:
         elements = workload.batch_tokens * workload.hidden_size
@@ -938,11 +935,11 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
                   * min(1.0, fix_ctas / (gpu.sm_count * kernel.saturation_ctas_per_sm)))
         fix_demands = (
             ResourceDemand(gpu.scalar_resource_id, fix_scalar / fix_scalar_rate,
-                           work_units=fix_scalar, energy_pj=fix_scalar * gpu.scalar_energy_pj_per_op),
+                           work_units=fix_scalar),
             ResourceDemand(gpu.special_function_resource_id, fix_sfu / (gpu.sm_count * gpu.special_function_units_per_sm * gpu.special_function_ops_per_cycle * gpu.tensor_core.frequency_ghz * fix_efficiency),
-                           work_units=fix_sfu, energy_pj=fix_sfu * gpu.special_function_energy_pj_per_op),
+                           work_units=fix_sfu),
             ResourceDemand(hbm.resource_id, hbm.memory_service(fix_read, fix_write, bandwidth_gb_s=fix_bw)['service_ns'] + kernel.memory_latency_ns,
-                           bytes_moved=fix_read + fix_write, energy_pj=(fix_read + fix_write) * hbm.energy_pj_per_byte))
+                           bytes_moved=fix_read + fix_write))
         fix_ns = max(d.service_ns for d in fix_demands)
         fix_audit = {**audit, 'kernel_family': 'flash_attn_stream_k_fixup_uniform',
                      'read_bytes': fix_read, 'write_bytes': fix_write,
@@ -957,9 +954,9 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
                          'policy': 'replace_backing_estimate_keep_compute_resources',
                      },
                      'pipeline_ns': {'dependency': 0}}
-        if launch or gpu.launch_energy_pj:
+        if launch:
             phases.append(CostPhase('kernel_launch', TaskCategory.COMPUTE,
-                          (ResourceDemand(gpu.launch_resource_id, launch, energy_pj=gpu.launch_energy_pj),),
+                          (ResourceDemand(gpu.launch_resource_id, launch),),
                           {'kernel_count': 1, 'launch_evidence': profile.launch_evidence}))
         phases.append(CostPhase('gpu_attention_stream_k_fixup', TaskCategory.COMPUTE,
                       fix_demands + (ResourceDemand(stream_id, fix_ns),),
@@ -1102,16 +1099,15 @@ def apply_captured_graph_launch(tasks, profile):
         launch = graph_launch_phases(profile, first.demands[0].resource_id, len(members), captured=True)
         # Graph replay elides service time for the per-kernel frontend tasks,
         # but it does not erase the physical ledger attached to those tasks.
-        # Aggregate bytes, energy and useful work onto the single charged
+        # Aggregate bytes and useful work onto the single charged
         # replay task before clearing the duplicate service demands.
         ledger = {
             'bytes_moved': sum(d.bytes_moved for task in members for d in task.demands),
-            'energy_pj': sum(d.energy_pj for task in members for d in task.demands),
             'work_units': sum(d.work_units for task in members for d in task.demands),
             'service_ns': sum(d.service_ns for task in members for d in task.demands),
         }
         charged_demand = replace(launch.demands[0], **{
-            key: ledger[key] for key in ('bytes_moved', 'energy_pj', 'work_units')})
+            key: ledger[key] for key in ('bytes_moved',  'work_units')})
         for ordinal, index in enumerate(indices):
             task = tasks[index]
             metadata = {**task.metadata, 'graph_launch': {**launch.metadata, 'graph_id': group,
@@ -1119,7 +1115,7 @@ def apply_captured_graph_launch(tasks, profile):
                          'physical_ledger_preserved': True,
                          'original_device_service_ns': ledger['service_ns']}}
             demands = (charged_demand,) if ordinal == 0 else tuple(
-                replace(d, service_ns=0.0, bytes_moved=0, energy_pj=0.0, work_units=0.0)
+                replace(d, service_ns=0.0, bytes_moved=0,  work_units=0.0)
                 for d in task.demands)
             dependencies = task.dependencies if ordinal == 0 else tuple(dict.fromkeys((*task.dependencies, first.task_id)))
             result[index] = replace(task, demands=demands, dependencies=dependencies, metadata=metadata)

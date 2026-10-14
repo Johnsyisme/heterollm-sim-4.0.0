@@ -66,12 +66,12 @@ def test_explicit_zero_cost_erase_preserves_operation_without_inventing_bytes(fr
     assert resolved.demands == ()
     result = resolved.metadata["physical_execution"]
     assert result["erase_operations"] == 1
-    assert result["physical_bytes"] == result["energy_pj"] == 0
+    assert result["physical_bytes"] == 0
     assert result["service_ns"] == front_ns
 
 
 @pytest.mark.parametrize("medium", ["dram", "nand"])
-def test_shared_wire_preserves_each_owner_energy_and_total_traffic(medium):
+def test_shared_wire_preserves_each_owner_and_total_traffic(medium):
     if medium == "dram":
         config = make_hbm_config(capacity_bytes=1048576, data_lanes=1,
                                  metadata={"data_resource_prefix": "shared"})
@@ -85,14 +85,12 @@ def test_shared_wire_preserves_each_owner_energy_and_total_traffic(medium):
     task = TaskSpec("shared", "request", "shared wire audit", TaskCategory.MEMORY,
         metadata={"physical_memory_config": config,
             "physical_memory_configs": {"a": config, "b": config},
-            "physical_energy_pj_per_byte_by_owner": {"a": 1., "b": 2.},
             "memory_accesses": tuple({"physical_owner": owner, "operation": "read",
                 "address": 0, "byte_count": amount} for owner in ("a", "b"))})
     resolved = resolve_physical_task(task, PhysicalRuntimeContext(), 0.)
     owners = resolved.metadata["physical_execution_by_owner"]
-    assert owners["a"]["energy_pj"] == physical
-    assert owners["b"]["energy_pj"] == physical * 2
-    assert sum(d.energy_pj for d in resolved.demands) == physical * 3
+    assert owners["a"]["physical_read_bytes"] == physical
+    assert owners["b"]["physical_read_bytes"] == physical
     assert sum(d.bytes_moved for d in resolved.demands) == moved * 2
     execution = resolved.metadata["physical_execution"]
     assert execution["resource_owners"][resource] == resource

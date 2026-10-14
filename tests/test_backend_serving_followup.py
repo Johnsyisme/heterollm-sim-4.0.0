@@ -80,17 +80,6 @@ def test_full_agent_serving_with_stateful_l2_uses_live_cache_for_migration(monke
     assert all(executor.cache_states[owner][1] is cache for owner, cache in caches.items())
 
 
-def test_paged_swap_energy_matches_executed_memory_and_fabric_phases():
-    runner = serving_runtime(distance=0)
-    result = runner.run()
-    executor = runner._paged_pool_transfer_executor
-    ledger = executor.cost_ledger()
-    assert ledger["energy_pj"] > 0
-    assert result.kv_metrics.swap_transfer_energy_pj == pytest.approx(ledger["energy_pj"])
-    assert sum(phase["energy_pj"] for event in executor.events
-               for phase in event["phases"]) == pytest.approx(ledger["energy_pj"])
-
-
 @pytest.mark.parametrize("cold", [False, True])
 def test_gpu_kv_uses_actual_pool_pages_across_session_handoff_and_migration(monkeypatch, cold):
     import heterollm_sim.data_motion as kernel_module

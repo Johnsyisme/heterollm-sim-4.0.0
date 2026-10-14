@@ -8,7 +8,7 @@ import math
 
 from .cache_state import CacheAccess, ExplicitCacheState
 from .contracts import ResourceDemand
-from .cost_models import HBMProfile, _require_non_negative
+from .cost_models import HBMProfile
 
 
 def _allocation_for(allocator, buffer_id, generation):
@@ -132,8 +132,7 @@ def _allocation_table(task, accesses, backing_accesses, allocator=None):
 
 def _l2_execution_metadata(metadata, duration, demands, *, physical=False):
     """Keep retained cost views consistent with the dispatched L2 demand."""
-    updated = {**metadata, 'analytical_service_ns': duration,
-               'analytical_energy_pj': sum(d.energy_pj for d in demands)}
+    updated = {**metadata, 'analytical_service_ns': duration}
     resource_service = {d.resource_id: d.service_ns for d in demands}
     reason = 'stateful_l2_physical_recost' if physical else 'stateful_l2_runtime_recost'
     def audit(value):
@@ -158,10 +157,6 @@ def resolve_l2_task(task, states, physical_allocator=None):
     contract = task.metadata.get('stateful_l2')
     if contract is None:
         return task
-    if 'cache_energy_pj_per_byte' not in contract:
-        raise ValueError('stateful L2 requires explicit cache_energy_pj_per_byte')
-    cache_energy = contract['cache_energy_pj_per_byte']
-    _require_non_negative('cache_energy_pj_per_byte', cache_energy)
     owner = contract['owner']
     signature = (contract['capacity_bytes'], contract['line_bytes'], contract['write_back'], contract['write_allocate'])
     existing = states.get(owner)
@@ -196,10 +191,9 @@ def resolve_l2_task(task, states, physical_allocator=None):
     demands = []
     for d in task.demands:
         if d.resource_id == contract['memory_resource']:
-            d = replace(d, service_ns=memory_ns, bytes_moved=reads + writes, energy_pj=(reads + writes) * hbm.energy_pj_per_byte)
+            d = replace(d, service_ns=memory_ns, bytes_moved=reads + writes)
         elif d.resource_id == contract['cache_resource']:
-            d = replace(d, service_ns=cache_ns, bytes_moved=requested,
-                        energy_pj=requested * cache_energy)
+            d = replace(d, service_ns=cache_ns, bytes_moved=requested)
         demands.append(d)
     # Measured device wall is invalid under a different cache protocol. The
     # planner prevents combining that surface with mutable L2 for now.
@@ -226,7 +220,6 @@ def resolve_l2_task(task, states, physical_allocator=None):
         'l2_execution': report,
         'analytical_service_ns': duration,
         'analytical_bytes': sum(d.bytes_moved for d in demands),
-        'analytical_energy_pj': sum(d.energy_pj for d in demands),
     }
     # Physical event dispatch needs allocator declarations before it can
     # resolve the backing ranges. Keep these declarations off ordinary HBM
@@ -275,7 +268,6 @@ def attach_l2_contract(task, *, gpu, hbm, memory_resource, cache_resource, owner
         'write_back': gpu.cache_hierarchy.write_back, 'write_allocate': gpu.cache_hierarchy.write_allocate,
         'cache_resource': cache_resource, 'memory_resource': memory_resource,
         'cache_bandwidth_gb_s': level.bandwidth_gb_s, 'cache_latency_ns': level.hit_latency_ns,
-        'cache_energy_pj_per_byte': level.energy_pj_per_byte,
         'cache_parallelism': level.transaction_parallelism, 'bandwidth_gb_s': bandwidth,
         'hbm': asdict(hbm), 'accesses': tuple(asdict(a) for a in accesses),
         'invocation_buffers': tuple(a.buffer_id for a in accesses if a.buffer_id.startswith('@invocation:')),

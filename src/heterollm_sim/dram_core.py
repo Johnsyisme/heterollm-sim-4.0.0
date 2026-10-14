@@ -1,6 +1,7 @@
 """Shared lightweight DRAM read/write core for DDR, LPDDR, HBM and GDDR."""
 from __future__ import annotations
 
+from bisect import bisect_right, insort
 from dataclasses import dataclass, replace
 from functools import lru_cache
 import math
@@ -15,6 +16,10 @@ from .memory_types import AccessRequest, DramConfig, Operation, StageTiming, Tra
 class _BankState:
     open_row: Optional[int] = None
     ready_ns: float = 0.0
+    # Column commands must wait for the current row's ACT even when the
+    # command resource has multiple slots. This is separate from ready_ns,
+    # which includes data recovery and only gates a subsequent PRE/ACT.
+    activation_ready_ns: float = 0.0
 
 
 def _repeat_add(value: float, increment: float, count: int) -> float:
@@ -75,9 +80,12 @@ class DramCore:
     Banks retain one open row. PRE/ACT occupy the bank; column commands occupy
     the lane's command resource, and full bursts occupy its directional data
     resource. This is not a full JEDEC command scheduler: PRE/ACT do not also
-    reserve command slots, and refresh, tFAW/tRRD/tRAS and bank-group-specific
-    timing constraints are outside this model. Requests retain submission
-    order at admission and resource calendars; no FR-FCFS reordering is used.
+    reserve command slots, and refresh and tRAS are outside this model.
+    Optional bank-group timing gates column/ACT starts and WRITE-data-end to
+    READ-command dependencies within each (stack, die, lane, rank). These are
+    eligibility constraints, not extra bus reservations. Requests retain
+    submission order at admission and resource calendars; no FR-FCFS
+    reordering is used.
     """
 
     def __init__(
@@ -98,6 +106,12 @@ class DramCore:
         # mapping audit trail.
         self.capture_details = capture_details
         self._banks: Dict[str, _BankState] = {}
+        # Kept together so runtime snapshots can copy all group histories.
+        # Per-group histories retain A -> B -> A dependencies; one scalar
+        # "last group" would lose the older A event. The sorted ACT calendar
+        # retains future reservations until the admission time proves they
+        # cannot affect another four-activation window.
+        self._bank_group_state: Dict[tuple[int, int, int, int], dict] = {}
         self._inflight: list[float] = []
         self._acceptance_ns = 0.0
         self._largest_stage_ns = max(
@@ -105,6 +119,10 @@ class DramCore:
             config.write_latency_ns, config.burst_interval_ns,
             config.read_recovery_ns, config.write_recovery_ns,
             config.read_to_write_ns, config.write_to_read_ns,
+            config.column_same_group_ns, config.column_different_group_ns,
+            config.activate_same_group_ns, config.activate_different_group_ns,
+            config.four_activate_window_ns,
+            config.write_to_read_same_group_ns, config.write_to_read_different_group_ns,
             config.burst_bytes / config.directional_lane_bandwidth_gb_s(Operation.READ),
             config.burst_bytes / config.directional_lane_bandwidth_gb_s(Operation.WRITE),
         )
@@ -124,6 +142,82 @@ class DramCore:
         shared = self.config.metadata.get("shared_command_resource")
         prefix = str(self.config.metadata.get("command_resource_prefix", "dram:command"))
         return self.timeline.canonical_resource_id(str(shared) if shared else f"{prefix}:{mapping.lane}")
+
+    def _bank_group_history(self, mapping) -> dict:
+        scope = (mapping.stack, mapping.die, mapping.lane, mapping.rank)
+        state = self._bank_group_state.get(scope)
+        if state is None:
+            state = {
+                "column": {"read": {}, "write": {}},
+                "activate": {},
+                "activate_window": [],
+                "write_end": {},
+            }
+            self._bank_group_state[scope] = state
+        return state
+
+    @staticmethod
+    def _group_history_ready(history, group, same_ns, different_ns, earliest):
+        for previous_group, timestamp in history.items():
+            gap = same_ns if previous_group == group else different_ns
+            # Each zero-valued timing is individually disabled. In
+            # particular, enabling ACT/column gates must not silently add
+            # WRITE-data-end -> READ-command ordering when WTR is zero.
+            if gap > 0:
+                earliest = max(earliest, timestamp + gap)
+        return earliest
+
+    def _bank_group_activate_ready(self, state, group, earliest, arrival_ns=0.0):
+        config = self.config
+        earliest = self._group_history_ready(
+            state["activate"], group, config.activate_same_group_ns,
+            config.activate_different_group_ns, earliest,
+        )
+        width = config.four_activate_window_ns
+        if width <= 0:
+            return earliest
+        calendar = state["activate_window"]
+        # A reservation on one bank may be far in the future while another
+        # bank remains free now. Only monotonic admission time, not that
+        # future ACT, proves old starts can no longer constrain an insertion.
+        expired = 0
+        while expired < len(calendar) and calendar[expired] + width <= arrival_ns:
+            expired += 1
+        del calendar[:expired]
+        while True:
+            position = bisect_right(calendar, earliest)
+            first = max(0, position - 4)
+            neighbors = calendar[first:position] + [earliest] + calendar[position:position + 4]
+            candidate = position - first
+            next_start = earliest
+            # Only the consecutive five-ACT windows containing this candidate
+            # can have become invalid. Existing windows were already legal.
+            for offset in range(max(0, candidate - 4), min(candidate, len(neighbors) - 5) + 1):
+                window = neighbors[offset:offset + 5]
+                if window[-1] < window[0] + width:
+                    # To repair this violating window without moving before
+                    # the lower bound, pass the oldest of its other four ACTs
+                    # by a full window. Compare deadlines by addition so
+                    # float64 rounding cannot cause a zero-progress loop.
+                    other_starts = [value for index, value in enumerate(window)
+                                    if index != candidate - offset]
+                    next_start = max(next_start, min(other_starts) + width)
+            if next_start == earliest:
+                return earliest
+            earliest = next_start
+
+    def _bank_group_column_ready(self, state, group, operation, earliest):
+        config = self.config
+        earliest = self._group_history_ready(
+            state["column"][operation.value], group, config.column_same_group_ns,
+            config.column_different_group_ns, earliest,
+        )
+        if operation is Operation.READ:
+            earliest = self._group_history_ready(
+                state["write_end"], group, config.write_to_read_same_group_ns,
+                config.write_to_read_different_group_ns, earliest,
+            )
+        return earliest
 
     def execute(self, request: AccessRequest) -> TransactionResult:
         """Submit one request through the same admission gate as batches."""
@@ -182,6 +276,10 @@ class DramCore:
         result = replace(result, arrival_ns=request.arrival_ns, counters={
             **result.counters, "queue_wait_ns": effective_arrival - request.arrival_ns,
             **self.timeline.metrics_delta(before_metrics),
+            **({
+                "bank_group_timing_enabled": True,
+                "bank_group_timing_fallback": not self.capture_details,
+            } if self.config.bank_group_timing_enabled else {}),
         })
         self._acceptance_ns = effective_arrival
         self._inflight = [*inflight, result.completion_ns]
@@ -239,7 +337,9 @@ class DramCore:
             physical += segment.transfer_bytes
             bank_id = self._bank_id(m)
             bank = self._banks.setdefault(bank_id, _BankState())
-            dependency = request.arrival_ns
+            group_state = (self._bank_group_history(m)
+                           if self.config.bank_group_timing_enabled else None)
+            dependency = max(request.arrival_ns, bank.activation_ready_ns)
             row_hit = bank.open_row == m.row
             if row_hit:
                 row_hits += 1
@@ -251,16 +351,40 @@ class DramCore:
                     dependency = pre.end_ns
                 else:
                     row_misses += 1
-                act = self.timeline.reserve(bank_id, max(dependency, bank.ready_ns), self.config.open_ns)
+                act_ready = max(dependency, bank.ready_ns)
+                if group_state is not None:
+                    # Window eligibility can have holes: a free time before
+                    # four future ACTs is valid while a later time is not.
+                    # Resolve the actual bank calendar first; reserve below
+                    # then cannot move the checked start into such a hole.
+                    act_ready = max(act_ready, self.timeline.available_ns(bank_id))
+                    act_ready = self._bank_group_activate_ready(
+                        group_state, m.bank_group, act_ready, request.arrival_ns,
+                    )
+                act = self.timeline.reserve(bank_id, act_ready, self.config.open_ns)
+                if group_state is not None:
+                    group_state["activate"][m.bank_group] = max(
+                        group_state["activate"].get(m.bank_group, 0.0), act.start_ns,
+                    )
+                    if self.config.four_activate_window_ns > 0:
+                        insort(group_state["activate_window"], act.start_ns)
                 record(StageTiming("ACTIVATE", act.start_ns, act.end_ns, act.resource_id))
                 dependency = act.end_ns
                 bank.open_row = m.row
                 bank.ready_ns = act.end_ns
+                bank.activation_ready_ns = act.end_ns
 
+            if group_state is not None:
+                dependency = self._bank_group_column_ready(
+                    group_state, m.bank_group, request.operation, dependency,
+                )
             command = self.timeline.reserve(
                 self._command_id(m), dependency,
                 self.config.burst_interval_ns,
             )
+            if group_state is not None:
+                history = group_state["column"][request.operation.value]
+                history[m.bank_group] = max(history.get(m.bank_group, 0.0), command.start_ns)
             record(StageTiming("COMMAND_RESERVATION", command.start_ns, command.end_ns, self._command_id(m)))
             latency = self.config.read_latency_ns if request.operation is Operation.READ else self.config.write_latency_ns
             data_ready = command.start_ns + latency
@@ -279,6 +403,10 @@ class DramCore:
                 self.config.directional_lane_bandwidth_gb_s(request.operation),
                 direction=request.operation.value, switch_ns=switch,
             )
+            if group_state is not None and request.operation is Operation.WRITE:
+                group_state["write_end"][m.bank_group] = max(
+                    group_state["write_end"].get(m.bank_group, 0.0), transfer.end_ns,
+                )
             record(StageTiming("BURST_TRANSFER", transfer.start_ns, transfer.end_ns, data_id, segment.transfer_bytes))
             recovery = self.config.read_recovery_ns if request.operation is Operation.READ else self.config.write_recovery_ns
             # A row remains open while later column commands are issued.  The
@@ -311,7 +439,8 @@ class DramCore:
         """Use the closed form only for a single-slot, row-periodic calendar."""
         config = self.config
         interleave = config.interleave_bytes or config.burst_bytes
-        if (self.capture_details or config.lane_count * config.bank_count > 8192
+        if (self.capture_details or config.bank_group_timing_enabled
+                or config.lane_count * config.bank_count > 8192
                 or interleave > config.row_bytes
                 or config.row_bytes % interleave
                 or type(self.timeline) is not ResourceTimeline):
@@ -428,7 +557,7 @@ class DramCore:
                 if bank is None:
                     bank = _BankState()
                     self._banks[bank_id] = bank
-                dependency = request.arrival_ns
+                dependency = max(request.arrival_ns, bank.activation_ready_ns)
                 if bank.open_row == row:
                     hits += 1
                 else:
@@ -440,6 +569,7 @@ class DramCore:
                     _start, dependency = reserve(bank_id, max(dependency, bank.ready_ns), config.open_ns)
                     bank.open_row = row
                     bank.ready_ns = dependency
+                    bank.activation_ready_ns = dependency
                 command_start, _end = reserve(command_id, dependency, q)
                 _start, end = reserve(data_id, command_start + latency, p, transfer=True)
                 bank.ready_ns = max(bank.ready_ns, end + recovery)

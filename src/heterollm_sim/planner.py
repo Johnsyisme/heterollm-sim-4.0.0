@@ -3618,8 +3618,7 @@ def _route_resident_memory_demands(demands, metadata):
                 # All stages are a conservative whole-span reservation.
                 output.append(ResourceDemand(
                     hop.resource_id, startup_ns + 8.0 * count / hop.bandwidth_gbps,
-                    bytes_moved=count, energy_pj=count * hop.energy_pj_per_byte,
-                ))
+                    bytes_moved=count, ))
                 hops_audit.append({"resource_id": hop.resource_id, "link_id": hop.link_id,
                     "direction": direction, "bytes": count, "path_startup_ns": startup_ns})
         audit.append({"memory_component": memory_id, "compute_component": compute_id,
@@ -3638,14 +3637,32 @@ def _route_resident_memory_demands(demands, metadata):
         previous = merged.get(owner)
         merged[owner] = demand if previous is None else ResourceDemand(
             previous.resource_id, previous.service_ns + demand.service_ns,
-            previous.bytes_moved + demand.bytes_moved, previous.energy_pj + demand.energy_pj,
-            previous.work_units + demand.work_units,
+            previous.bytes_moved + demand.bytes_moved, previous.work_units + demand.work_units,
         )
     return tuple(merged.values()), {**metadata, "resident_memory_paths": audit}
 
 
 
 def _attach_planned_l2(task: TaskSpec) -> TaskSpec:
+    if task.metadata.get("physical_memory_config") is not None:
+        # Already-physical/direct kernels bypass the generic descriptor
+        # builder. Preserve declared resident ownership on those paths too.
+        metadata = dict(task.metadata)
+        for key in ("memory_access", "memory_accesses", "physical_allocations"):
+            rows = metadata.get(key)
+            if rows is None:
+                continue
+            single = isinstance(rows, Mapping)
+            rows = (rows,) if single else rows
+            updated = []
+            for row in rows:
+                if _is_resident_physical_buffer(metadata, row.get("buffer_id")):
+                    if row.get("allocation_arena") not in (None, "resident"):
+                        raise ValueError("resident buffer cannot use a transient allocation arena")
+                    row = {**row, "allocation_arena": "resident"}
+                updated.append(row)
+            metadata[key] = updated[0] if single else tuple(updated)
+        task = replace(task, metadata=metadata)
     # Physical GDDR tasks still receive the dynamic L2 contract.  At dispatch
     # the event kernel resolves cache state first and forwards only backing
     # misses/write-backs to the physical core; skipping this contract would
@@ -3680,9 +3697,40 @@ def _attach_planned_l2(task: TaskSpec) -> TaskSpec:
         read, write = cost["activation_bytes"] + cost["weight_bytes"], cost["output_bytes"]
     else:
         read, write = cost.get("read_bytes", 0), cost.get("write_bytes", 0)
+    physical = task.metadata.get("physical_memory_config") is not None
+    serving_identity = str(getattr(task, "request_id", ""))
+    generation_identity = (serving_identity if physical and serving_identity.startswith(
+        ("cohort-", "online-cohort", "serving-")) else None)
+
+    def physical_cache_access(metadata, side, count):
+        # Cache and backing descriptors describe the same allocation, even
+        # for unnamed analytical operands or explicitly versioned weights.
+        identity = _gddr_stable_identity(task, metadata, side)
+        offset = int(metadata.get({"read": "input_offset_bytes", "weight": "weight_offset_bytes",
+                                   "write": "output_offset_bytes"}[side], 0))
+        return CacheAccess(identity, offset, count, "write" if side == "write" else "read",
+            _gddr_allocation_size(scenario, metadata, side, identity, offset, count),
+            allocation_generation=_gddr_access_generation(metadata, side,
+                                                          fallback_identity=generation_identity))
+
     # A preceding analytical cache projection is only a static miss estimate.
     # Stateful L2 must see the original accesses and decide hits itself.
     explicit = task.metadata.get("logical_buffer_accesses", task.metadata.get("buffer_accesses"))
+    if explicit is None and physical and task.metadata.get("paged_buffer_accesses") is None:
+        backing = task.metadata.get("memory_accesses", ())
+        if (backing and all(row.get("buffer_id") for row in backing)
+                and tuple(sum(row["byte_count"] for row in backing if row["operation"] == operation)
+                          for operation in ("read", "write")) == (read, write)):
+            # Full physical views are authoritative. In particular a direct
+            # descriptor may have identities/generations absent from the
+            # operator-level metadata; reconstructing names would allocate
+            # an unrelated cache backing buffer.
+            explicit = tuple({"buffer_id": row["buffer_id"], "operation": row["operation"],
+                "offset_bytes": row.get("offset_bytes", 0), "size_bytes": row["byte_count"],
+                "allocation_generation": row.get("allocation_generation", row.get("generation", 0)),
+                **({"buffer_size_bytes": row["allocation_size_bytes"]}
+                   if row.get("allocation_size_bytes") is not None else {})}
+                for row in backing)
     paged = task.metadata.get("paged_buffer_accesses")
     if paged is not None:
         if explicit is not None:
@@ -3704,6 +3752,13 @@ def _attach_planned_l2(task: TaskSpec) -> TaskSpec:
                     if canonical in normalized and normalized[canonical] != value:
                         raise ValueError("conflicting cache access {} and {}".format(alias, canonical))
                     normalized[canonical] = value
+            if physical:
+                resident = _is_resident_physical_buffer(task.metadata, normalized["buffer_id"])
+                side = "weight" if resident else normalized["operation"]
+                raw_generation = normalized.get("allocation_generation")
+                if raw_generation is None or (raw_generation == 0 and generation_identity is not None and not resident):
+                    normalized["allocation_generation"] = _gddr_access_generation(
+                        task.metadata, side, fallback_identity=generation_identity)
             cache_rows.append(CacheAccess(**normalized))
         accesses = tuple(cache_rows)
         if sum(a.size_bytes for a in accesses if a.operation == "read") != read or sum(a.size_bytes for a in accesses if a.operation == "write") != write:
@@ -3713,14 +3768,11 @@ def _attach_planned_l2(task: TaskSpec) -> TaskSpec:
         weight_bytes = int(cost.get("weight_bytes", 0))
         tensor_id = task.metadata.get("weight_tensor_id")
         projection = task.metadata.get("projection_id")
-        if tensor_id and weight_bytes and weight_bytes <= read:
+        if (physical or tensor_id) and weight_bytes and weight_bytes <= read:
             # Fused logical weight groups need a physical projection identity.
-            if task.metadata.get("physical_memory_config") is not None:
+            if physical:
                 for weight_meta, count in _physical_weight_segments(task.metadata, weight_bytes):
-                    weight_identity = _gddr_stable_identity(task, weight_meta, "weight")
-                    accesses.append(CacheAccess(weight_identity,
-                        int(weight_meta.get("weight_offset_bytes", 0)), count, "read",
-                        weight_meta.get("weight_buffer_size_bytes")))
+                    accesses.append(physical_cache_access(weight_meta, "weight", count))
                 read -= weight_bytes
             else:
                 weight_identity = f"{target_id}:weights:{tensor_id}:{projection}:{rank.tp_rank}"
@@ -3728,7 +3780,10 @@ def _attach_planned_l2(task: TaskSpec) -> TaskSpec:
                     accesses.append(CacheAccess(weight_identity, 0, weight_bytes, "read"))
                     read -= weight_bytes
         input_id = task.metadata.get("input_buffer_id")
-        if input_id and read:
+        if physical and read:
+            accesses.append(physical_cache_access(task.metadata, "read", read))
+            read = 0
+        elif input_id and read:
             input_identity = (
                 _gddr_stable_identity(task, task.metadata, "read")
                 if task.metadata.get("physical_memory_config") is not None
@@ -3739,37 +3794,11 @@ def _attach_planned_l2(task: TaskSpec) -> TaskSpec:
         if read:
             accesses.append(CacheAccess("@tasklocal:unknown_read", 0, read, "read"))
         if write:
-            output_id = task.metadata.get("output_buffer_id", "@tasklocal:unknown_write")
-            output_identity = (
-                _gddr_stable_identity(task, task.metadata, "write")
-                if task.metadata.get("physical_memory_config") is not None
-                else str(output_id)
-            )
-            accesses.append(CacheAccess(output_identity, int(task.metadata.get("output_offset_bytes", 0)), write, "write"))
-    # The L2 contract is built after the physical descriptor is attached, so
-    # its CacheAccess rows would otherwise reset every serving activation to
-    # generation zero.  Scope only transient rows to the cohort identity;
-    # resident weights intentionally remain generation-stable.
-    serving_identity = str(getattr(task, "request_id", ""))
-    if (
-        task.metadata.get("physical_memory_config") is not None
-        and serving_identity.startswith(("cohort-", "online-cohort", "serving-"))
-    ):
-        serving_generation = _gddr_access_generation(
-            task.metadata, "read", fallback_identity=serving_identity
-        )
-        accesses = tuple(
-            replace(
-                access,
-                allocation_generation=(
-                    serving_generation
-                    if access.allocation_generation == 0
-                    and not _is_resident_physical_buffer(task.metadata, access.buffer_id)
-                    else access.allocation_generation
-                ),
-            )
-            for access in accesses
-        )
+            if physical:
+                accesses.append(physical_cache_access(task.metadata, "write", write))
+            else:
+                output_id = task.metadata.get("output_buffer_id", "@tasklocal:unknown_write")
+                accesses.append(CacheAccess(str(output_id), int(task.metadata.get("output_offset_bytes", 0)), write, "write"))
     cache_resource = _rank_gpu_resource(scenario, rank, gpu.cache_hierarchy.levels[-1].resource_id)
     return attach_l2_contract(task, gpu=gpu, hbm=hbm, memory_resource=memory_resource,
                               cache_resource=cache_resource, owner=target_id + ".l2", accesses=accesses)
@@ -4356,14 +4385,8 @@ def _attach_direct_backing_physical_task(task: TaskSpec, scenario: ScenarioConfi
     local_accesses = local_task.metadata.get("memory_accesses", ())
     configs = {remote_owner: remote_config}
     local_config = local_task.metadata.get("physical_memory_config")
-    # Direct HBF is an active memory endpoint too.  Its authored coefficient
-    # belongs to the resolved profile, just as it does for DRAM; looking in
-    # component metadata silently discarded the configured NAND energy.
-    energy_by_owner = {remote_owner:
-        _resolve_component_profile(scenario, component.component_id).energy_pj_per_byte}
     if local_config is not None:
         configs[str(local_task.metadata["physical_owner"])] = local_config
-        energy_by_owner[str(local_task.metadata["physical_owner"])] = local_task.metadata["physical_energy_pj_per_byte"]
     accesses = tuple(local_accesses) + remote_accesses
     expected = (
         int(direct["read_bytes"]) + local_reads,
@@ -4380,7 +4403,6 @@ def _attach_direct_backing_physical_task(task: TaskSpec, scenario: ScenarioConfi
     metadata = {**task.metadata,
         "physical_memory_config": local_config if local_config is not None else remote_config,
         "physical_memory_configs": configs,
-        "physical_energy_pj_per_byte_by_owner": energy_by_owner,
         "physical_owner": primary["physical_owner"],
         "physical_memory_component_id": primary["physical_memory_component_id"],
         "memory_access": accesses, "memory_accesses": accesses,
@@ -4392,38 +4414,6 @@ def _attach_direct_backing_physical_task(task: TaskSpec, scenario: ScenarioConfi
     bound = replace(task, metadata=metadata)
     _assert_physical_memory_demands(bound, scenario)
     return bound
-
-
-def _attach_physical_profile_energy(task: TaskSpec, scenario: ScenarioConfig) -> TaskSpec:
-    """Carry configured endpoint energy through already-physical lowering."""
-    metadata = task.metadata
-    if "physical_energy_pj_per_byte" in metadata or "physical_energy_pj_per_byte_by_owner" in metadata:
-        return task
-    accesses = metadata.get("memory_accesses", metadata.get("memory_access", ()))
-    if isinstance(accesses, Mapping):
-        accesses = (accesses,)
-    owners = {str(row.get("physical_owner") or metadata.get("physical_owner"))
-              for row in accesses if isinstance(row, Mapping)}
-
-    def configured_rates():
-        rates = {}
-        for component in scenario.hardware.components:
-            if scenario.component_profile_kind(component) not in {"hbm", "gddr", "host_memory"}:
-                continue
-            profile = _resolve_component_profile(scenario, component.component_id)
-            service = component.metadata.get("memory_service", {})
-            owner = str(service.get("physical_owner") or component.metadata.get("physical_owner")
-                        or default_memory_resource_id(component))
-            rates[owner] = profile.energy_pj_per_byte
-        return rates
-
-    context = _active_compilation_context(scenario)
-    rates = configured_rates() if context is None else context.invariant(
-        ("physical_profile_energy_rates",), configured_rates)
-    if owners and owners <= rates.keys():
-        return replace(task, metadata={**metadata,
-            "physical_energy_pj_per_byte_by_owner": {owner: rates[owner] for owner in owners}})
-    return task
 
 
 def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> TaskSpec:
@@ -4444,7 +4434,7 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
                 return direct_task
     if task.metadata.get("physical_memory_config") is not None:
         _assert_physical_memory_demands(task, scenario)
-        return _attach_physical_profile_energy(task, scenario)
+        return task
     target_id = task.metadata.get("target_component")
     target = scenario.hardware.component_map().get(target_id)
     target_kind = _kind(target) if target is not None else None
@@ -4495,9 +4485,6 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
             return replace(task, demands=preserved)
         metadata = dict(task.metadata)
         metadata["cost_model"] = {**cost, "physical_read_bytes": reads, "physical_write_bytes": writes}
-        metadata["physical_energy_pj_per_byte"] = _resolve_component_profile(
-            scenario, component.component_id, HostMemoryProfile
-        ).energy_pj_per_byte
         metadata["dram_backing_service"] = {
             "source": "cpu_cache_misses_and_writebacks",
             "logical_read_bytes": reads, "logical_write_bytes": writes,
@@ -4614,6 +4601,7 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
         alias_of: Optional[str] = None,
         alias_generation: Optional[int] = None,
         alias_offset_bytes: int = 0,
+        allocation_arena: Optional[str] = None,
     ) -> None:
         byte_count = _gddr_non_negative_int(byte_count, "byte_count")
         if byte_count <= 0:
@@ -4657,6 +4645,8 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
         }
         if identity is not None:
             descriptor["buffer_id"] = identity
+        if allocation_arena == "resident" or _is_resident_physical_buffer(metadata, identity):
+            descriptor["allocation_arena"] = "resident"
         if allocation_size is not None:
             descriptor["allocation_size_bytes"] = allocation_size
         if alias_of is not None:
@@ -4887,6 +4877,7 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
                         alias_of=_gddr_access_alias(weight_meta, "weight")[0],
                         alias_generation=_gddr_access_alias(weight_meta, "weight")[1],
                         alias_offset_bytes=_gddr_access_alias(weight_meta, "weight")[2],
+                        allocation_arena="resident",
                     )
             remaining_read = read_bytes - activation - weight
             if remaining_read:
@@ -4989,7 +4980,6 @@ def _attach_gddr_physical_task(task: TaskSpec, scenario: ScenarioConfig) -> Task
     metadata = dict(task.metadata)
     metadata.update({
         "physical_memory_config": raw_config,
-        "physical_energy_pj_per_byte": _resolve_component_profile(scenario, component.component_id).energy_pj_per_byte,
         "memory_access": descriptors[0] if len(descriptors) == 1 else tuple(descriptors),
         "memory_accesses": tuple(descriptors),
         "physical_memory_component_id": component.component_id,
@@ -5017,6 +5007,12 @@ def _assert_physical_memory_demands(task: TaskSpec, scenario: ScenarioConfig) ->
                 profile = _resolve_component_profile(scenario, component.component_id)
                 if hasattr(profile, "resource_id"):
                     result[str(profile.resource_id)] = component.component_id
+                    # Recognize the old rank-prefixed spelling only to reject
+                    # unlowered traffic; it is not another physical owner.
+                    legacy = _component_resource_id(profile.resource_id,
+                        reference_component_id=scenario.host_orchestration_profile.gpu_component_id,
+                        target_component_id=component.component_id)
+                    result[str(legacy)] = component.component_id
         return result
     context = _active_compilation_context(scenario)
     resources = owners() if context is None else context.invariant(("physical_memory_resource_owners",), owners)
@@ -7984,7 +7980,7 @@ def _direct_memory_phase(
 
         ``PhysicalService.price`` may expose every expanded burst interval and
         payload for audit/replay.  A planner task only needs the aggregate
-        service/energy/byte counters; the physical event kernel recomputes the
+        service/byte counters; the physical event kernel recomputes the
         detailed trace from ``physical_memory_config`` and ``memory_access`` at
         dispatch.  Keeping those interval tuples in every phase metadata entry
         made one 6 MiB GDDR read occupy tens of megabytes and multiplied that
@@ -8029,7 +8025,7 @@ def _direct_memory_phase(
     )
     remote_service = dict(read_bill or write_bill or {})
     if read_bill is not None and write_bill is not None:
-        for key in ("service_ns", "physical_bytes", "energy_pj", "host_transfer_bytes",
+        for key in ("service_ns", "physical_bytes", "host_transfer_bytes",
                     "physical_read_bytes", "physical_write_bytes", "read_operations",
                     "program_operations", "erase_operations", "command_count",
                     "media_command_count"):
@@ -8045,18 +8041,13 @@ def _direct_memory_phase(
         for bill, amount in ((read_bill, moved_reads), (write_bill, moved_writes))
         if bill is not None
     )
-    remote_energy_pj = sum(
-        float(bill.get("energy_pj", 0.0))
-        for bill in (read_bill, write_bill)
-        if bill is not None
-    )
     remaining = reads + writes - moved_reads - moved_writes
     demands = [replace(d, service_ns=float(local_service["service_ns"]), bytes_moved=remaining,
-                       energy_pj=remaining * local.energy_pj_per_byte)
+                       )
                if d is backing else d for d in phase.demands]
     demands.append(ResourceDemand(service.resource_id, float(remote_service["service_ns"]),
                                   bytes_moved=remote_physical_bytes,
-                                  energy_pj=remote_energy_pj))
+                                  ))
     # Reference edges expose this same controller. Independent links still carry bytes.
     for source, target, amount in ((storage, rank.component_id, moved_reads),
                                    (rank.component_id, storage, moved_writes)):
@@ -8069,7 +8060,7 @@ def _direct_memory_phase(
         merged[demand.resource_id] = demand if previous is None else replace(
             previous, service_ns=previous.service_ns + demand.service_ns,
             bytes_moved=previous.bytes_moved + demand.bytes_moved,
-            energy_pj=previous.energy_pj + demand.energy_pj)
+            )
     physical_metadata = {}
     physical_config = _component(scenario, storage).metadata.get("physical_memory_config")
     if physical_config is not None and isinstance(page_offset, int) and not isinstance(page_offset, bool):
@@ -8103,7 +8094,7 @@ def _direct_memory_phase(
             "access_kind": "READ_WRITE" if moved_reads and moved_writes else "READ" if moved_reads else "WRITE",
             "memory_service": remote_service, "physical_bytes": remote_physical_bytes,
             "read_service": read_bill, "write_service": write_bill,
-            "energy_pj": remote_energy_pj, "local_read_bytes": reads - moved_reads,
+            "local_read_bytes": reads - moved_reads,
             "local_write_bytes": writes - moved_writes,
             }})
 
@@ -8127,9 +8118,9 @@ def _linear_state_endpoint_binding(
     raw_config = component.metadata.get("physical_memory_config")
     if raw_config is None or byte_count <= 0:
         return None
-    from .memory_types import DramConfig, NandConfig, parse_physical_memory_config
-    config = (raw_config if isinstance(raw_config, (DramConfig, NandConfig))
-              else parse_physical_memory_config(raw_config))
+    from .memory_types import DramConfig
+    from .physical_contract import require_physical_memory_config
+    config = require_physical_memory_config(component)
     layer_id = str(metadata["layer_id"])
     layer = next(layer for layer in _execution_layers(scenario) if layer.layer_id == layer_id)
     owners = max(1, int(metadata.get("linear_state_independent_owner_count", 1)))
@@ -8677,7 +8668,6 @@ def _coherent_dma_engine_demands(
         existing_demand = existing[0]
         if (
             existing_demand.bytes_moved != 0
-            or existing_demand.energy_pj != 0.0
             or existing_demand.work_units != 0.0
         ):
             raise ValueError(
@@ -8856,8 +8846,9 @@ def _add_transfer_tasks(
                 continue
             if not authored or sum(int(row["size_bytes"]) for row in authored) != byte_count:
                 raise ValueError("explicit transfer ranges must cover its bytes exactly")
-            from .memory_types import DramConfig, parse_physical_memory_config
-            config = parse_physical_memory_config(_component(scenario, component_id).metadata["physical_memory_config"])
+            from .memory_types import DramConfig
+            from .physical_contract import require_physical_memory_config
+            config = require_physical_memory_config(_component(scenario, component_id))
             granularity = config.burst_bytes if isinstance(config, DramConfig) else config.page_bytes
             rows = []
             for row in authored:
@@ -8893,8 +8884,9 @@ def _add_transfer_tasks(
             raw_config = component.metadata.get("physical_memory_config")
             if component_id in state_bindings or address is not None or not isinstance(raw_config, Mapping):
                 continue
-            from .memory_types import DramConfig, parse_physical_memory_config
-            config = parse_physical_memory_config(raw_config)
+            from .memory_types import DramConfig
+            from .physical_contract import require_physical_memory_config
+            config = require_physical_memory_config(component)
             if not isinstance(config, DramConfig):
                 continue
             # The authoring IR may omit native addresses. Use an allocator
@@ -9381,7 +9373,6 @@ def _add_host_orchestration(
                     namespaced.resource_id,
                     max(namespaced.service_ns, pack_ns),
                     bytes_moved=namespaced.bytes_moved,
-                    energy_pj=namespaced.energy_pj,
                     work_units=namespaced.work_units,
                 )
             phase_demands.append(namespaced)
@@ -10521,9 +10512,6 @@ def _add_collective_tasks(
                         "analytical_bytes": sum(
                             demand.bytes_moved for demand in demands
                         ),
-                        "analytical_energy_pj": sum(
-                            demand.energy_pj for demand in demands
-                        ),
                         "analytical_service_ns": max(
                             (
                                 demand.service_ns
@@ -10606,20 +10594,15 @@ def _rank_compute_resource(scenario: ScenarioConfig, rank: LogicalRank) -> str:
 
 
 def _rank_memory_resource(scenario: ScenarioConfig, rank: LogicalRank) -> str:
-    reference = scenario.host_orchestration_profile.gpu_component_id
     _gpu_profile, hbm_profile = _gpu_profiles(
         scenario,
         rank.component_id,
         rank.memory_component_id,
     )
-    owner = rank.memory_component_id or rank.component_id
-    if rank.component_id == reference and rank.memory_component_id is None:
-        return str(hbm_profile.resource_id)
-    return _component_resource_id(
-        hbm_profile.resource_id,
-        reference_component_id=reference,
-        target_component_id=owner,
-    )
+    # Component profile resolution already binds the physical service owner.
+    # Replacing its prefix with a rank/component name creates an unrecognized
+    # resource and can silently leave the old bandwidth estimate unlowered.
+    return str(hbm_profile.resource_id)
 
 
 def _nearest_profile_component_id(
@@ -11422,7 +11405,6 @@ def _namespace_demand(
             resource_id=resource_id,
             service_ns=demand.service_ns,
             bytes_moved=demand.bytes_moved,
-            energy_pj=demand.energy_pj,
             work_units=demand.work_units,
         )
 
@@ -12799,7 +12781,6 @@ def _coalesce_cim_conversion_lifetime(builder, start, last, profile, hardware):
             old = resources.get(owner)
             resources[owner] = replace(demand, resource_id=owner, service_ns=duration,
                 bytes_moved=demand.bytes_moved + (old.bytes_moved if old else 0),
-                energy_pj=demand.energy_pj + (old.energy_pj if old else 0),
                 work_units=demand.work_units + (old.work_units if old else 0))
     slot = profile.load_resource_id + ".conversion_scratch_slot"
     resources[slot] = ResourceDemand(slot, duration)
@@ -13406,7 +13387,6 @@ def _add_rank_gemm(
             ),
         )
     dispatch_resource_id: Optional[str] = None
-    dispatch_energy_pj = 0.0
     if _is_cim(target):
         cim_profile = _resolve_component_profile(
             scenario,
@@ -13539,7 +13519,6 @@ def _add_rank_gemm(
             rank.memory_component_id,
         )
         dispatch_resource_id = gpu_profile.launch_resource_id
-        dispatch_energy_pj = gpu_profile.launch_energy_pj
         mmq_work, mmq_audit, _unused_mmvq_limit = _declared_mmq_work(
             scenario, workload, target, gpu_profile, operation_metadata,
             model_weight_read=model_weight_read, rhs_is_activation=rhs_is_activation,
@@ -13708,7 +13687,6 @@ def _add_rank_gemm(
         # instruction schedule in estimate_cpu_gemm().  Keeping the old
         # planner-side merge here would charge the same transform twice.
         dispatch_resource_id = cpu_profile.pipeline.resource_id
-        dispatch_energy_pj = cpu_profile.dispatch_energy_pj
         iq_panel_dispatch, iq_panel_audit = _llama_source_cpu_iq_panel_dispatch(
             scenario, workload, target, operation_metadata,
             model_weight_read=model_weight_read, rhs_is_activation=rhs_is_activation,
@@ -13759,8 +13737,7 @@ def _add_rank_gemm(
                 ResourceDemand(
                     dispatch_resource_id,
                     explicit_dispatch_ns,
-                    energy_pj=dispatch_energy_pj,
-                ),
+                    ),
             ),
             dependencies=prior,
             advance=False,
@@ -13895,7 +13872,6 @@ def _add_rank_gemm(
                         d.resource_id,
                         launch_ns,
                         d.bytes_moved,
-                        d.energy_pj,
                         d.work_units,
                     )
                     if "frontend" in d.resource_id.lower()
@@ -13925,9 +13901,6 @@ def _add_rank_gemm(
                 ),
                 "analytical_bytes": sum(
                     demand.bytes_moved for demand in demands
-                ),
-                "analytical_energy_pj": sum(
-                    demand.energy_pj for demand in demands
                 ),
                 "analytical_service_ns": max(
                     (demand.service_ns for demand in demands), default=0.0
@@ -14006,12 +13979,6 @@ def _add_rank_gemm(
                 ResourceDemand(
                     cpu_profile.compute_resource_id,
                     epilogue_service_ns,
-                    energy_pj=(
-                        workload.epilogue_operations
-                        * cpu_profile.elementwise_energy_pj_per_op
-                        + workload.epilogue_transcendental_operations
-                        * cpu_profile.special_function_energy_pj_per_op
-                    ),
                     work_units=float(epilogue_operations),
                 ),
             ),
@@ -14286,7 +14253,6 @@ def _add_rank_tensor_kernel(
                         d.resource_id,
                         launch_ns,
                         d.bytes_moved,
-                        d.energy_pj,
                         d.work_units,
                     )
                     if "frontend" in d.resource_id.lower()
@@ -14315,9 +14281,6 @@ def _add_rank_tensor_kernel(
                 ),
                 "analytical_bytes": sum(
                     demand.bytes_moved for demand in demands
-                ),
-                "analytical_energy_pj": sum(
-                    demand.energy_pj for demand in demands
                 ),
                 "analytical_service_ns": max(
                     (demand.service_ns for demand in demands), default=0.0
@@ -14473,9 +14436,6 @@ def _add_rank_fused_attention(
                 ),
                 "analytical_bytes": sum(
                     demand.bytes_moved for demand in demands
-                ),
-                "analytical_energy_pj": sum(
-                    demand.energy_pj for demand in demands
                 ),
                 "analytical_service_ns": max(
                     (demand.service_ns for demand in demands), default=0.0
@@ -14841,9 +14801,6 @@ def _add_rank_primitive(
                 ),
                 "analytical_bytes": sum(
                     demand.bytes_moved for demand in demands
-                ),
-                "analytical_energy_pj": sum(
-                    demand.energy_pj for demand in demands
                 ),
                 "analytical_service_ns": max(
                     (demand.service_ns for demand in demands), default=0.0
@@ -16522,9 +16479,6 @@ def _task_segment_dynamic_task_overrides(
                 "analytical_bytes": sum(
                     demand.bytes_moved for demand in demands
                 ),
-                "analytical_energy_pj": sum(
-                    demand.energy_pj for demand in demands
-                ),
                 "analytical_service_ns": max(
                     (demand.service_ns for demand in demands),
                     default=0.0,
@@ -16641,9 +16595,6 @@ def _task_segment_dynamic_task_overrides(
                 ),
                 "analytical_bytes": sum(
                     demand.bytes_moved for demand in demands
-                ),
-                "analytical_energy_pj": sum(
-                    demand.energy_pj for demand in demands
                 ),
                 "analytical_service_ns": max(
                     (demand.service_ns for demand in demands),
@@ -24368,9 +24319,6 @@ def _add_host_output_cpu_workload(
                 "analytical_bytes": sum(
                     demand.bytes_moved for demand in demands
                 ),
-                "analytical_energy_pj": sum(
-                    demand.energy_pj for demand in demands
-                ),
             },
         )
         prior = (last,)
@@ -24681,9 +24629,6 @@ def _add_host_visible_logits_sampling_commit(
                 demand.work_units for demand in candidate_demands
             ),
             "analytical_bytes": 0,
-            "analytical_energy_pj": sum(
-                demand.energy_pj for demand in candidate_demands
-            ),
         }
         candidate_materialized = builder.add(
             phase + ".output.cpu_candidate_materialization",
@@ -27601,7 +27546,6 @@ def _execution_task_facts(
                     "resource_id": demand.resource_id,
                     "service_ns": float(demand.service_ns),
                     "bytes_moved": int(demand.bytes_moved),
-                    "energy_pj": float(demand.energy_pj),
                     "work_units": float(demand.work_units),
                 }
                 for demand in replay_demands
@@ -29192,7 +29136,6 @@ def _estimate_serving_cohort_cost(
     execution_stages_include_host_orchestration = bool(explicit_host_stages)
     return {
         "duration_ns": summary.makespan_ns,
-        "energy_pj": summary.energy_pj,
         "metadata": {
             "model": lowering.model,
             "task_count": summary.task_count,
@@ -29236,7 +29179,7 @@ def _estimate_serving_cohort_cost(
             "execution_stages": execution_stages,
             **({"resource_demands": tuple(
                 {"resource_id": demand.resource_id, "service_ns": demand.service_ns,
-                 "bytes_moved": demand.bytes_moved, "energy_pj": demand.energy_pj}
+                 "bytes_moved": demand.bytes_moved, }
                 for task in lowering.schedule.tasks for demand in task.demands
             )} if not execution_stages else {}),
             "execution_stages_include_host_orchestration": (
@@ -29392,7 +29335,6 @@ def _accumulate_physical_resource_totals(resources, task, raw, resource_owners):
     """Add only this owner row's contribution to a possibly shared wire."""
     busy = raw.get("resource_busy_ns", {})
     moved = raw.get("resource_bytes")
-    energy = raw.get("resource_energy_pj")
     resolved_owners = raw.get("resource_owners", {})
     for demand in task.demands:
         resource_id = str(demand.resource_id)
@@ -29409,21 +29351,14 @@ def _accumulate_physical_resource_totals(resources, task, raw, resource_owners):
                     "aggregate demand cannot be attributed to multiple owners")
         owner = (resource_owners or {}).get(resource_id, resolved_owners.get(resource_id, "unknown"))
         row = resources.setdefault(resource_id, {
-            "owner": owner, "bytes_moved": 0, "service_ns": 0.0, "energy_pj": 0.0})
+            "owner": owner, "bytes_moved": 0, "service_ns": 0.0, })
         if row["owner"] != owner:
             row["owner"] = resource_id
-        # Older serialized rows lacked owner byte/energy maps. Their ordinary
+        # Older serialized rows lacked owner byte maps. Their ordinary
         # single-owner demand remains the compatibility fallback.
         row["bytes_moved"] += int(moved.get(resource_id, 0) if isinstance(moved, Mapping) else demand.bytes_moved)
         row["service_ns"] += float(busy[resource_id])
-        if isinstance(energy, Mapping):
-            contribution = energy.get(resource_id, 0.)
-        elif isinstance(moved, Mapping):
-            owner_bytes = sum(moved.values())
-            contribution = raw.get("energy_pj", 0.) * moved.get(resource_id, 0) / owner_bytes if owner_bytes else 0.
-        else:
-            contribution = demand.energy_pj
-        row["energy_pj"] += float(contribution)
+
 
 
 def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=None) -> Mapping[str, object]:
@@ -29432,9 +29367,8 @@ def _summarize_nand_task_traffic(tasks: Sequence[TaskSpec], *, resource_owners=N
               "physical_read_bytes", "physical_write_bytes", "pages_read", "pages_programmed",
               "pages_touched", "read_operations", "program_operations", "rmw_read_operations",
               "page_access_payload_bytes", "page_access_capacity_bytes", "host_admission_samples",
-              "erase_operations", "queue_wait_ns", "service_ns", "energy_pj",
-              "media_waves", "host_queue_wait_ns", "media_queue_wait_ns")
-    continuous_fields = {"queue_wait_ns", "service_ns", "energy_pj", "host_queue_wait_ns", "media_queue_wait_ns"}
+              "erase_operations", "queue_wait_ns", "service_ns", "media_waves", "host_queue_wait_ns", "media_queue_wait_ns")
+    continuous_fields = {"queue_wait_ns", "service_ns", "host_queue_wait_ns", "media_queue_wait_ns"}
     totals = {key: 0.0 if key in continuous_fields else 0 for key in fields}
     peaks = {key: 0 for key in ("host_outstanding_at_admission_peak",
              "host_read_outstanding_at_admission_peak", "host_write_outstanding_at_admission_peak")}
@@ -30455,7 +30389,6 @@ def summarize_analytical_coverage(
                 "operations": 0.0,
                 "bytes": 0.0,
                 "latency_ns": 0.0,
-                "energy_pj": 0.0,
                 "operator_ids": set(),
                 "tensor_ids": set(),
             },
@@ -30467,10 +30400,6 @@ def summarize_analytical_coverage(
         intervals = tuple(getattr(task, "resource_intervals", ()) or ())
         row["bytes"] = float(row["bytes"]) + sum(
             float(getattr(interval, "bytes_moved", 0.0))
-            for interval in intervals
-        )
-        row["energy_pj"] = float(row["energy_pj"]) + sum(
-            float(getattr(interval, "energy_pj", 0.0))
             for interval in intervals
         )
         row["latency_ns"] = float(row["latency_ns"]) + float(
@@ -30556,14 +30485,12 @@ def _shared_transfer_demands(
             _rank_memory_resource(scenario, rank),
             float(hbm_profile.memory_service(byte_count)["service_ns"]),
             bytes_moved=byte_count,
-            energy_pj=byte_count * hbm_profile.energy_pj_per_byte,
-        ),
+            ),
         ResourceDemand(
             link.resource_id,
             link.transfer_ns(byte_count),
             bytes_moved=byte_count,
-            energy_pj=byte_count * link.energy_pj_per_byte,
-        ),
+            ),
     )
 
 

@@ -100,17 +100,16 @@ def test_serving_contention_does_not_reintroduce_hbm_bandwidth_or_serialize_dag(
     runner.residency_manager = None
     runner.plan = NS(kv_policy=NS(bytes_per_page=4096, offload_component=None),
         linear_state_policy=NS(bytes_per_request=0, offload_component=None))
-    runner._page_transfer_cost = lambda *args: (0., 0., "none")
+    runner._page_transfer_cost = lambda *args: (0., "none")
     metadata = {"model": "topology_aware_parallel_lowering",
         "host_orchestration_ns": 10., "device_execution_ns": 10.,
         "resource_demand": {"gpu_operations": 0, "hbm_bytes": 1000000}}
     if explicit_dag:
         metadata.update(execution_stage_source="executed_task_dag_kernel_timeline",
                         execution_time_semantics="overlapping_task_interval_unions")
-    cost = BatchCost(10. if explicit_dag else 20., 5., metadata)
+    cost = BatchCost(10. if explicit_dag else 20., metadata)
     actual = runner._apply_resource_contention(NS(kind="decode", items=()), cost)
     assert actual.duration_ns == cost.duration_ns
-    assert actual.energy_pj == cost.energy_pj
     assert actual.metadata["device_execution_ns"] == 10.
     assert actual.metadata["resource_contention_memory_cost_source"] == "lowerer_memory_execution"
     assert "resource_contention_hbm_demand_ns" not in actual.metadata

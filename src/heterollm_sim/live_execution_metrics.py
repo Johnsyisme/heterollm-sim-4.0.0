@@ -152,14 +152,12 @@ class LiveCohortMetrics:
         ordered = tuple(sorted(self._records, key=lambda row: (row.start_ns, row.end_ns, row.task_id)))
         categories, coverage = {}, {}
         state_bytes = {"read": 0, "write": 0, "prefetch": 0, "offload": 0}
-        energy, byte_count = 0.0, 0
+        byte_count = 0
         for record in ordered:
             duration = record.end_ns - record.start_ns
             metadata = record.metadata
             categories[record.category] = categories.get(record.category, 0.0) + duration
-            task_energy = sum(demand.energy_pj for demand in record.demands)
             task_bytes = sum(demand.bytes_moved for demand in record.demands)
-            energy += task_energy
             byte_count += task_bytes
             event_kind = str(metadata.get("event_kind", ""))
             if event_kind.startswith("linear_state_"):
@@ -171,13 +169,11 @@ class LiveCohortMetrics:
                 continue
             row = coverage.setdefault(component, {
                 "task_count": 0.0, "operations": 0.0, "bytes": 0.0,
-                "latency_ns": 0.0, "energy_pj": 0.0,
-                "operator_ids": set(), "tensor_ids": set()})
+                "latency_ns": 0.0, "operator_ids": set(), "tensor_ids": set()})
             row["task_count"] += 1.0
             row["operations"] += float(metadata.get("analytical_ops", 0.0))
             row["bytes"] += float(task_bytes)
             row["latency_ns"] += duration
-            row["energy_pj"] += float(task_energy)
             operator = metadata.get("model_operator_id", metadata.get("operator_id"))
             tensor = metadata.get("weight_tensor_id", metadata.get("tensor_id"))
             if operator:
@@ -200,7 +196,7 @@ class LiveCohortMetrics:
             raise ValueError("live cohort origin_ns is later than an observed task start")
         self._summary_cache = ScheduleCostResult(
             makespan_ns=last_end - origin if ordered else 0.0,
-            task_count=len(ordered), energy_pj=energy, bytes_moved=byte_count,
+            task_count=len(ordered), bytes_moved=byte_count,
             resource_busy_ns=dict(sorted(self._resource_busy.items())),
             category_time_ns=categories, critical_path_category_ns=critical,
             coverage={name: {key: sorted(str(item) for item in value) if isinstance(value, set) else value

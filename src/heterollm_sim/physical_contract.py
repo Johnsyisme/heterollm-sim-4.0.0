@@ -7,7 +7,10 @@ substituting a bandwidth-only service or the memory core's example defaults.
 from dataclasses import asdict, is_dataclass
 from typing import Mapping
 
-from .memory_types import DramConfig, parse_physical_memory_config
+from .memory_types import (
+    DRAM_BANK_GROUP_TIMING_FIELDS,
+    DramConfig, NandConfig, Operation, parse_physical_memory_config,
+)
 
 
 DRAM_COMPONENT_KINDS = frozenset({
@@ -16,6 +19,11 @@ DRAM_COMPONENT_KINDS = frozenset({
 })
 NAND_COMPONENT_KINDS = frozenset({"hbf", "ssd", "high_io_ssd", "nvme"})
 PHYSICAL_MEMORY_COMPONENT_KINDS = DRAM_COMPONENT_KINDS | NAND_COMPONENT_KINDS
+
+# This additive group/rank timing extension is intentionally optional for old
+# serialized configurations. Each field is validated by DramConfig when
+# present; omission means zero/disabled, never a family-specific timing guess.
+DRAM_OPTIONAL_BANK_GROUP_TIMING_FIELDS = frozenset(DRAM_BANK_GROUP_TIMING_FIELDS)
 
 _DRAM_REQUIRED = frozenset({
     "kind", "channels", "subchannels_per_channel", "pseudo_channels_per_channel",
@@ -85,10 +93,56 @@ def require_physical_memory_config(component):
     capacity = component.capacity_bytes
     if capacity <= 0 or parsed.capacity_bytes != capacity:
         raise ValueError(prefix + "capacity_bytes must be positive and equal physical_memory_config capacity (component={}, physical={})".format(capacity, parsed.capacity_bytes))
-    if isinstance(parsed, DramConfig):
-        physical_gbps = parsed.physical_interface_bandwidth_gb_s * 8.0
-    else:
-        physical_gbps = parsed.host_bandwidth_gb_s * 8.0
-    if component.shared_bandwidth_gbps > physical_gbps * (1.0 + 1e-12):
-        raise ValueError(prefix + "component bandwidth exceeds physical memory interface bandwidth")
+    physical_memory_bandwidth_caps_gbps(component, physical_config=parsed)
     return parsed
+
+
+def physical_memory_bandwidth_caps_gbps(component, *, physical_config=None):
+    """Return the core's shared/read/write ceilings in Gb/s.
+
+    A prevalidated typed config may be supplied by a caller that already used
+    ``require_physical_memory_config``. Component bandwidth declarations are
+    validated ceilings for effective profiles; they do not retime the core or
+    replace its physical interface values in reports.
+    """
+    parsed = (require_physical_memory_config(component)
+              if physical_config is None else physical_config)
+    if isinstance(parsed, DramConfig):
+        caps = (parsed.physical_interface_bandwidth_gb_s,
+                parsed.directional_bandwidth_gb_s(Operation.READ),
+                parsed.directional_bandwidth_gb_s(Operation.WRITE))
+    elif isinstance(parsed, NandConfig):
+        caps = (parsed.host_bandwidth_gb_s,
+                parsed.host_bandwidth_for(Operation.READ),
+                parsed.host_bandwidth_for(Operation.WRITE))
+    else:
+        raise TypeError("physical_config must be a validated DramConfig or NandConfig")
+    caps = tuple(float(value) * 8.0 for value in caps)
+    for label, declared, physical in zip(
+        ("shared", "read", "write"),
+        (component.shared_bandwidth_gbps, component.read_bandwidth_gbps,
+         component.write_bandwidth_gbps), caps,
+    ):
+        if declared > physical * (1.0 + 1e-12):
+            raise ValueError(
+                "component {} ({}): component {} bandwidth exceeds physical memory {} bandwidth".format(
+                    component.component_id, component.kind, label,
+                    "interface" if label == "shared" else label))
+    return caps
+
+
+def parse_execution_physical_config(raw):
+    """Accept a typed core config or require complete serialized execution input.
+
+    Convenience constructors may supply analytical defaults before this
+    boundary. A serialized execution request must carry those choices rather
+    than silently acquiring a different geometry or timing configuration.
+    """
+    if isinstance(raw, (DramConfig, NandConfig)):
+        return raw
+    if not isinstance(raw, Mapping) or raw.get("kind") is None:
+        raise ValueError("physical_memory_config missing explicit fields: kind")
+    value = raw["kind"]
+    kind = str(getattr(value, "value", value)).strip().upper().replace("-", "")
+    component_kind = "gddr" if kind in {"GDDR6", "GDDR6X", "GDDR7"} else kind.lower()
+    return parse_required_physical_config("execution", component_kind, raw)

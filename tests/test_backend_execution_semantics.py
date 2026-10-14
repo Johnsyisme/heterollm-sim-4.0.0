@@ -68,7 +68,7 @@ def test_compiled_live_and_incremental_reductions_agree_on_causal_multilane_grap
     for i in range(24):
         dependencies = tuple(t.task_id for t in rng.sample(tasks, min(len(tasks), rng.randrange(3))))
         demands = tuple(ResourceDemand(r, rng.choice([0., .125, 2.5, 10.]),
-                                       bytes_moved=i*7, energy_pj=i/4)
+                                       bytes_moved=i*7)
                         for r in rng.sample(["a", "b", "c"], rng.randrange(4)))
         tasks.append(TaskSpec(str(i).zfill(2), "r", "work", rng.choice(list(TaskCategory)),
                               dependencies=dependencies, demands=demands,
@@ -198,8 +198,8 @@ def test_chunk_registration_does_not_bill_an_unexecuted_media_preview(role):
 @pytest.mark.parametrize("medium", ["dram", "nand"])
 def test_resource_owner_is_not_misattributed_across_batch_or_stream_boundaries(medium):
     ledgers = [{"task_count": 1, "resource_totals": {"wire": {
-        "owner": owner, "bytes_moved": 64, "service_ns": 2., "energy_pj": energy}}}
-        for owner, energy in (("a", 64.), ("b", 128.))]
+        "owner": owner, "bytes_moved": 64, "service_ns": 2.}}}
+        for owner in ("a", "b")]
     merge = _merge_dram_traffic if medium == "dram" else _merge_storage_traffic
     total = {}
     for ledger in ledgers:
@@ -210,7 +210,7 @@ def test_resource_owner_is_not_misattributed_across_batch_or_stream_boundaries(m
         SimpleNamespace(cost=SimpleNamespace(metadata={key: ledger})) for ledger in ledgers])))
     for result in (total, online):
         assert result["resource_totals"]["wire"] == {
-            "owner": "wire", "bytes_moved": 128, "service_ns": 4., "energy_pj": 192.}
+            "owner": "wire", "bytes_moved": 128, "service_ns": 4.}
     if medium == "dram":
         assert total["refresh_wait_ns"] is None
         assert total["metric_availability"]["refresh_wait_ns"]["status"] == "not_recorded"

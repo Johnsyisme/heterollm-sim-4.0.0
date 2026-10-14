@@ -426,7 +426,7 @@ def _validate_stack_metadata(hardware: HardwareSpec, errors: List[ValidationIssu
     packages = {}
     for component in hardware.components:
         metadata = component.metadata
-        for key in ("stack_id", "thermal_domain_id"):
+        for key in ("stack_id",):
             if key in metadata and (not isinstance(metadata[key], str) or not metadata[key].strip()):
                 add("invalid_" + key, key + " must be non-empty text", component_id=component.component_id)
         if "stack_id" in metadata or "stack_layer" in metadata:
@@ -450,9 +450,6 @@ def _validate_stack_metadata(hardware: HardwareSpec, errors: List[ValidationIssu
 
     for link in hardware.links:
         metadata = link.metadata
-        domain = metadata.get("thermal_domain_id")
-        if "thermal_domain_id" in metadata and (not isinstance(domain, str) or not domain.strip()):
-            add("invalid_thermal_domain_id", "thermal_domain_id must be non-empty text", link_id=link.link_id)
         for flag in ("vertical_link", "on_die"):
             if flag in metadata and not isinstance(metadata[flag], bool):
                 add("invalid_" + flag, flag + " must be boolean", link_id=link.link_id)

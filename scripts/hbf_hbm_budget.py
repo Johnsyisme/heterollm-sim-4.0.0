@@ -300,7 +300,7 @@ def run_budget_sweep() -> dict[str, Any]:
         "can_infer_optimal_hbm_hbf_ratio": False,
         "limitations": [
             "Toy slot capacities intentionally invert the real HBF density advantage; these results verify accounting only.",
-            "No GPU compute, cost, area or thermal model; slots are assumed interchangeable and cannot establish a real package optimum.",
+            "No GPU compute, cost or area model; slots are assumed interchangeable and cannot establish a real package optimum.",
             "The 3-HBM/1-HBF point fits the entire trace in HBM, leaving its HBF slot idle.",
         ],
         "rows": rows,
@@ -390,7 +390,7 @@ def run_architecture_budget_sweep(
             "Every row has four assumed interchangeable slots. Capacity, peak directional bandwidth, parallel service lanes and HBF buffering change together with the selected mix.",
             "HBM-first placement is striped across slots of each tier; weights precede KV. This is one explicit policy, not an optimized placement search.",
             "The same resident set is read at every step and its final two KV pages are updated. The experiment does not grow the resident set or execute transformer operators.",
-            "Independent per-slot memory interfaces are priced by production DRAM/NAND cores. No shared GPU interconnect, compute, energy, monetary, area or thermal budget is modeled.",
+            "Independent per-slot memory interfaces are priced by production DRAM/NAND cores. No shared GPU interconnect, compute, monetary or area budget is modeled.",
             "An infeasible all-HBM point demonstrates this normalized capacity limit; it does not define an infinite speedup or establish a commercial HBM/HBF optimum.",
         ],
     }

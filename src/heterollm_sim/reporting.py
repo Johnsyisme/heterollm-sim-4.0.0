@@ -382,8 +382,6 @@ def compare_with_gpu_baseline(scenario: ScenarioConfig) -> Dict[str, Any]:
     baseline_tokens = float(
         baseline_report["summary"]["throughput"]["visible_output_tokens_per_s"]
     )
-    candidate_energy = candidate_report["summary"]["total_energy_pj"]
-    baseline_energy = baseline_report["summary"]["total_energy_pj"]
     return {
         "candidate": candidate_report,
         "gpu_baseline": baseline_report,
@@ -393,9 +391,6 @@ def compare_with_gpu_baseline(scenario: ScenarioConfig) -> Dict[str, Any]:
             ),
             "throughput_speedup": (
                 candidate_tokens / baseline_tokens if baseline_tokens > 0 else None
-            ),
-            "energy_ratio": (
-                candidate_energy / baseline_energy if baseline_energy > 0 else None
             ),
             "candidate_makespan_ns": candidate_makespan,
             "baseline_makespan_ns": baseline_makespan,
@@ -425,11 +420,6 @@ def format_comparison(scenario: ScenarioConfig) -> str:
                 "NA"
                 if comparison["throughput_speedup"] is None
                 else "{:.3f}x".format(comparison["throughput_speedup"])
-            ),
-            "能耗比：{}".format(
-                "NA"
-                if comparison["energy_ratio"] is None
-                else "{:.3f}x".format(comparison["energy_ratio"])
             ),
             "证据等级：解析估算；用于架构决策前应使用实测数据校准性能配置。",
         )
@@ -488,11 +478,6 @@ def _online_cost_metadata(result: OnlineScenarioResult) -> Iterable[Mapping[str,
     ledger = _paged_kv_cost_ledger(result)
     if ledger:
         yield ledger
-
-
-def _online_total_energy_pj(result: OnlineScenarioResult) -> float:
-    return (sum(batch.cost.energy_pj for batch in result.serving.batches)
-            + float(_paged_kv_cost_ledger(result).get("energy_pj", 0.0)))
 
 
 def _combined_metric_status(statuses: Iterable[str]) -> str:
@@ -582,7 +567,6 @@ def _sum_batch_storage_traffic(
         "queue_wait_ns": 0.0,
         "erase_operations": 0,
         "service_ns": 0.0,
-        "energy_pj": 0.0,
     }
     optional = {key: 0 for key in (
         "logical_read_bytes", "logical_write_bytes", "internal_transfer_bytes",
@@ -644,13 +628,11 @@ def _sum_batch_storage_traffic(
                 "owner": raw.get("owner", "unknown"),
                 "bytes_moved": 0,
                 "service_ns": 0.0,
-                "energy_pj": 0.0,
             })
             row["bytes_moved"] += int(raw.get("bytes_moved", 0) or 0)
             if row["owner"] != raw.get("owner", "unknown"):
                 row["owner"] = str(resource_id)
             row["service_ns"] += float(raw.get("service_ns", 0.0) or 0.0)
-            row["energy_pj"] += float(raw.get("energy_pj", 0.0) or 0.0)
         for value in ledger.get("profile_evidence", ()) or ():
             if str(value) not in profiles and len(profiles) < 32:
                 profiles.append(str(value))
@@ -670,7 +652,7 @@ def _sum_batch_storage_traffic(
     observed_pages = summarize_nand_observations(page_observations)
     return {
         "schema_version": "heterollm.nand-traffic/v1",
-        **{key: (int(value) if key not in {"service_ns", "energy_pj", "queue_wait_ns", "host_queue_wait_ns", "media_queue_wait_ns"} else value)
+        **{key: (int(value) if key not in {"service_ns", "queue_wait_ns", "host_queue_wait_ns", "media_queue_wait_ns"} else value)
            for key, value in numeric.items()},
         **{key: value if observed[key] == physical_batches and _combined_metric_status(source_statuses[key]) == "recorded"
            else None for key, value in optional.items()},
@@ -708,7 +690,7 @@ def _sum_batch_storage_traffic(
         "accounting_semantics": (
             "host_transfer_bytes is logical host payload; physical_* and pages_read/pages_programmed "
             "are NAND media accounting; null means not fully recorded; operation_counts classifies "
-            "task-owner ledgers, not media operations; service_ns/energy_pj are analytical"
+            "task-owner ledgers, not media operations; service_ns is analytical"
         ),
     }
 
@@ -751,12 +733,11 @@ def _sum_batch_dram_traffic(result: OnlineScenarioResult) -> Dict[str, Any]:
                 continue
             row = resources.setdefault(str(resource_id), {"owner": raw.get("owner", "unknown"),
                                                             "bytes_moved": 0, "service_ns": 0.0,
-                                                            "energy_pj": 0.0})
+                                                            })
             row["bytes_moved"] += int(raw.get("bytes_moved", 0) or 0)
             if row["owner"] != raw.get("owner", "unknown"):
                 row["owner"] = str(resource_id)
             row["service_ns"] += float(raw.get("service_ns", 0.0) or 0.0)
-            row["energy_pj"] += float(raw.get("energy_pj", 0.0) or 0.0)
         batch_profiles = ledger.get("organization_profiles", ()) or ()
         if batch_profiles:
             profile_batches += 1
@@ -1414,7 +1395,6 @@ def _task_event(
             "start_ns": interval.start_ns + time_offset_ns,
             "end_ns": interval.end_ns + time_offset_ns,
             "bytes": interval.bytes_moved,
-            "energy_pj": interval.energy_pj,
             "interval_semantics": "exact_exclusive_service",
         }
         direction = resource_directions.get(interval.resource_id)
@@ -1709,7 +1689,6 @@ def _batch_event(
             "end_ns": batch.end_ns,
             "busy_ns": float(busy_ns),
             "bytes": None,
-            "energy_pj": None,
             "interval_semantics": "aggregate_busy_within_batch_envelope",
         }
         for resource_id, busy_ns in sorted(resource_busy.items())
@@ -2271,7 +2250,7 @@ def _visualization_payload(
             limitations.extend(
                 [
                     "保留策略未保存完整任务轨迹；未保留的任务不支持分页回放。",
-                    "汇总时延、吞吐、关键路径、资源利用率、能耗和流量来自完整执行。",
+                    "汇总时延、吞吐、关键路径、资源利用率和流量来自完整执行。",
                 ]
             )
         batch_trace_index = None
@@ -5229,13 +5208,6 @@ def _online_simulated_subtargets(
         if owner_residency.enabled
         else None
     )
-    makespan_ns = _online_elapsed_makespan_ns(serving)
-    total_energy_pj = _online_total_energy_pj(result)
-    modeled_power_mean_w = (
-        total_energy_pj / makespan_ns * 1.0e-3
-        if makespan_ns > 0.0
-        else None
-    )
     quality_available = (
         bool(request_diagnostics.get("batch_item_coverage_complete"))
         and bool(request_diagnostics.get("batch_wall_coverage_complete"))
@@ -5253,7 +5225,6 @@ def _online_simulated_subtargets(
         "MTP draft_acceptance_rate uses accepted_draft_tokens / draft_tokens and excludes main tokens",
         "vram.session_peak_mib is an owner_residency proxy, not device telemetry",
         "vram interval fields use the physical-total residency baseline captured at replay start and the peak observed before temporary workspace release",
-        "modeled_total_dynamic_power_mean_w is analytical dynamic energy over wall time, not GPU board power",
     ]
     if not request_diagnostics.get("batch_item_coverage_complete"):
         guardrails.append("batch item coverage is incomplete; request service subtargets fail closed")
@@ -5474,13 +5445,6 @@ def _online_simulated_subtargets(
             "guardrail": "not nvidia-smi telemetry and not GPU board memory accounting",
         },
         "gpu_active_proxy": gpu_active,
-        "power": {
-            "modeled_total_dynamic_power_mean_w": modeled_power_mean_w,
-            "source": "sum(batch.cost.energy_pj) / serving elapsed makespan",
-            "guardrail": (
-                "modeled dynamic workload power only; not GPU board power"
-            ),
-        },
     }
 
 
@@ -5735,7 +5699,6 @@ def _online_report_core(
         if utilization
         else None
     )
-    total_energy = _online_total_energy_pj(result)
     total_bytes = sum(
         _non_negative_int(metadata.get("resource_accounted_bytes"))
         for metadata in _online_cost_metadata(result)
@@ -5775,7 +5738,6 @@ def _online_report_core(
             metric.status == RequestStatus.REJECTED
             for metric in serving.request_metrics.values()
         ),
-        "total_energy_pj": total_energy,
         "resource_accounted_bytes": total_bytes,
         "paged_kv_transfer_cost": to_primitive(_paged_kv_cost_ledger(result)),
         "storage_traffic": storage_traffic,
@@ -6292,8 +6254,6 @@ def _report_dict_in_context(
         if item.tpot_ns is not None:
             all_tpot.append(item.tpot_ns)
         all_tbt.extend(item.tbt_ns)
-
-    energy_pj = execution.total_energy_pj
     moved_bytes = execution.resource_accounted_bytes
     utilization = dict(result.metrics.resource_utilization)
     bottleneck = max(utilization.items(), key=lambda item: (item[1], item[0])) if utilization else None
@@ -6339,7 +6299,6 @@ def _report_dict_in_context(
             "makespan_ns": result.trace.makespan_ns,
             "task_count": execution.task_count,
             **_host_output_contract_projection(result.scenario),
-            "total_energy_pj": energy_pj,
             "resource_accounted_bytes": moved_bytes,
             "throughput": dict(result.metrics.throughput),
             "ttft_ns": _percentiles(ttft),

@@ -37,7 +37,6 @@ class TaskExecutionRecord:
 class ScheduleCostResult:
     makespan_ns: float
     task_count: int
-    energy_pj: float
     bytes_moved: int
     resource_busy_ns: Mapping[str, float]
     category_time_ns: Mapping[TaskCategory, float]
@@ -191,7 +190,7 @@ def _unresolved_physical_task(task: TaskSpec) -> TaskSpec:
     metadata = {key: value for key, value in task.metadata.items()
                 if key not in {"physical_execution", "physical_execution_role"}}
     return replace(task, metadata=metadata, demands=tuple(
-        replace(demand, service_ns=0.0, bytes_moved=0, energy_pj=0.0)
+        replace(demand, service_ns=0.0, bytes_moved=0)
         if demand.resource_id == owner_resource else demand for demand in task.demands))
 
 
@@ -360,13 +359,10 @@ def execute_cost_schedule(
     category_time: Dict[TaskCategory, float] = {}
     coverage: Dict[str, Dict[str, Any]] = {}
     state_bytes = {"read": 0, "write": 0, "prefetch": 0, "offload": 0}
-    energy_pj = 0.0
     bytes_moved = 0
     for _start, _end, task_id, category, duration, metadata, demands, _dependencies in ordered:
         category_time[category] = category_time.get(category, 0.0) + duration
-        task_energy = sum(demand.energy_pj for demand in demands)
         task_bytes = sum(demand.bytes_moved for demand in demands)
-        energy_pj += task_energy
         bytes_moved += task_bytes
         event_kind = str(metadata.get("event_kind", ""))
         if event_kind.startswith("linear_state_"):
@@ -382,7 +378,6 @@ def execute_cost_schedule(
                     "operations": 0.0,
                     "bytes": 0.0,
                     "latency_ns": 0.0,
-                    "energy_pj": 0.0,
                     "operator_ids": set(),
                     "tensor_ids": set(),
                 },
@@ -393,7 +388,6 @@ def execute_cost_schedule(
             )
             row["bytes"] = float(row["bytes"]) + float(task_bytes)
             row["latency_ns"] = float(row["latency_ns"]) + duration
-            row["energy_pj"] = float(row["energy_pj"]) + float(task_energy)
             operator_id = metadata.get(
                 "model_operator_id", metadata.get("operator_id")
             )
@@ -436,7 +430,6 @@ def execute_cost_schedule(
     return ScheduleCostResult(
         makespan_ns=makespan_ns,
         task_count=total_tasks,
-        energy_pj=energy_pj,
         bytes_moved=bytes_moved,
         resource_busy_ns=dict(sorted(kernel.resource_busy_ns.items())),
         category_time_ns=category_time,

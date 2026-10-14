@@ -292,7 +292,6 @@ class ExplicitCacheState:
             raise CacheStateError("cache transaction already active")
         self._transaction = {
             "lines": [],
-            "line_seen": set(),
             "buffers": [],
             "buffer_seen": set(),
             "scalars": {
@@ -315,11 +314,10 @@ class ExplicitCacheState:
     def rollback_transaction(self, transaction) -> None:
         if transaction is not self._transaction:
             raise CacheStateError("invalid cache transaction")
-        # Undo line mutations in reverse order.  Normal dispatch never scans
-        # the cache; the exceptional rollback path restores membership and
-        # values and then appends restored lines to the LRU tail.  The event
-        # kernel retries the rejected task, so this path is intentionally
-        # bounded by the failed access rather than the full cache size.
+        # Undo each mutation in reverse order, including repeated changes to
+        # one line. A flush followed by eviction can change a saved successor's
+        # position; restoring only the first mutation would rotate LRU order.
+        # Normal dispatch journals touched lines without copying the cache.
         for key, existed, old_line, successor in reversed(transaction["lines"]):
             if existed:
                 self._lines.pop(key, None)
@@ -346,9 +344,8 @@ class ExplicitCacheState:
 
     def _record_line(self, key) -> None:
         transaction = self._transaction
-        if transaction is None or key in transaction["line_seen"]:
+        if transaction is None:
             return
-        transaction["line_seen"].add(key)
         transaction["lines"].append((key, key in self._lines,
                                       self._lines.get(key), self._lru_next.get(key)))
 

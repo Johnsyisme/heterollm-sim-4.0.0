@@ -91,6 +91,7 @@ from .planner import (
     TopologyAwareBatchCostProvider,
 )
 from .precision import dtype_bits
+from .physical_contract import require_physical_memory_config
 from .kv_pool import DynamicKVPool, KvPoolComponent
 from .residency import (
     AccessOperation,
@@ -472,7 +473,6 @@ class BatchCohort:
 @dataclass(frozen=True)
 class BatchCost:
     duration_ns: float
-    energy_pj: float = 0.0
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -1603,7 +1603,6 @@ class KVCacheMetrics:
     rejected_requests: int
     swap_in_bytes: int = 0
     swap_transfer_time_ns: float = 0.0
-    swap_transfer_energy_pj: float = 0.0
     logical_prefill_read_bytes: int = 0
     logical_prefill_write_bytes: int = 0
     logical_decode_read_bytes: int = 0
@@ -1703,7 +1702,6 @@ class LinearStateMetrics:
     restore_events: int
     swap_in_bytes: int = 0
     swap_transfer_time_ns: float = 0.0
-    swap_transfer_energy_pj: float = 0.0
     swap_routed_bytes: int = 0
 
 
@@ -1772,9 +1770,7 @@ class OwnerResidencyMetrics:
     clean_discard_bytes: int = 0
     dirty_writeback_bytes: int = 0
     clean_discard_time_ns: float = 0.0
-    clean_discard_energy_pj: float = 0.0
     transfer_time_ns: float = 0.0
-    transfer_energy_pj: float = 0.0
     initialization_migration_event_count: int = 0
     initialization_page_in_bytes: int = 0
     initialization_page_out_bytes: int = 0
@@ -2230,14 +2226,7 @@ def _compile_serving_plan_in_context(scenario: ScenarioConfig) -> ServingPlan:
                         relay_component_id
                     )
                 )
-            if not isinstance(relay_component.metadata, Mapping) or relay_component.metadata.get(
-                "physical_memory_config"
-            ) is None:
-                raise ValueError(
-                    "paged_pool relay component requires physical_memory_config: {}".format(
-                        relay_component_id
-                    )
-                )
+            require_physical_memory_config(relay_component)
         # ``capacity_bytes`` is the logical paged-pool budget.  It includes
         # both active pages and pages currently resident in the storage tier.
         # Keep this value separate from the active component budget below:
@@ -5776,9 +5765,7 @@ class _OnlineRuntime:
         self.residency_dirty_writeback_bytes = 0
         self.residency_clean_discard_bytes = 0
         self.residency_clean_discard_time_ns = 0.0
-        self.residency_clean_discard_energy_pj = 0.0
         self.residency_transfer_time_ns = 0.0
-        self.residency_transfer_energy_pj = 0.0
         self.residency_accesses = 0
         self.residency_weight_accesses = 0
         self.residency_kv_accesses = 0
@@ -5845,14 +5832,6 @@ class _OnlineRuntime:
             ):
                 from .communication import TopologyRouter
                 from .kv_transfer import PhysicalKVTransferExecutor
-
-                transfer_energy_rates = {}
-                for component in (*pool_components, *relay_components):
-                    if plan.scenario.component_profile_kind(component) in {"hbm", "gddr", "host_memory"}:
-                        transfer_energy_rates[component.component_id] = plan.scenario.resolve_component_profile(
-                            component.component_id).energy_pj_per_byte
-                    elif component.metadata.get("physical_energy_pj_per_byte") is not None:
-                        transfer_energy_rates[component.component_id] = component.metadata["physical_energy_pj_per_byte"]
                 self._paged_pool_transfer_executor = PhysicalKVTransferExecutor(
                     plan.scenario.hardware,
                     runtime=self._execution_resource_kernel.physical_runtime,
@@ -5860,7 +5839,6 @@ class _OnlineRuntime:
                     relay_components=self.plan.kv_policy.relay_components,
                     arrival_ns=lambda _request: self.now,
                     namespace="serving:" + str(id(self)),
-                    energy_pj_per_byte_by_component=transfer_energy_rates,
                     cache_states=self._execution_resource_kernel._l2_states,
                     cache_owners=self._execution_resource_kernel._physical_allocation_cache_owners,
                 )
@@ -5894,7 +5872,6 @@ class _OnlineRuntime:
         self.swap_bytes = 0
         self.swap_in_bytes = 0
         self.swap_transfer_time_ns = 0.0
-        self.swap_transfer_energy_pj = 0.0
         self.prefetch_events = 0
         self.prefetch_bytes = 0
         self.prefetch_transfer_time_ns = 0.0
@@ -5912,7 +5889,6 @@ class _OnlineRuntime:
         self.logical_swap_in_bytes = 0
         self.linear_state_swap_in_bytes = 0
         self.linear_state_swap_transfer_time_ns = 0.0
-        self.linear_state_swap_transfer_energy_pj = 0.0
         self.linear_state_swap_routed_bytes = 0
         self.recompute_events = 0
         self.recompute_tokens = 0
@@ -6068,15 +6044,12 @@ class _OnlineRuntime:
                 "duration_ns": duration,
                 "physical_start_ns": declared_start,
                 "physical_completion_ns": declared_completion,
-                "energy_pj": transfer.energy_pj,
                 "feedback_boundary": "pool_transfer_complete",
             }
             self.events.append(ServingEvent(start, "kv_pool_transfer_start", details=details))
             self.events.append(ServingEvent(end, "kv_pool_transfer_complete", details=details))
             if transfer.kind in {"offload", "restore"}:
                 self.swap_transfer_time_ns += additional_wait
-                if transfer.energy_pj is not None:
-                    self.swap_transfer_energy_pj += transfer.energy_pj
             elif transfer.kind == "prefetch":
                 self.prefetch_events += 1
                 self.prefetch_bytes += int(transfer.bytes)
@@ -6587,10 +6560,10 @@ class _OnlineRuntime:
         page_count: int,
         source_component: Optional[str],
         target_component: Optional[str],
-    ) -> Tuple[float, float, str]:
-        """Return migration time/energy from topology or declared DMA rates."""
+    ) -> Tuple[float, str]:
+        """Return migration time from topology or declared DMA rates."""
 
-        transfer_ns, energy_pj, route_kind, _phases, _components, _latency = (
+        transfer_ns, route_kind, _phases, _components, _latency = (
             self._page_transfer_cost_details(
                 byte_count,
                 page_count,
@@ -6599,7 +6572,7 @@ class _OnlineRuntime:
                 include_controller_phases=False,
             )
         )
-        return transfer_ns, energy_pj, route_kind
+        return transfer_ns, route_kind
 
     def _owner_residency_controller_phases(
         self,
@@ -6665,7 +6638,6 @@ class _OnlineRuntime:
                 "resource_id": resource_id,
                 "service_ns": float(service_ns),
                 "bytes_moved": int(bytes_moved),
-                "energy_pj": 0.0,
                 "work_units": float(work_units),
                 "runtime_phase": runtime_phase,
                 "aggregation": "controller_transaction_batch",
@@ -7015,7 +6987,6 @@ class _OnlineRuntime:
         name: str,
     ) -> Tuple[
         float,
-        float,
         str,
         Tuple[Tuple[Mapping[str, object], ...], ...],
         Tuple[str, ...],
@@ -7023,15 +6994,14 @@ class _OnlineRuntime:
         """Return bulk transfer work without residency or translation work."""
 
         if byte_count <= 0:
-            return 0.0, 0.0, "no_declared_backing_path", (), ()
+            return 0.0, "no_declared_backing_path", (), ()
         if not source_component or not target_component:
             raise ValueError("positive transfer requires declared source and target components")
         source = str(source_component)
         target = str(target_component)
         if source == target:
-            return 0.0, 0.0, "same_component", (), (source,)
+            return 0.0, "same_component", (), (source,)
         route_ns = 0.0
-        route_energy = 0.0
         route_kind = "topology"
         topology_phases: List[Tuple[Mapping[str, object], ...]] = []
         route_component_ids: Tuple[str, ...] = (source, target)
@@ -7058,20 +7028,18 @@ class _OnlineRuntime:
                         "resource_id": demand.resource_id,
                         "service_ns": float(demand.service_ns),
                         "bytes_moved": int(demand.bytes_moved),
-                        "energy_pj": float(demand.energy_pj),
                     }
                     for demand in phase.demands
                 )
                 if demands:
                     topology_phases.append(demands)
                 route_ns += max((demand["service_ns"] for demand in demands), default=0.0)
-                route_energy += sum(demand["energy_pj"] for demand in demands)
         except ValueError as exc:
             raise ValueError(
                 "no valid topology route for transfer {} -> {}".format(source, target)
             ) from exc
         if route_ns > 0.0:
-            return route_ns, route_energy, route_kind, tuple(topology_phases), route_component_ids
+            return route_ns, route_kind, tuple(topology_phases), route_component_ids
         raise ValueError(
             "topology transfer {} -> {} has no positive service".format(source, target)
         )
@@ -7081,10 +7049,10 @@ class _OnlineRuntime:
         byte_count: int,
         source_component: Optional[str],
         target_component: Optional[str],
-    ) -> Tuple[float, float, str, Mapping[str, object]]:
+    ) -> Tuple[float, str, Mapping[str, object]]:
         """Price one resident tensor_get with bulk transfer plus DMA descriptors only."""
 
-        bulk_ns, energy_pj, route_kind, _phases, _components = (
+        bulk_ns, route_kind, _phases, _components = (
             self._topology_transfer_cost_details(
                 byte_count,
                 source_component,
@@ -7093,7 +7061,7 @@ class _OnlineRuntime:
             )
         )
         if route_kind != "topology" or bulk_ns <= 0.0:
-            return bulk_ns, energy_pj, route_kind, {}
+            return bulk_ns, route_kind, {}
         transport = self.plan.scenario.runtime_profile.pcie_dma_iommu
         setup = _dma_setup_service(
             byte_count,
@@ -7107,7 +7075,6 @@ class _OnlineRuntime:
         )
         return (
             bulk_ns + setup.service_ns,
-            energy_pj,
             route_kind,
             {
                 "dma_descriptor_service_ns": setup.service_ns,
@@ -7128,7 +7095,6 @@ class _OnlineRuntime:
         include_controller_phases: bool = True,
     ) -> Tuple[
         float,
-        float,
         str,
         Tuple[Tuple[Mapping[str, object], ...], ...],
         Tuple[str, ...],
@@ -7136,7 +7102,7 @@ class _OnlineRuntime:
     ]:
         """Return migration totals plus aggregate V4 controller phases."""
 
-        bulk_ns, route_energy, route_kind, topology_phases, route_component_ids = (
+        bulk_ns, route_kind, topology_phases, route_component_ids = (
             self._topology_transfer_cost_details(
                 byte_count,
                 source_component,
@@ -7145,7 +7111,7 @@ class _OnlineRuntime:
             )
         )
         if route_kind in {"no_declared_backing_path", "same_component"}:
-            return bulk_ns, route_energy, route_kind, topology_phases, route_component_ids, 0.0
+            return bulk_ns, route_kind, topology_phases, route_component_ids, 0.0
         source = str(source_component)
         target = str(target_component)
         fault_latency = 0.0
@@ -7184,7 +7150,6 @@ class _OnlineRuntime:
                             ),
                             "service_ns": submission_latency_ns,
                             "bytes_moved": 0,
-                            "energy_pj": 0.0,
                         },
                     )
                 )
@@ -7200,7 +7165,6 @@ class _OnlineRuntime:
             )
             return (
                 legacy_transfer_ns,
-                max(0.0, route_energy),
                 route_kind,
                 tuple(legacy_phases),
                 route_component_ids,
@@ -7258,7 +7222,6 @@ class _OnlineRuntime:
         )
         return (
             conserved_transfer_ns,
-            max(0.0, route_energy),
             route_kind,
             tuple(resource_phases),
             route_component_ids,
@@ -7429,52 +7392,45 @@ class _OnlineRuntime:
         state_page_in_bytes = page_in_state_allocations * state_allocation_bytes
 
         page_out_ns = 0.0
-        page_out_energy = 0.0
         page_in_ns = 0.0
-        page_in_energy = 0.0
         transfer_routes: List[str] = []
-        kv_out_ns, kv_out_energy, kv_out_route = self._page_transfer_cost(
+        kv_out_ns, kv_out_route = self._page_transfer_cost(
             kv_page_out_bytes,
             page_out_kv_pages,
             cache_component,
             self.plan.kv_policy.offload_component,
         )
-        kv_in_ns, kv_in_energy, kv_in_route = self._page_transfer_cost(
+        kv_in_ns, kv_in_route = self._page_transfer_cost(
             kv_page_in_bytes,
             page_in_kv_pages,
             self.plan.kv_policy.offload_component,
             cache_component,
         )
         page_out_ns += kv_out_ns
-        page_out_energy += kv_out_energy
         page_in_ns += kv_in_ns
-        page_in_energy += kv_in_energy
         if kv_out_ns > 0.0:
             transfer_routes.append("kv_out:{}".format(kv_out_route))
         if kv_in_ns > 0.0:
             transfer_routes.append("kv_in:{}".format(kv_in_route))
-        state_out_ns, state_out_energy, state_out_route = self._page_transfer_cost(
+        state_out_ns, state_out_route = self._page_transfer_cost(
             state_page_out_bytes,
             page_out_state_allocations,
             cache_component,
             self.plan.linear_state_policy.offload_component,
         )
-        state_in_ns, state_in_energy, state_in_route = self._page_transfer_cost(
+        state_in_ns, state_in_route = self._page_transfer_cost(
             state_page_in_bytes,
             page_in_state_allocations,
             self.plan.linear_state_policy.offload_component,
             cache_component,
         )
         page_out_ns += state_out_ns
-        page_out_energy += state_out_energy
         page_in_ns += state_in_ns
-        page_in_energy += state_in_energy
         if state_out_ns > 0.0:
             transfer_routes.append("linear_state_out:{}".format(state_out_route))
         if state_in_ns > 0.0:
             transfer_routes.append("linear_state_in:{}".format(state_in_route))
         spill_ns = page_out_ns + page_in_ns
-        spill_energy = page_out_energy + page_in_energy
         spill_route = "+".join(transfer_routes) if transfer_routes else "none"
         self._resource_kv_host_backed_pages = target_kv_pages
         self._resource_state_host_backed_allocations = target_state_allocations
@@ -7510,12 +7466,9 @@ class _OnlineRuntime:
                 "resource_contention_actual_spill_bytes": actual_spill,
                 "resource_contention_spill_page_count": spill_pages,
                 "resource_contention_page_transfer_ns": spill_ns,
-                "resource_contention_page_transfer_energy_pj": spill_energy,
                 "resource_contention_page_transfer_route": spill_route,
                 "resource_contention_page_out_ns": page_out_ns,
-                "resource_contention_page_out_energy_pj": page_out_energy,
                 "resource_contention_page_in_ns": page_in_ns,
-                "resource_contention_page_in_energy_pj": page_in_energy,
                 "resource_contention_kv_page_out_count": page_out_kv_pages,
                 "resource_contention_kv_page_in_count": page_in_kv_pages,
                 "resource_contention_kv_refault_page_count": touched_kv_pages,
@@ -7537,7 +7490,6 @@ class _OnlineRuntime:
         )
         return BatchCost(
             duration_ns=max(1.0e-9, adjusted_duration_ns),
-            energy_pj=max(0.0, cost.energy_pj + spill_energy),
             metadata=metadata,
         )
 
@@ -8984,9 +8936,6 @@ class _OnlineRuntime:
             float,
             float,
             float,
-            float,
-            float,
-            float,
             Tuple[str, ...],
             int,
             int,
@@ -9092,9 +9041,9 @@ class _OnlineRuntime:
                 )
             coalesce_open = True
 
-        page_in_ns = page_in_energy = 0.0
-        writeback_ns = writeback_energy = 0.0
-        clean_discard_ns = clean_discard_energy = 0.0
+        page_in_ns = 0.0
+        writeback_ns = 0.0
+        clean_discard_ns = 0.0
         fault_batch_count = 0
         clean_eviction_batch_count = 0
         service_batches: List[Mapping[str, object]] = []
@@ -9134,7 +9083,7 @@ class _OnlineRuntime:
                     ),
                 )
             if direct_clean_discard:
-                transfer_ns, transfer_energy, route = 0.0, 0.0, "direct"
+                transfer_ns, route = 0.0, "direct"
                 resource_phases: Tuple[
                     Tuple[Mapping[str, object], ...], ...
                 ] = ()
@@ -9145,7 +9094,6 @@ class _OnlineRuntime:
             else:
                 (
                     transfer_ns,
-                    transfer_energy,
                     route,
                     resource_phases,
                     route_component_ids,
@@ -9242,17 +9190,14 @@ class _OnlineRuntime:
             if kind is MigrationKind.PAGE_IN:
                 fault_batch_count += batches
                 page_in_ns += transfer_ns
-                page_in_energy += transfer_energy
                 routes.append("page_in:{}".format(route))
             elif kind is MigrationKind.DIRTY_WRITEBACK:
                 fault_batch_count += batches
                 writeback_ns += transfer_ns
-                writeback_energy += transfer_energy
                 routes.append("dirty_writeback:{}".format(route))
             elif kind is MigrationKind.CLEAN_DISCARD:
                 clean_eviction_batch_count += batches
                 clean_discard_ns += transfer_ns
-                clean_discard_energy += transfer_energy
                 routes.append("clean_discard:{}".format(route))
             covered_group_ids = tuple(
                 str(item)
@@ -9275,7 +9220,6 @@ class _OnlineRuntime:
                     "migration_sequence_end": migration_sequence_end,
                     "submission_batch_count": batches,
                     "transfer_ns": transfer_ns,
-                    "transfer_energy_pj": transfer_energy,
                     "route": route,
                     "route_component_ids": route_component_ids,
                     "resource_phases": resource_phases,
@@ -9309,11 +9253,8 @@ class _OnlineRuntime:
         return (
             (
                 page_in_ns,
-                page_in_energy,
                 writeback_ns,
-                writeback_energy,
                 clean_discard_ns,
-                clean_discard_energy,
                 tuple(routes),
                 fault_batch_count,
                 clean_eviction_batch_count,
@@ -9325,9 +9266,6 @@ class _OnlineRuntime:
         self,
         migrations: Sequence[Migration],
     ) -> Tuple[
-        float,
-        float,
-        float,
         float,
         float,
         float,
@@ -9785,11 +9723,8 @@ class _OnlineRuntime:
             )
             (
                 page_in_ns,
-                page_in_energy,
                 writeback_ns,
-                writeback_energy,
                 clean_discard_ns,
-                clean_discard_energy,
                 routes,
                 fault_batch_count,
                 clean_eviction_batch_count,
@@ -9801,17 +9736,12 @@ class _OnlineRuntime:
                 )
                 self._staged_weight_clean_discard_ids.discard(allocation_id)
         migration_ns = page_in_ns + writeback_ns + clean_discard_ns
-        migration_energy = (
-            page_in_energy + writeback_energy + clean_discard_energy
-        )
         self.residency_page_in_bytes += page_in_bytes
         self.residency_page_out_bytes += page_out_bytes
         self.residency_clean_discard_bytes += clean_discard_bytes
         self.residency_dirty_writeback_bytes += dirty_writeback_bytes
         self.residency_clean_discard_time_ns += clean_discard_ns
-        self.residency_clean_discard_energy_pj += clean_discard_energy
         self.residency_transfer_time_ns += migration_ns
-        self.residency_transfer_energy_pj += migration_energy
         self.residency_fault_batches += fault_batch_count
         self.residency_clean_eviction_batches += clean_eviction_batch_count
         snapshot = manager.snapshot()
@@ -9856,17 +9786,9 @@ class _OnlineRuntime:
                     dirty_writeback_bytes
                 ),
                 "owner_residency_page_in_ns": page_in_ns,
-                "owner_residency_page_in_energy_pj": page_in_energy,
                 "owner_residency_dirty_writeback_ns": writeback_ns,
-                "owner_residency_dirty_writeback_energy_pj": (
-                    writeback_energy
-                ),
                 "owner_residency_clean_discard_ns": clean_discard_ns,
-                "owner_residency_clean_discard_energy_pj": (
-                    clean_discard_energy
-                ),
                 "owner_residency_transfer_ns": migration_ns,
-                "owner_residency_transfer_energy_pj": migration_energy,
                 "owner_residency_transfer_routes": routes,
                 "owner_residency_transfer_batches": (
                     migration_service_batches
@@ -9923,18 +9845,6 @@ class _OnlineRuntime:
                     )
                     + migration_ns
                 ),
-                "resource_contention_page_transfer_energy_pj": (
-                    max(
-                        0.0,
-                        float(
-                            metadata.get(
-                                "resource_contention_page_transfer_energy_pj",
-                                0.0,
-                            )
-                        ),
-                    )
-                    + migration_energy
-                ),
                 "resource_contention_page_in_ns": (
                     max(
                         0.0,
@@ -9964,7 +9874,6 @@ class _OnlineRuntime:
         )
         return BatchCost(
             duration_ns=max(1.0e-9, cost.duration_ns + migration_ns),
-            energy_pj=max(0.0, cost.energy_pj + migration_energy),
             metadata=metadata,
         )
 
@@ -11052,7 +10961,7 @@ class _OnlineRuntime:
                     component_service_ns += count * cost_ns
                     route = "topology"
                     if self.prompt_cache.policy.apply_tensor_get_controller_phases:
-                        _ignored_cost, _energy, _ignored_route, descriptor = (
+                        _ignored_cost, _ignored_route, descriptor = (
                             self._tensor_get_copy_cost_details(
                                 read_bytes, source, target
                             )
@@ -11067,7 +10976,7 @@ class _OnlineRuntime:
                             descriptor.get("dma_descriptor_wave_count", 0)
                         )
                 elif self.prompt_cache.policy.apply_tensor_get_controller_phases:
-                    cost_ns, _energy, route, descriptor = (
+                    cost_ns, route, descriptor = (
                         self._tensor_get_copy_cost_details(
                             read_bytes, source, target
                         )
@@ -11082,7 +10991,7 @@ class _OnlineRuntime:
                         descriptor.get("dma_descriptor_wave_count", 0)
                     )
                 else:
-                    cost_ns, _energy, route, _phases, _components, _latency = (
+                    cost_ns, route, _phases, _components, _latency = (
                         self._page_transfer_cost_details(
                             read_bytes,
                             0,
@@ -11348,7 +11257,7 @@ class _OnlineRuntime:
             for row in reads:
                 if row["owner"] != "gpu":
                     continue
-                cost_ns, _energy, route, _phases, _components, _latency = self._page_transfer_cost_details(
+                cost_ns, route, _phases, _components, _latency = self._page_transfer_cost_details(
                     int(row["bytes"]), 0, source, target, include_controller_phases=False)
                 if route != "topology" or cost_ns <= 0:
                     return unknown("unknown_recurrent_topology_route")
@@ -12860,10 +12769,8 @@ class _OnlineRuntime:
         )
         if kind.startswith("kv_"):
             self.swap_transfer_time_ns += cost.duration_ns
-            self.swap_transfer_energy_pj += cost.energy_pj
         else:
             self.linear_state_swap_transfer_time_ns += cost.duration_ns
-            self.linear_state_swap_transfer_energy_pj += cost.energy_pj
             self.linear_state_swap_routed_bytes += int(
                 cost.metadata.get("resource_accounted_bytes", byte_count)
             )
@@ -13005,7 +12912,7 @@ class _OnlineRuntime:
 
         This is the causal placement policy selected for owner residency.  It
         changes only where already-accounted transfer service sits in the
-        execution DAG; transfer bytes, service, and energy remain untouched.
+        execution DAG; transfer bytes and service remain untouched.
         A batch is left for the legacy cohort-tail extension unless every
         covered invocation group has a concrete planner stage.
         """
@@ -13339,25 +13246,19 @@ class _OnlineRuntime:
                             raise ValueError(
                                 "owner residency transfer demand is invalid"
                             )
-                        raw_energy_pj = raw_demand.get("energy_pj", 0.0)
                         raw_work_units = raw_demand.get("work_units", 0.0)
-                        if isinstance(raw_energy_pj, bool) or isinstance(
-                            raw_work_units, bool
-                        ):
+                        if isinstance(raw_work_units, bool):
                             raise ValueError(
                                 "owner residency transfer demand is invalid"
                             )
                         try:
-                            energy_pj = float(raw_energy_pj)
                             work_units = float(raw_work_units)
                         except (TypeError, ValueError, OverflowError) as exc:
                             raise ValueError(
                                 "owner residency transfer demand is invalid"
                             ) from exc
                         if (
-                            not math.isfinite(energy_pj)
-                            or energy_pj < 0.0
-                            or not math.isfinite(work_units)
+                            not math.isfinite(work_units)
                             or work_units < 0.0
                         ):
                             raise ValueError(
@@ -13368,7 +13269,6 @@ class _OnlineRuntime:
                                 resource_id,
                                 demand_ns,
                                 bytes_moved=raw_bytes_moved,
-                                energy_pj=energy_pj,
                                 work_units=work_units,
                             )
                         )
@@ -14660,7 +14560,6 @@ class _OnlineRuntime:
         device_ns: float,
         request_ready_ns: float,
         runtime_controller_stage_count: int = 0,
-        planning_energy_pj: Optional[float] = None,
         planning_duration_ns: Optional[float] = None,
     ) -> Tuple[
         float,
@@ -14720,14 +14619,6 @@ class _OnlineRuntime:
             cost.metadata,
         )
         scheduled_stages = list(causally_placed_stages)
-        extension_energy_pj = 0.0
-        if live_physical and planning_energy_pj is not None:
-            def stage_energy(rows):
-                return sum(d.energy_pj for s in rows for t in s.execution_tasks for d in t.demands)
-            represented_overlay_energy = stage_energy(causally_placed_stages) - stage_energy(stages)
-            extension_energy_pj = max(
-                0.0, cost.energy_pj - planning_energy_pj - represented_overlay_energy
-            )
         if live_physical:
             if planning_duration_ns is None:
                 raise ValueError("live physical stages require the pre-adjustment planning duration")
@@ -14762,7 +14653,7 @@ class _OnlineRuntime:
                 owner_transfer_ns,
             ),
         )
-        if extension_ns > 0.0 or extension_energy_pj > 0.0:
+        if extension_ns > 0.0:
             dependency_ids = {
                 dependency
                 for stage in scheduled_stages
@@ -14793,8 +14684,7 @@ class _OnlineRuntime:
                             (
                                 ResourceDemand(
                                     last_stage.component_id, extension_ns,
-                                    energy_pj=extension_energy_pj,
-                                ),
+                                    ),
                             ),
                             True,
                         ),
@@ -15511,12 +15401,10 @@ class _OnlineRuntime:
                     "requests": table}})
         with self._cuda_graph_runtime.scope(cohort, self.now) as cuda_transition:
             cost = _lower_cost(self.lowerer, self.plan.scenario, cohort)
-        planning_energy_pj = cost.energy_pj
         planning_duration_ns = cost.duration_ns
         execution_plan = self._execution_plan_for(cohort, cost.metadata)
         cost = BatchCost(
             cost.duration_ns,
-            cost.energy_pj,
             {**dict(cost.metadata), "execution_plan": execution_plan},
         )
         # Diagnose each realized ubatch even when the cost provider reused a
@@ -15608,21 +15496,18 @@ class _OnlineRuntime:
                 device_ns,
                 request_ready_ns,
                 runtime_controller_stage_count,
-                planning_energy_pj,
                 planning_duration_ns,
             )
             if self._live_cohort_metrics is not None:
-                actual = self._live_cohort_metrics.summary()
                 cost = BatchCost(
-                    max(1.0e-9, isolated_duration_ns), actual.energy_pj,
-                    {**cost.metadata, **self._live_cohort_metrics.metadata(),
+                    max(1.0e-9, isolated_duration_ns), {**cost.metadata, **self._live_cohort_metrics.metadata(),
                      "physical_execution_scope": "persistent_live_kernel",
                      "cost_duration_semantics": "live_cohort_span"},
                 )
                 self._live_cohort_metrics = None
             else:
                 cost = BatchCost(
-                    max(1.0e-9, isolated_duration_ns), cost.energy_pj, cost.metadata,
+                    max(1.0e-9, isolated_duration_ns), cost.metadata,
                 )
         else:
             previous_gpu_available_ns = self._gpu_available_ns
@@ -15867,7 +15752,6 @@ class _OnlineRuntime:
             )
         cost = BatchCost(
             cost.duration_ns,
-            cost.energy_pj,
             {
                 **dict(cost.metadata),
                 "host_start_ns": host_start_ns,
@@ -16128,7 +16012,6 @@ class _OnlineRuntime:
         # so aggregate runs have bounded retained memory.
         retained_cost = BatchCost(
             cost.duration_ns,
-            cost.energy_pj,
             self._compact_retained_batch_cost_metadata(cost.metadata),
         )
         self.batches[-1] = replace(self.batches[-1], cost=retained_cost)
@@ -16321,7 +16204,6 @@ class _OnlineRuntime:
             self._rejected_count,
             self.swap_in_bytes,
             self.swap_transfer_time_ns,
-            self.swap_transfer_energy_pj,
             logical_prefill_read_bytes=self.logical_prefill_read_bytes,
             logical_prefill_write_bytes=self.logical_prefill_write_bytes,
             logical_decode_read_bytes=self.logical_decode_read_bytes,
@@ -16520,7 +16402,6 @@ class _OnlineRuntime:
             self.state_ledger.restore_events,
             self.linear_state_swap_in_bytes,
             self.linear_state_swap_transfer_time_ns,
-            self.linear_state_swap_transfer_energy_pj,
             self.linear_state_swap_routed_bytes,
         )
         scheduler_metrics = SchedulerMetrics(
@@ -16588,11 +16469,7 @@ class _OnlineRuntime:
                 clean_discard_bytes=self.residency_clean_discard_bytes,
                 dirty_writeback_bytes=self.residency_dirty_writeback_bytes,
                 clean_discard_time_ns=self.residency_clean_discard_time_ns,
-                clean_discard_energy_pj=(
-                    self.residency_clean_discard_energy_pj
-                ),
                 transfer_time_ns=self.residency_transfer_time_ns,
-                transfer_energy_pj=self.residency_transfer_energy_pj,
                 initialization_migration_event_count=(
                     len(self._residency_initialization_migrations)
                 ),
@@ -16675,7 +16552,7 @@ def _lower_cost(lowerer: BatchLowerer, scenario: ScenarioConfig, cohort: BatchCo
     if isinstance(raw, BatchCost):
         cost = raw
     elif isinstance(raw, _ABCMapping):
-        cost = BatchCost(float(raw["duration_ns"]), float(raw.get("energy_pj", 0.0)), dict(raw.get("metadata", {})))
+        cost = BatchCost(float(raw["duration_ns"]), dict(raw.get("metadata", {})))
     else:
         cost = BatchCost(float(raw))
     if not math.isfinite(cost.duration_ns) or cost.duration_ns <= 0:
@@ -16954,26 +16831,21 @@ def _execution_stages_from_metadata(
                     ):
                         return (), "execution task resource demand is invalid"
                     raw_bytes_moved = raw_demand.get("bytes_moved", 0)
-                    raw_energy_pj = raw_demand.get("energy_pj", 0.0)
                     raw_work_units = raw_demand.get("work_units", 0.0)
                     if (
                         isinstance(raw_bytes_moved, bool)
                         or not isinstance(raw_bytes_moved, int)
                         or raw_bytes_moved < 0
-                        or isinstance(raw_energy_pj, bool)
                         or isinstance(raw_work_units, bool)
                     ):
                         return (), "execution task resource demand is invalid"
                     try:
                         bytes_moved_numeric = float(raw_bytes_moved)
-                        energy_pj = float(raw_energy_pj)
                         work_units = float(raw_work_units)
                     except (TypeError, ValueError, OverflowError):
                         return (), "execution task resource demand is invalid"
                     if (
                         not math.isfinite(bytes_moved_numeric)
-                        or not math.isfinite(energy_pj)
-                        or energy_pj < 0.0
                         or not math.isfinite(work_units)
                         or work_units < 0.0
                     ):
@@ -16983,7 +16855,6 @@ def _execution_stages_from_metadata(
                             resource_id,
                             demand_service_ns,
                             bytes_moved=raw_bytes_moved,
-                            energy_pj=energy_pj,
                             work_units=work_units,
                         )
                     )

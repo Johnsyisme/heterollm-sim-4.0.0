@@ -109,7 +109,6 @@ class RouteHop:
     resource_id: str
     bandwidth_gbps: float
     latency_ns: float
-    energy_pj_per_byte: float = 0.0
     service_ref: Optional[str] = None
     queue_depth: int = 1
 
@@ -135,7 +134,7 @@ class RouteHop:
         _non_negative_integer(byte_count, "byte_count")
         if self.service_ref is not None:
             return ()
-        return self.service.demands(byte_count, energy_pj_per_byte=self.energy_pj_per_byte)
+        return self.service.demands(byte_count)
 
 
 @dataclass(frozen=True)
@@ -504,12 +503,6 @@ class TopologyRouter:
                 latency_ns=0.0 if service_ref else float(link.latency_ns),
                 service_ref=str(service_ref) if service_ref else None,
                 queue_depth=queue_depth,
-                energy_pj_per_byte=_metadata_non_negative_number(
-                    link.metadata,
-                    "energy_pj_per_byte",
-                    0.0,
-                    "link {}".format(link.link_id),
-                ),
             )
         )
 
@@ -958,27 +951,15 @@ class TopologyRouter:
                 0.0,
                 component.component_id,
             )
-            configured_energy = _metadata_non_negative_number(
-                component.metadata,
-                "dma_energy_pj_per_byte",
-                0.0,
-                component.component_id,
-            )
-            if configured_latency > 0.0 or configured_energy > 0.0:
+            if configured_latency > 0.0:
                 raise ValueError(
-                    "component {} declares DMA latency/energy but no positive "
+                    "component {} declares DMA latency but no positive "
                     "dma_bandwidth_gbps".format(component.component_id)
                 )
             return None
         latency = _metadata_non_negative_number(
             component.metadata,
             "dma_latency_ns",
-            0.0,
-            component.component_id,
-        )
-        energy = _metadata_non_negative_number(
-            component.metadata,
-            "dma_energy_pj_per_byte",
             0.0,
             component.component_id,
         )
@@ -994,7 +975,6 @@ class TopologyRouter:
                     resource_id=resource_id,
                     service_ns=latency + (8.0 * byte_count) / bandwidth,
                     bytes_moved=byte_count,
-                    energy_pj=byte_count * energy,
                 ),
             ),
             metadata={

@@ -282,7 +282,6 @@ def test_migration_cost_ledger_survives_cancel_and_event_retention():
     assert executor.cost_ledger() == submitted
     assert submitted["storage_traffic"]["physical_read_bytes"] == 16384
     assert submitted["dram_traffic"]["physical_write_bytes"] == 0
-    assert sum(submitted["resource_energy_pj"].values()) == pytest.approx(submitted["energy_pj"])
     assert submitted["resource_accounted_bytes"] == sum(submitted["resource_bytes"].values())
     assert submitted["storage_traffic"]["nand_read_queue_depth"] is None
     assert all(page.owner_component == "hbf0" for page in pool.request_pages("low"))
@@ -318,31 +317,28 @@ def test_rejected_abort_keeps_physical_reservation_retryable(monkeypatch):
     assert page.logical_page_id not in pool._pending_moves
 
 
-def test_memory_phase_energy_matches_actual_core_bytes_and_detailed_payloads():
+def test_memory_phase_reports_actual_core_bytes_and_detailed_payloads():
     from test_kv_transfer_deep_semantics import component, page
     config = make_hbf_config(capacity_bytes=1048576, page_bytes=16384,
                              partial_page_policy="read_modify_write")
-    executor = PhysicalKVTransferExecutor([component("hbf", config)],
-                                          energy_pj_per_byte_by_component={"hbf": 3.0})
+    executor = PhysicalKVTransferExecutor([component("hbf", config)])
     item = page(size=16384)
     executor.bind_page(item)
     bill = executor.write_page(item, size_bytes=64)
     ledger = executor.cost_ledger()
-    # Partial NAND write incurs an entire read and program; price physical
-    # work once, not logical payload or the sum of internal and host traffic.
+    # A partial NAND write incurs an entire page read and page program.
     assert bill["physical_bytes"] == 32768
-    assert ledger["energy_pj"] == 32768 * 3
-    assert ledger["storage_traffic"]["energy_pj"] == ledger["energy_pj"]
+    assert ledger["storage_traffic"]["physical_read_bytes"] == 16384
+    assert ledger["storage_traffic"]["physical_write_bytes"] == 16384
     phase = ledger["phases"][0]
     assert phase["resource_interval_payloads"]
-    assert sum(energy for values in phase["resource_interval_payloads"].values()
-               for _start, _end, _size, energy in values) == pytest.approx(ledger["energy_pj"])
-    assert sum(phase["resource_energy_pj"].values()) == pytest.approx(ledger["energy_pj"])
+    assert sum(size for values in phase["resource_interval_payloads"].values()
+               for _start, _end, size in values) == ledger["resource_accounted_bytes"]
 
 
 @pytest.mark.parametrize("queue_depth, second_end", [(1, 240.), (2, 220.)])
 def test_migration_link_wire_and_inflight_have_same_contract_as_regular_tasks(queue_depth, second_end):
-    hop = RouteHop("link", "a", "b", "wire", 8., 20., 2., queue_depth=queue_depth)
+    hop = RouteHop("link", "a", "b", "wire", 8., 20., queue_depth=queue_depth)
     executor = PhysicalKVTransferExecutor([])
     first = executor._submit_link_phase(hop, 100, 0.)
     second = executor._submit_link_phase(hop, 100, 0.)
@@ -351,8 +347,6 @@ def test_migration_link_wire_and_inflight_have_same_contract_as_regular_tasks(qu
     ledger = executor.cost_ledger()
     assert ledger["resource_busy_ns"] == {"wire": 200., "wire.inflight": 240.}
     assert ledger["resource_bytes"] == {"wire": 200, "wire.inflight": 0}
-    assert ledger["energy_pj"] == 400.
-    assert ledger["resource_energy_pj"] == {"wire": 400., "wire.inflight": 0.}
 
 
 def test_serving_exposes_same_always_on_cost_ledger_as_executor():
@@ -360,4 +354,4 @@ def test_serving_exposes_same_always_on_cost_ledger_as_executor():
     result = runner.run()
     ledger = result.runtime_kernel_metrics["paged_kv_transfers"]["cost_ledger"]
     assert ledger == runner._paged_pool_transfer_executor.cost_ledger()
-    assert ledger["phase_count"] > 0 and ledger["energy_pj"] > 0
+    assert ledger["phase_count"] > 0

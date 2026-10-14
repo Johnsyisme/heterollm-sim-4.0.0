@@ -106,8 +106,8 @@ def run_read_benchmark(*, port_gb_s=3000., link_gb_s=3000., page_bytes=16384,
             "resource_bytes":dict(timeline.bytes_moved),"resource_busy_ns":dict(timeline.busy_ns)},
         "chunk_timeline":chunks,
         "measurement_scope":"primary rate is total completed logical read bytes divided by time from arrival zero to final actual link completion, including startup, media latency, finite buffer backpressure and link latency. Link-stream rate starts at first link transmission and is a separate denominator.",
-        "hardware_scope":"Hypothetical 2048 physical array units and 2048 effective slots, explicit 12000 GB/s per internal channel, configured host port and separate transport link. This is sufficient-parallelism sensitivity, not a claim of realizable HBF geometry, pins, power or area.",
-        "buffer_scope":"Finite transport FIFO slots gate requests until link completion. The FIFO is capacity/backpressure state only; no additional DRAM read/write bandwidth or energy is modeled.",
+        "hardware_scope":"Hypothetical 2048 physical array units and 2048 effective slots, explicit 12000 GB/s per internal channel, configured host port and separate transport link. This is sufficient-parallelism sensitivity, not a claim of realizable HBF geometry, pins or area.",
+        "buffer_scope":"Finite transport FIFO slots gate requests until link completion. The FIFO is capacity/backpressure state only; no additional DRAM read/write bandwidth is modeled.",
         "physical_page_scope":"page_bytes controls actual NAND mapping, full-page read latency and read bytes; chunk_bytes is independently the link transport unit. 1.5 MiB physical pages are an attachment-requested hypothetical sensitivity, not vendor NAND specifications."}
 
 
@@ -153,12 +153,12 @@ def run_bandwidth_study():
             "prior_physical_page_scan":"05 already contains hypothetical 1.5 MiB physical NAND pages; this group adds an independently fixed logical payload and transport chunk comparison."},
         "limitations":[
             "Targets use decimal GB/s: 400/1600/3000 GB/s = 0.4/1.6/3.0 TB/s. A configured port value alone is not observed throughput.",
-            "This generously parallel synthetic inventory is not a feasibility, cost, area, energy, packaging or real-silicon assertion.",
+            "This generously parallel synthetic inventory is not a feasibility, cost, area, packaging or real-silicon assertion.",
             "All points execute 384 MiB of sequential reads in 1.5 MiB transport chunks with at most 64 finite FIFO slots. There is no GPU/token serving denominator.",
             "Read-latency and physical-page scans retain the same authored geometry and port/link budget, so their actual parallelism bottlenecks remain visible.",
             "1.5 MiB physical pages are explicitly hypothetical; this variable is separate from the unchanged 1.5 MiB transport chunk.",
             "The link models serialized byte transfer and fixed propagation latency, without packet framing, retries, coherence or protocol calibration.",
-            "Finite FIFO backpressure is modeled; additional staging-memory service and energy are outside this transport benchmark."]}
+            "Finite FIFO backpressure is modeled; additional staging-memory service is outside this transport benchmark."]}
 
 
 if __name__=="__main__":

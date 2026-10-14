@@ -21,20 +21,19 @@ def native_task(bandwidth, *, l2=False, compute_cycles=1., launch=0.):
         "analytical", internal_dtype="fp16", dependency_cycles=7.)
     model = KernelModelProfile("device", "runtime", "architecture", kernels=(capability,),
                                stateful_l2=l2)
-    cache = CacheHierarchyProfile((CacheLevelProfile("gpu.l2", 1 << 20, 64, 3., 1000.,
-        energy_pj_per_byte=2.),))
+    cache = CacheHierarchyProfile((CacheLevelProfile("gpu.l2", 1 << 20, 64, 3., 1000.),))
     gpu = GPUProfile(TensorCoreProfile(1, 1, 1., cycles_per_mma=compute_cycles), cache,
         scalar_lanes_per_sm=32, scalar_ops_per_cycle=1, reduction_ops_per_cycle_per_sm=1,
         special_function_units_per_sm=1, special_function_ops_per_cycle=1,
-        tensor_energy_pj_per_op=2., kernel_launch_ns=launch, launch_energy_pj=5., kernel_model=model)
-    hbm = HBMProfile(bandwidth, energy_pj_per_byte=3.)
+         kernel_launch_ns=launch,  kernel_model=model)
+    hbm = HBMProfile(bandwidth)
     work = GemmWorkload(1, 16, 16, activation_bits=16, weight_bits=16, execution_phase="decode")
     estimate = estimate_kernel(gpu, hbm, work)
     phase = estimate.phases[-1]
     reads, writes = work.activation_bytes + work.weight_bytes, work.output_bytes
     task = TaskSpec("kernel", "request", "gemm", TaskCategory.COMPUTE, demands=phase.demands,
         metadata={"physical_memory_config": make_hbm_config(capacity_bytes=1 << 20),
-            "physical_owner": hbm.resource_id, "physical_energy_pj_per_byte": 3.,
+            "physical_owner": hbm.resource_id,
             "phase_metadata": phase.metadata, "cost_model": estimate.metadata,
             "memory_access": tuple({"operation": op, "address": address, "byte_count": count,
                 "resource_id": hbm.resource_id, "buffer_id": buffer, "offset_bytes": 0,
@@ -56,10 +55,7 @@ def test_native_physical_envelope_replaces_only_backing_estimate(l2, compute_cyc
     for bandwidth in (1000., 1.):
         task, _ = native_task(bandwidth, l2=l2, compute_cycles=compute_cycles)
         event = UnifiedEventKernel.from_closed_graph((task,)).step()
-        physical_ids = set(event.task.metadata["physical_demands_resource_ids"])
         assert "hbm.channel" not in {d.resource_id for d in event.demands}
-        assert sum(d.energy_pj for d in event.demands if d.resource_id in physical_ids) == (
-            event.task.metadata["physical_execution"]["physical_bytes"] * 3.)
         compute = next(d for d in event.demands if d.resource_id == "gpu.tensor_core")
         original = next(d for d in task.demands if d.resource_id == compute.resource_id)
         assert compute == original
@@ -88,7 +84,6 @@ def test_native_physical_envelope_keeps_launch_and_namespaced_stream():
     kernel = UnifiedEventKernel.from_closed_graph((launch, task))
     first, second = kernel.step(), kernel.step()
     assert first.end_ns == second.start_ns == 11.
-    assert sum(d.energy_pj for d in first.demands) == 5.
     assert second.end_ns == second.task.metadata["physical_completion_ns"] + 7.
     assert next(d.service_ns for d in second.demands if d.resource_id.endswith(".device_stream")) == (
         second.end_ns - second.start_ns)
@@ -103,20 +98,19 @@ def test_native_warm_l2_retains_cache_lookup_without_core_or_old_memory_floor():
     assert warm.task.metadata["l2_execution"]["hbm_write_bytes"] == 0
     assert "physical_completion_ns" not in warm.task.metadata
     cache = next(d for d in warm.demands if d.resource_id == "gpu.l2")
-    assert cache.service_ns > 0 and cache.energy_pj > 0
+    assert cache.service_ns > 0
     assert warm.end_ns - warm.start_ns == max(d.service_ns for d in warm.demands)
     assert warm.end_ns - warm.start_ns < cold.end_ns - cold.start_ns
 
 
 @pytest.mark.parametrize("m", [1, 16, 17])
-def test_native_tensor_energy_uses_the_same_issued_tiles_as_service(m):
+def test_native_tensor_work_uses_the_same_issued_tiles_as_service(m):
     capability = KernelCapability("declared", ("fp16",), "fp16", "decode", "tensor",
         "analytical", internal_dtype="fp16")
     gpu = GPUProfile(TensorCoreProfile(1, 1, 1.),
         CacheHierarchyProfile((CacheLevelProfile("cache", 1024, 64, 0, 1000.),)),
         scalar_lanes_per_sm=32, scalar_ops_per_cycle=1, reduction_ops_per_cycle_per_sm=1,
         special_function_units_per_sm=1, special_function_ops_per_cycle=1,
-        tensor_energy_pj_per_op=2.,
         kernel_model=KernelModelProfile("device", "runtime", "architecture", kernels=(capability,)))
     result = estimate_kernel(gpu, HBMProfile(1000.), GemmWorkload(m, 16, 16,
         activation_bits=16, weight_bits=16, execution_phase="decode"))
@@ -124,7 +118,6 @@ def test_native_tensor_energy_uses_the_same_issued_tiles_as_service(m):
     issued = ((m + 15) // 16) * 8192
     assert result.useful_ops == 2 * m * 16 * 16
     assert demand.work_units == issued
-    assert demand.energy_pj == issued * 2.
     assert result.metadata["kernel_model"]["issued_dot_operations"] == issued
     assert demand.service_ns == issued / (gpu.tensor_core.peak_tops("fp16") * 1000.)
 
@@ -138,7 +131,7 @@ def test_native_mmq_keeps_unfused_source_extent():
         CacheHierarchyProfile((CacheLevelProfile("cache", 1024, 64, 0, 1000.),)),
         scalar_lanes_per_sm=32, scalar_ops_per_cycle=1, reduction_ops_per_cycle_per_sm=1,
         special_function_units_per_sm=1, special_function_ops_per_cycle=1,
-        tensor_energy_pj_per_op=2., scalar_energy_pj_per_op=3., special_function_energy_pj_per_op=5.,
+
         kernel_model=KernelModelProfile("device", "runtime", "architecture", kernels=(capability,)))
     work = GemmWorkload(17, 256, 129, activation_bits=32, weight_bits=4, output_bits=32,
         activation_dtype="fp32", packed_weight_formats=("q4_k",), execution_phase="prefill",
@@ -148,7 +141,6 @@ def test_native_mmq_keeps_unfused_source_extent():
     demands = {d.resource_id: d for d in result.phases[-1].demands}
     tensor = demands[gpu.tensor_core.resource_id]
     assert tensor.work_units == source.source_nominal_arithmetic_operations
-    assert tensor.energy_pj == source.source_nominal_arithmetic_operations * 2.
     assert result.useful_ops == work.operations
     assert demands[gpu.scalar_resource_id].work_units == 0
     assert demands[gpu.special_function_resource_id].work_units == 0

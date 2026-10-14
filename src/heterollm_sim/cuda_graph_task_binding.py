@@ -235,7 +235,7 @@ def annotate_cuda_dispatch_tasks(tasks, source_dispatches):
 
     The annotation is structural evidence. It records that a modeled task and
     a source dispatch share an ownership group, including many-to-one and
-    one-to-many fusion. It never changes service, bytes, energy, work or DAG
+    one-to-many fusion. It never changes service, bytes, work or DAG
     dependencies, so it cannot be mistaken for a timing or physical-ledger
     calibration.
     """

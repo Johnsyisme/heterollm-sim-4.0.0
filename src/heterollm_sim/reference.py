@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .config import FusionPolicy, InterconnectProfile, ScenarioConfig
-from .component_presets import _analytical_dram_config
+from .physical_presets import make_analytical_dram_config
 from .cost_models import (
     CPUPipelineProfile,
     CPUProfile,
@@ -137,7 +137,7 @@ def build_reference_scenario() -> ScenarioConfig:
                 write_bandwidth_gbps=3276.8,
                 metadata={
                     "memory_service_owner": "cpu0.memory",
-                    "physical_memory_config": _analytical_dram_config(
+                    "physical_memory_config": make_analytical_dram_config(
                         kind="DDR", generation="DDR5",
                         capacity_bytes=256 * 1024**3,
                         read_bandwidth_gbps=3276.8,
@@ -162,7 +162,7 @@ def build_reference_scenario() -> ScenarioConfig:
                 bandwidth_gbps=512.0,
                 latency_ns=800.0,
                 payload="coherent_dma",
-                metadata={"energy_pj_per_byte": 8.0},
+                metadata={},
             ),
             LinkSpec(
                 link_id="cpu-hostmem-ddr",
@@ -175,7 +175,7 @@ def build_reference_scenario() -> ScenarioConfig:
                 lanes=64,
                 bandwidth_gbps=3276.8,
                 latency_ns=80.0,
-                metadata={"energy_pj_per_byte": 12.0},
+                metadata={},
             ),
         )
     )
@@ -204,7 +204,7 @@ def build_reference_scenario() -> ScenarioConfig:
                 write_bandwidth_gbps=hbm_port_bandwidth_gbps,
                 metadata={
                     "memory_service_owner": "{}.hbm_fabric".format(hbm_id),
-                    "physical_memory_config": _analytical_dram_config(
+                    "physical_memory_config": make_analytical_dram_config(
                         kind="HBM", generation="HBM3",
                         capacity_bytes=16 * 1024**3,
                         read_bandwidth_gbps=hbm_port_bandwidth_gbps,
@@ -227,7 +227,7 @@ def build_reference_scenario() -> ScenarioConfig:
                 lanes=16,
                 bandwidth_gbps=hbm_port_bandwidth_gbps,
                 latency_ns=40.0,
-                metadata={"energy_pj_per_byte": 4.0},
+                metadata={},
             )
         )
     components.append(
@@ -264,7 +264,7 @@ def build_reference_scenario() -> ScenarioConfig:
             bandwidth_gbps=2048.0,
             latency_ns=20.0,
             payload="streaming",
-            metadata={"energy_pj_per_byte": 1.0},
+            metadata={},
         )
     )
 
@@ -422,7 +422,6 @@ def build_reference_scenario() -> ScenarioConfig:
                         read_ports=2,
                         write_ports=1,
                         max_outstanding=32,
-                        energy_pj_per_byte=0.15,
                         resource_id="gpu0.l1_shared",
                     ),
                     CacheLevelProfile(
@@ -436,7 +435,6 @@ def build_reference_scenario() -> ScenarioConfig:
                         read_ports=2,
                         write_ports=1,
                         max_outstanding=128,
-                        energy_pj_per_byte=0.6,
                         resource_id="gpu0.l2",
                     ),
                 )
@@ -449,10 +447,6 @@ def build_reference_scenario() -> ScenarioConfig:
             occupancy=0.85,
             attainable_efficiency=0.65,
             kernel_launch_ns=1000.0,
-            tensor_energy_pj_per_op=0.2,
-            scalar_energy_pj_per_op=0.35,
-            special_function_energy_pj_per_op=1.2,
-            launch_energy_pj=10_000.0,
             scalar_resource_id="gpu0.scalar",
             special_function_resource_id="gpu0.sfu",
             launch_resource_id="gpu0.frontend",
@@ -461,7 +455,6 @@ def build_reference_scenario() -> ScenarioConfig:
                 "legacy-hbm-{}".format(index): HBMProfile(
                     bandwidth_gb_s=hbm_port_bandwidth_gbps / 8.0,
                     efficiency=0.75,
-                    energy_pj_per_byte=4.0,
                     resource_id="hbm{}.hbm_fabric".format(index),
                 ) for index in range(8)
             },
@@ -499,7 +492,6 @@ def build_reference_scenario() -> ScenarioConfig:
                         read_ports=3,
                         write_ports=2,
                         max_outstanding=16,
-                        energy_pj_per_byte=0.2,
                         resource_id="cpu0.l1d",
                     ),
                     CacheLevelProfile(
@@ -513,7 +505,6 @@ def build_reference_scenario() -> ScenarioConfig:
                         read_ports=2,
                         write_ports=1,
                         max_outstanding=32,
-                        energy_pj_per_byte=0.8,
                         resource_id="cpu0.l2",
                     ),
                     CacheLevelProfile(
@@ -527,24 +518,17 @@ def build_reference_scenario() -> ScenarioConfig:
                         read_ports=2,
                         write_ports=1,
                         max_outstanding=64,
-                        energy_pj_per_byte=2.0,
                         resource_id="cpu0.l3",
                     ),
                 )
             ),
             attainable_efficiency=0.72,
             dispatch_ns=80.0,
-            gemm_energy_pj_per_op=1.5,
-            elementwise_energy_pj_per_op=1.0,
-            reduction_energy_pj_per_op=1.2,
-            special_function_energy_pj_per_op=4.0,
-            dispatch_energy_pj=800.0,
             name="reference-host-cpu",
             )},
             "host_memory": {"legacy-host-memory": HostMemoryProfile(
             bandwidth_gb_s=409.6,
             efficiency=0.78,
-            energy_pj_per_byte=12.0,
             resource_id="cpu0.memory",
             name="reference-ddr5",
             )},
@@ -571,13 +555,6 @@ def build_reference_scenario() -> ScenarioConfig:
                 noc_reduce_fan_in=4,
                 peripheral_latency_ns=5.0,
                 accumulator_bits=32,
-                eval_energy_pj=1.0,
-                load_energy_pj_per_byte=0.5,
-                activation_energy_pj_per_byte=0.2,
-                output_energy_pj_per_byte=0.2,
-                noc_energy_pj_per_byte=0.1,
-                accumulator_energy_pj_per_op=0.05,
-                peripheral_energy_pj_per_element=0.1,
                 array_resource_id="cim0.array",
                 load_resource_id="cim0.load",
                 activation_resource_id="cim0.activation",
@@ -626,7 +603,6 @@ def build_reference_scenario() -> ScenarioConfig:
             resource_id="ucie.gpu0-cim0",
             bandwidth_gb_s=256.0,
             latency_ns=20.0,
-            energy_pj_per_byte=1.0,
         ),
         weights_resident=True,
         assumptions=(

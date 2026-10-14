@@ -18,7 +18,8 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from .data_motion import AccessKind, PhysicalRuntimeContext, PhysicalService, resolve_service
 from .memory_allocator import PhysicalAddressAllocator, PhysicalAllocation
-from .memory_types import DramConfig, NandConfig, parse_physical_memory_config
+from .memory_types import DramConfig, NandConfig
+from .physical_contract import require_physical_memory_config
 from .kv_pool import KvPoolError, KvPoolTransferPlan, KvPoolTransferRequest
 
 
@@ -54,7 +55,6 @@ class PhysicalKVTransferExecutor:
         relay_components: Sequence[str] = (),
         arrival_ns: Optional[float | Callable[[KvPoolTransferRequest], float]] = 0.0,
         namespace: str = "kv-pool",
-        energy_pj_per_byte_by_component: Optional[Mapping[str, float]] = None,
         cache_states: Optional[Mapping[str, Any]] = None,
         cache_owners: Optional[Mapping[str, Any]] = None,
     ) -> None:
@@ -67,11 +67,6 @@ class PhysicalKVTransferExecutor:
         if not self.namespace:
             raise ValueError("namespace must be non-empty")
         self.components = self._component_map(hardware)
-        self.energy_pj_per_byte_by_component = {
-            str(key): float(value) for key, value in (energy_pj_per_byte_by_component or {}).items()}
-        if any(not math.isfinite(value) or value < 0
-               for value in self.energy_pj_per_byte_by_component.values()):
-            raise ValueError("physical memory energy rates must be finite and non-negative")
         self.relay_components = tuple(str(value) for value in relay_components)
         unknown = [value for value in self.relay_components if value not in self.components]
         if unknown:
@@ -141,11 +136,11 @@ class PhysicalKVTransferExecutor:
         raw = self._metadata(component).get("physical_memory_config")
         if raw is None:
             raise KvPoolError("component {} requires physical_memory_config".format(ident))
-        config = raw if isinstance(raw, (DramConfig, NandConfig)) else parse_physical_memory_config(raw)
+        config = require_physical_memory_config(component)
         service = resolve_service(component)
+        self.runtime.runtime(config, service.physical_owner)
         self._configs[ident] = config
         self.services[ident] = service
-        self.runtime.runtime(config, service.physical_owner)
         return service
 
     def _page_id(self, page: Any) -> int:
@@ -201,7 +196,8 @@ class PhysicalKVTransferExecutor:
             return existing.allocation.base_address
         service = self._ensure_service(component_id)
         allocator = self._allocator(service.physical_owner)
-        allocation = allocator.allocate(self._buffer_id(page), self.allocation_bytes(component_id, size), generation)
+        allocation = allocator.allocate(self._buffer_id(page), self.allocation_bytes(component_id, size), generation,
+                                        allocation_arena="resident")
         self._bindings[page_id] = _PageBinding(
             page_id, str(getattr(page, "request_id", "request")),
             str(getattr(page, "layer_group", "kv")), component_id,
@@ -235,6 +231,19 @@ class PhysicalKVTransferExecutor:
             return
         self._release_allocation(binding.owner, binding.allocation.buffer_id, binding.generation)
         self._bindings.pop(page_id)
+
+    def cache_access(self, page: Any, *, offset_bytes: int, size_bytes: int,
+                     operation: str):
+        """Export a cache range that borrows this page's actual allocation.
+
+        Logical session handoff does not rename storage, and migration versions
+        are allocation generations rather than part of a second buffer name.
+        """
+        from .cache_state import CacheAccess
+        binding = self._binding(page)
+        self.address(page, offset_bytes, size_bytes)
+        return CacheAccess(binding.allocation.buffer_id, offset_bytes, size_bytes,
+            operation, binding.allocation.size_bytes, binding.generation)
 
     def _release_allocation(self, owner: str, buffer_id: str, generation: int) -> None:
         allocator = self._allocator(owner)
@@ -354,26 +363,10 @@ class PhysicalKVTransferExecutor:
         raw = dict(bill)
         raw["logical_read_bytes"] = int(raw.get("logical_bytes", 0)) if kind is AccessKind.READ else 0
         raw["logical_write_bytes"] = int(raw.get("logical_bytes", 0)) if kind is AccessKind.WRITE else 0
-        rate = self.energy_pj_per_byte_by_component.get(component_id, 0.0)
-        energy = float(raw.get("physical_bytes", 0)) * rate
-        moved = raw.get("resource_bytes", {})
-        wire_bytes = sum(moved.values())
-        if energy and not wire_bytes:
-            raise ValueError("physical memory energy requires resource byte accounting")
-        resource_energy = {resource: energy * amount / wire_bytes if wire_bytes else 0.0
-                           for resource, amount in moved.items()}
-        raw["resource_interval_payloads"] = {
-            resource: tuple((start, end, size, resource_energy.get(resource, 0.0) * size / moved[resource]
-                             if moved.get(resource) else 0.0)
-                            for start, end, size, _old_energy in intervals)
-            for resource, intervals in raw.get("resource_interval_payloads", {}).items()}
         direction = "read" if kind is AccessKind.READ else "write"
         raw.update({"phase_id": "paged-kv-physical-" + str(len(self._cost_phases)),
             "kind": "memory", "component_id": component_id, "owner": owner,
             "memory_kind": self._configs[component_id].kind.value,
-            "energy_pj": energy, "energy_pj_per_byte": rate,
-            "energy_rate_configured": component_id in self.energy_pj_per_byte_by_component,
-            "resource_energy_pj": resource_energy,
             "resource_owners": {resource: owner for resource in raw.get("resource_busy_ns", {})},
             "resource_busy_by_direction_ns": {direction: dict(raw.get("resource_busy_ns", {}))},
             "direction_semantics": "attributed to the submitted transaction direction; a NAND write may include RMW reads"})
@@ -383,13 +376,10 @@ class PhysicalKVTransferExecutor:
     def _submit_link_phase(self, hop, size, arrival_ns):
         """Use the same payload-wire and inflight-credit contract as DAG hops."""
         timeline = self.runtime.timeline
-        rate = float(getattr(hop, "energy_pj_per_byte", 0.0))
-        if not math.isfinite(rate) or rate < 0:
-            raise ValueError("link energy rate must be finite and non-negative")
         demand_factory = getattr(hop, "demands", None)
         demands = tuple(demand_factory(size)) if callable(demand_factory) else (
             SimpleNamespace(resource_id=hop.resource_id, service_ns=hop.transfer_ns(size),
-                            bytes_moved=size, energy_pj=size * rate),)
+                            bytes_moved=size),)
         for resource, capacity in getattr(hop, "resource_capacities", {}).items():
             resource = timeline.canonical_resource_id(resource)
             existing = timeline.lane_available.get(resource)
@@ -400,30 +390,27 @@ class PhysicalKVTransferExecutor:
         combined = {}
         for demand in demands:
             resource = timeline.canonical_resource_id(demand.resource_id)
-            row = combined.setdefault(resource, {"busy": 0., "bytes": 0, "energy": 0.})
+            row = combined.setdefault(resource, {"busy": 0., "bytes": 0})
             row["busy"] += demand.service_ns
             row["bytes"] += demand.bytes_moved
-            row["energy"] += demand.energy_pj
         start = max((arrival_ns, *(timeline.available_ns(resource) for resource in combined)))
-        busy, moved, energy, intervals, payloads = {}, {}, {}, {}, {}
+        busy, moved, intervals, payloads = {}, {}, {}, {}
         end = start
         for resource, cost in combined.items():
             reservation = timeline.reserve(resource, start, cost["busy"], direction="read_write")
             end = max(end, reservation.end_ns)
-            busy[resource], moved[resource], energy[resource] = cost["busy"], cost["bytes"], cost["energy"]
+            busy[resource], moved[resource] = cost["busy"], cost["bytes"]
             timeline.bytes_moved[resource] = timeline.bytes_moved.get(resource, 0) + cost["bytes"]
             intervals[resource] = ((reservation.start_ns, reservation.end_ns),)
-            payloads[resource] = ((reservation.start_ns, reservation.end_ns, cost["bytes"], cost["energy"]),)
+            payloads[resource] = ((reservation.start_ns, reservation.end_ns, cost["bytes"]),)
         phase = {
             "phase_id": "paged-kv-physical-" + str(len(self._cost_phases)),
             "kind": "link", "link_id": hop.link_id, "operation": "copy",
             "resource_id": timeline.canonical_resource_id(hop.resource_id), "bytes": size,
             "arrival_ns": arrival_ns, "start_ns": start, "completion_ns": end,
             "duration_ns": end - start,
-            "logical_bytes": size, "physical_bytes": size, "energy_pj": sum(energy.values()),
-            "energy_pj_per_byte": rate,
-            "resource_busy_ns": busy, "resource_bytes": moved,
-            "resource_energy_pj": energy, "resource_intervals": intervals,
+            "logical_bytes": size, "physical_bytes": size, "resource_busy_ns": busy, "resource_bytes": moved,
+            "resource_intervals": intervals,
             "resource_interval_payloads": payloads,
             "resource_busy_by_direction_ns": {"read_write": busy},
             "intervals_truncated": False}
@@ -441,18 +428,15 @@ class PhysicalKVTransferExecutor:
         """
         from .planner import _summarize_dram_task_traffic, _summarize_nand_task_traffic
         result = {"schema": "heterollm.paged-kv-physical-cost/v1",
-            "phase_count": len(self._cost_phases), "energy_pj": 0.0,
-            "resource_accounted_bytes": 0, "resource_busy_ns": {},
-            "resource_bytes": {}, "resource_energy_pj": {},
-            "resource_busy_by_direction_ns": {}, "owners": {}, "links": {},
+            "phase_count": len(self._cost_phases), "resource_accounted_bytes": 0, "resource_busy_ns": {},
+            "resource_bytes": {}, "resource_busy_by_direction_ns": {}, "owners": {}, "links": {},
             "first_arrival_ns": None, "last_completion_ns": None}
         adapters = []
         for phase in self._cost_phases:
-            result["energy_pj"] += phase["energy_pj"]
             start, end = phase["arrival_ns"], phase["completion_ns"]
             result["first_arrival_ns"] = start if result["first_arrival_ns"] is None else min(start, result["first_arrival_ns"])
             result["last_completion_ns"] = end if result["last_completion_ns"] is None else max(end, result["last_completion_ns"])
-            for key in ("resource_busy_ns", "resource_bytes", "resource_energy_pj"):
+            for key in ("resource_busy_ns", "resource_bytes"):
                 for resource, value in phase.get(key, {}).items():
                     result[key][resource] = result[key].get(resource, 0) + value
             for direction, values in phase["resource_busy_by_direction_ns"].items():
@@ -462,15 +446,13 @@ class PhysicalKVTransferExecutor:
             if phase["kind"] == "memory":
                 owner = phase["owner"]
                 row = result["owners"].setdefault(owner, {"component_ids": [],
-                    "memory_kind": phase["memory_kind"], "transaction_count": 0,
-                    "energy_pj": 0.0, "energy_rate_configured": True})
+                    "memory_kind": phase["memory_kind"], "transaction_count": 0})
                 if phase["component_id"] not in row["component_ids"]:
                     row["component_ids"].append(phase["component_id"])
                 row["transaction_count"] += 1
-                row["energy_rate_configured"] &= phase["energy_rate_configured"]
                 for key in ("logical_bytes", "logical_read_bytes", "logical_write_bytes",
                             "physical_bytes", "physical_read_bytes", "physical_write_bytes",
-                            "host_transfer_bytes", "internal_transfer_bytes", "energy_pj"):
+                            "host_transfer_bytes", "internal_transfer_bytes"):
                     # Unknown counters must not become measured zero.
                     value = phase.get(key)
                     row[key] = None if value is None or (key in row and row[key] is None) else row.get(key, 0) + value
@@ -480,10 +462,9 @@ class PhysicalKVTransferExecutor:
                     demands=tuple(SimpleNamespace(resource_id=resource)
                                   for resource in phase.get("resource_busy_ns", {}))))
             else:
-                row = result["links"].setdefault(phase["link_id"], {"phase_count": 0, "bytes": 0, "energy_pj": 0.0})
+                row = result["links"].setdefault(phase["link_id"], {"phase_count": 0, "bytes": 0})
                 row["phase_count"] += 1
                 row["bytes"] += phase["physical_bytes"]
-                row["energy_pj"] += phase["energy_pj"]
         result["resource_accounted_bytes"] = sum(result["resource_bytes"].values())
         result["storage_traffic"] = _summarize_nand_task_traffic(adapters)
         result["dram_traffic"] = _summarize_dram_task_traffic(adapters)
@@ -518,9 +499,8 @@ class PhysicalKVTransferExecutor:
                 amount = min(amount, chunk - (address + offset) % granularity)
             bill = price(kind, amount, page_offset_bytes=address + offset,
                          runtime=self.runtime, arrival_ns=current)
-            recorded = self._record_memory_cost(component_id, kind, bill)
-            results.append({**bill, **{key: recorded[key] for key in (
-                "energy_pj", "resource_energy_pj", "resource_interval_payloads")}})
+            self._record_memory_cost(component_id, kind, bill)
+            results.append(dict(bill))
             current = float(bill.get("completion_ns", current))
             offset += amount
         if kind is AccessKind.READ:
@@ -616,7 +596,8 @@ class PhysicalKVTransferExecutor:
         phases: list[dict[str, Any]] = []
         try:
             target_alloc = target_allocator.allocate(self._buffer_id(request),
-                self.allocation_bytes(target_component, binding.bytes), target_generation)
+                self.allocation_bytes(target_component, binding.bytes), target_generation,
+                allocation_arena="resident")
             source_addr = binding.allocation.base_address
             source_start, writebacks = self._flush_source_caches(binding, start)
             phases.extend(writebacks)
@@ -634,7 +615,8 @@ class PhysicalKVTransferExecutor:
                 relay_allocator = self._allocator(relay_owner)
                 relay_allocation = relay_allocator.allocate(
                     self._buffer_id(request) + ":relay:" + stage,
-                    self.allocation_bytes(stage, binding.bytes), target_generation)
+                    self.allocation_bytes(stage, binding.bytes), target_generation,
+                    allocation_arena="workspace")
                 temp_allocations.append((relay_owner, relay_allocation.buffer_id, target_generation))
                 relay_bills = self._price_chunks(stage, AccessKind.WRITE, relay_allocation.base_address,
                     binding.bytes, arrival_ns=current, caller_managed_transaction=True)
@@ -675,7 +657,6 @@ class PhysicalKVTransferExecutor:
         plan = KvPoolTransferPlan(
             duration_ns=max(0.0, completion - start), start_ns=start,
             completion_ns=completion,
-            energy_pj=sum(phase.get("energy_pj", 0.0) for phase in phases),
             commit=lambda: self._commit_transfer(page_id, target_component, target_owner, target_alloc,
                                                  target_generation, phases, temp_allocations, state,
                                                  expected_token=phase_token),
@@ -713,7 +694,8 @@ class PhysicalKVTransferExecutor:
         start = self._arrival(request, None)
         try:
             target_alloc = self._allocator(target_owner).allocate(
-                self._buffer_id(request), self.allocation_bytes(target_component, binding.bytes), target_generation)
+                self._buffer_id(request), self.allocation_bytes(target_component, binding.bytes), target_generation,
+                allocation_arena="resident")
             # Allocate relay buffers before beginning I/O, so a later phase
             # cannot discover an unreserved capacity requirement.
             downstream = []
@@ -728,7 +710,8 @@ class PhysicalKVTransferExecutor:
                     relay_owner = self._ensure_service(component).physical_owner
                     allocator = self._allocator(relay_owner)
                     allocation = allocator.allocate(self._buffer_id(request) + ":relay:" + component,
-                                                    self.allocation_bytes(component, binding.bytes), target_generation)
+                                                    self.allocation_bytes(component, binding.bytes), target_generation,
+                                                    allocation_arena="workspace")
                     temp_allocations.append((relay_owner, allocation.buffer_id, target_generation))
                     downstream.extend((
                         ("relay_write", component, allocation.base_address, AccessKind.WRITE),
@@ -794,7 +777,6 @@ class PhysicalKVTransferExecutor:
 
             return KvPoolTransferPlan(
                 duration_ns=max(0.0, phase_end - start), start_ns=start, completion_ns=phase_end,
-                energy_pj=sum(phase.get("energy_pj", 0.0) for phase in completed_phases),
                 commit=(lambda: self._commit_transfer(page_id, target_component, target_owner, target_alloc,
                     target_generation, list(completed_phases), temp_allocations, state,
                     expected_token=token)) if final else None,

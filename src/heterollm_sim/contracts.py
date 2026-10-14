@@ -192,7 +192,6 @@ class ResourceDemand:
     resource_id: str
     service_ns: float
     bytes_moved: int = 0
-    energy_pj: float = 0.0
     work_units: float = 0.0
 
     def __post_init__(self) -> None:
@@ -206,7 +205,6 @@ class ResourceDemand:
             raise ValueError("bytes_moved must be a non-negative integer")
         for name, value in (
             ("service_ns", self.service_ns),
-            ("energy_pj", self.energy_pj),
             ("work_units", self.work_units),
         ):
             if (
@@ -217,7 +215,6 @@ class ResourceDemand:
                 raise ValueError("{} must be a finite number".format(name))
         numeric_values = (
             self.service_ns,
-            self.energy_pj,
             self.work_units,
         )
         if any(
@@ -227,7 +224,7 @@ class ResourceDemand:
             raise ValueError("demand quantities must be finite numbers")
         if self.service_ns < 0:
             raise ValueError("service_ns must be non-negative")
-        if self.bytes_moved < 0 or self.energy_pj < 0 or self.work_units < 0:
+        if self.bytes_moved < 0 or self.work_units < 0:
             raise ValueError("demand quantities must be non-negative")
 
 
@@ -325,7 +322,6 @@ class ResourceInterval:
     start_ns: float
     end_ns: float
     bytes_moved: int = 0
-    energy_pj: float = 0.0
 
 
 @dataclass(frozen=True)

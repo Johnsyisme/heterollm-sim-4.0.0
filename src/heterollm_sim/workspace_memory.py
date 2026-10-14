@@ -55,6 +55,24 @@ def physical_workspace_bound(tasks):
     buffers = {}
     residents = {}
     aliases = {}
+    arenas = {}
+    for task in tasks:
+        default_owner = (task.metadata.get("physical_owner")
+                         or task.metadata.get("stateful_l2", {}).get("memory_resource"))
+        for row in UnifiedEventKernel._physical_descriptor_rows(task):
+            identity = row.get("buffer_id") or row.get("tensor_id")
+            arena = row.get("allocation_arena")
+            if not identity or arena is None:
+                continue
+            if arena not in ("resident", "workspace"):
+                raise ValueError("allocation_arena must be resident or workspace")
+            if str(identity).startswith("@tasklocal"):
+                identity = task.task_id + str(identity)[len("@tasklocal"):]
+            key = (str(row.get("physical_owner") or default_owner), str(identity),
+                   int(row.get("allocation_generation", row.get("generation", 0))))
+            if key in arenas and arenas[key] != arena:
+                raise ValueError("physical allocation has conflicting arenas")
+            arenas[key] = arena
     for index, task in enumerate(tasks):
         if task.metadata.get("physical_memory_config") is None:
             continue
@@ -96,7 +114,8 @@ def physical_workspace_bound(tasks):
             # NAND uses full pages even for a subpage-sized declaration.
             alignment = int(config.get("burst_bytes", config.get("page_bytes", 64)))
             extent = ((extent + alignment - 1) // alignment) * alignment
-            registry = residents if generation == 0 else buffers
+            arena = arenas.get(key, "resident" if generation == 0 else "workspace")
+            registry = residents if arena == "resident" else buffers
             previous = registry.get(key)
             if previous is None:
                 registry[key] = [extent, regions[index], regions[index]]
@@ -114,8 +133,8 @@ def physical_workspace_bound(tasks):
 
     for alias in aliases:
         target = root_of(alias)
-        view = (residents if alias[2] == 0 else buffers).pop(alias)
-        if target[2] == 0:
+        view = (residents if alias in residents else buffers).pop(alias)
+        if target in residents:
             # A view of resident memory adds no transient allocation.
             continue
         if target not in buffers:

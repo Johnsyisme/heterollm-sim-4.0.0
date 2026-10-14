@@ -46,6 +46,15 @@ class MemoryKind(str, Enum):
 
 _GDDR_GENERATIONS = frozenset({"GDDR6", "GDDR6X", "GDDR7"})
 
+# Optional, authored timing constraints shared by every DRAM family. Zero
+# disables a constraint; these are not inferred JEDEC/vendor timing values.
+DRAM_BANK_GROUP_TIMING_FIELDS = (
+    "column_same_group_ns", "column_different_group_ns",
+    "activate_same_group_ns", "activate_different_group_ns",
+    "four_activate_window_ns",
+    "write_to_read_same_group_ns", "write_to_read_different_group_ns",
+)
+
 
 def _coerce_dram_kind(value: Any, generation: Any = "") -> tuple[MemoryKind, str]:
     """Canonicalize DRAM family and GDDR generation without guessing NAND."""
@@ -82,6 +91,9 @@ def parse_physical_memory_config(values: Any) -> "DramConfig | NandConfig":
 
     Unknown kinds fail before entering the NAND branch.  Generation aliases
     such as ``GDDR7`` are canonicalized to ``kind=GDDR, generation=GDDR7``.
+    This parser does not select a family preset: omitted low-level fields
+    retain the dataclass's illustrative defaults. Simulation components must
+    pass physical_contract's explicit-field validation before using it.
     """
 
     from dataclasses import asdict, is_dataclass
@@ -176,6 +188,19 @@ class DramConfig:
     max_outstanding_requests: int = 64
     max_expanded_segments: int = 1_000_000
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    # Group comparisons share (stack, die, lane, rank). Column intervals are
+    # command-start to command-start for READ->READ or WRITE->WRITE. ACT
+    # intervals are start to start; its rolling window permits at most 4 ACTs.
+    # WRITE->READ intervals run from the last write data end to read command
+    # start and remain separate from data-bus direction turnaround.
+    # Appended after metadata to retain legacy positional construction.
+    column_same_group_ns: float = 0.0
+    column_different_group_ns: float = 0.0
+    activate_same_group_ns: float = 0.0
+    activate_different_group_ns: float = 0.0
+    four_activate_window_ns: float = 0.0
+    write_to_read_same_group_ns: float = 0.0
+    write_to_read_different_group_ns: float = 0.0
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "DramConfig":
@@ -217,6 +242,8 @@ class DramConfig:
             if self.interleave_bytes > bank_bytes or bank_bytes % self.interleave_bytes:
                 raise ValueError("interleave_bytes must divide the capacity of one bank")
         for name in ("data_rate_mt_s", "open_ns", "close_ns", "read_latency_ns", "write_latency_ns", "burst_interval_ns", "read_recovery_ns", "write_recovery_ns", "read_to_write_ns", "write_to_read_ns"):
+            _nonnegative(name, getattr(self, name))
+        for name in DRAM_BANK_GROUP_TIMING_FIELDS:
             _nonnegative(name, getattr(self, name))
         for name in ("lane_bandwidth_gb_s", "interface_bandwidth_gb_s", "read_bandwidth_gb_s", "write_bandwidth_gb_s", "capacity_bytes"):
             value = getattr(self, name)
@@ -276,6 +303,12 @@ class DramConfig:
             raise ValueError("capacity_bytes cannot exceed the declared physical geometry")
         if self.capacity_bytes is None:
             object.__setattr__(self, "capacity_bytes", self.computed_capacity_bytes)
+
+    @property
+    def bank_group_timing_enabled(self) -> bool:
+        """Whether any explicitly authored group/rank timing gate is enabled."""
+        return any(getattr(self, name) > 0 for name in DRAM_BANK_GROUP_TIMING_FIELDS)
+
     @property
     def bank_count(self) -> int:
         return self.ranks_per_channel * self.bank_groups_per_rank * self.banks_per_group
@@ -322,49 +355,6 @@ class DramConfig:
     @property
     def effective_capacity_bytes(self) -> int:
         return self.capacity_bytes or self.computed_capacity_bytes
-
-
-@dataclass(frozen=True)
-class NandThermalConfig:
-    """Explicit, uncalibrated independent-plane RC feedback assumptions."""
-
-    ambient_c: float = 35.0
-    initial_c: float = 35.0
-    resistance_k_per_w: float = 1.0
-    capacitance_j_per_k: float = 0.001
-    active_power_w: float = 30.0
-    idle_power_w: float = 1.0
-    throttle_threshold_c: float = 60.0
-    hysteresis_c: float = 5.0
-    throttled_service_rate: float = 0.5
-    throttled_power_fraction: float = 0.6
-    assumption: str = ""
-
-    def __post_init__(self):
-        for name in ("ambient_c", "initial_c", "throttle_threshold_c"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= -273.15:
-                raise ValueError(name + " must be finite and above absolute zero")
-        for name in ("resistance_k_per_w", "capacitance_j_per_k", "hysteresis_c"):
-            if _nonnegative(name, getattr(self, name)) <= 0:
-                raise ValueError(name + " must be positive")
-        for name in ("active_power_w", "idle_power_w"):
-            _nonnegative(name, getattr(self, name))
-        tau_ns = self.resistance_k_per_w * self.capacitance_j_per_k * 1e9
-        if not math.isfinite(tau_ns) or tau_ns <= 0:
-            raise ValueError("thermal RC time constant must be finite and positive")
-        equilibrium = self.ambient_c + self.active_power_w * self.resistance_k_per_w
-        if not math.isfinite(equilibrium):
-            raise ValueError("thermal equilibrium temperature must be finite")
-        for name in ("throttled_service_rate", "throttled_power_fraction"):
-            if not 0 < _nonnegative(name, getattr(self, name)) <= 1:
-                raise ValueError(name + " must be in (0, 1]")
-        if self.idle_power_w > self.active_power_w:
-            raise ValueError("idle_power_w must not exceed active_power_w")
-        if self.throttle_threshold_c-self.hysteresis_c <= self.ambient_c:
-            raise ValueError("thermal release threshold must exceed ambient temperature")
-        if not isinstance(self.assumption, str) or not self.assumption.strip():
-            raise ValueError("dynamic NAND thermal feedback requires an explicit assumption label")
 
 
 @dataclass(frozen=True)
@@ -421,7 +411,6 @@ class NandConfig:
     # behavior; positive values model finite admission buffering without
     # adding an FTL or garbage-collection state machine.
     write_buffer_bytes: int = field(default=0, kw_only=True)
-    dynamic_thermal: Optional[NandThermalConfig | Mapping[str, Any]] = field(default=None, kw_only=True)
     wear_model: Optional[NandWearConfig | Mapping[str, Any]] = field(default=None, kw_only=True)
     detailed_observability: bool = field(default=False, kw_only=True)
     partial_page_policy: str = "read_modify_write"
@@ -442,7 +431,7 @@ class NandConfig:
         if kind not in {MemoryKind.SSD, MemoryKind.HBF}:
             raise ValueError("NandConfig.kind must be SSD or HBF")
         object.__setattr__(self, "kind", kind)
-        for name, cls in (("dynamic_thermal", NandThermalConfig), ("wear_model", NandWearConfig)):
+        for name, cls in (("wear_model", NandWearConfig),):
             value = getattr(self, name)
             if isinstance(value, Mapping):
                 object.__setattr__(self, name, cls(**dict(value)))
@@ -600,7 +589,6 @@ class StageTiming:
     end_ns: float
     resource_id: Optional[str] = None
     bytes: int = 0
-    energy_pj: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -795,6 +783,13 @@ def make_lpddr_config(**kwargs: Any) -> DramConfig:
 
 
 def make_hbm_config(**kwargs: Any) -> DramConfig:
+    """Build an illustrative low-level HBM example, not a hardware preset.
+
+    It sets 8 channels x 2 pseudo-channels, while the parser uses generic
+    DramConfig defaults. Authored simulation components
+    carry complete physical configs from the hardware preset/configuration;
+    they must not use these example defaults as a missing-config fallback.
+    """
     kwargs["kind"] = MemoryKind.HBM
     kwargs.setdefault("channels", 8)
     kwargs.setdefault("pseudo_channels_per_channel", 2)
@@ -837,7 +832,8 @@ def make_hbf_config(**kwargs: Any) -> NandConfig:
 
 __all__ = [
     "AccessRequest", "AddressMapping", "BatchResult", "DramConfig", "MemoryKind", "NandConfig",
-    "NandThermalConfig", "NandWearConfig",
+    "DRAM_BANK_GROUP_TIMING_FIELDS",
+    "NandWearConfig",
     "Operation", "Segment", "StageTiming", "TransactionResult",
     "make_ddr_config", "make_lpddr_config", "make_hbm_config", "make_gddr_config",
     "parse_physical_memory_config",

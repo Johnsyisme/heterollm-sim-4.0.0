@@ -18,10 +18,9 @@ from .component_presets import (
     _gpu_cost_profile_template,
     _hbm_cost_profile_template,
     _host_memory_cost_profile_template,
-    _analytical_dram_config,
-    _analytical_nand_config,
     materialize_component_payload,
 )
+from .physical_presets import make_analytical_dram_config, make_analytical_nand_config
 from .serde import to_primitive
 from .schema_v4 import ControllerProfile, GPUControllerProfile
 from .topology import validate_topology
@@ -41,7 +40,6 @@ COMPONENT_CAPABILITY_UNITS: Mapping[str, str] = {
     "max_outstanding_requests": "request_count",
     "dma_bandwidth_gbps": "Gb/s_decimal_one_way",
     "dma_latency_ns": "ns",
-    "dma_energy_pj_per_byte": "pJ/B",
 }
 PORT_CAPABILITY_UNITS: Mapping[str, str] = {
     "lanes": "lane_count",
@@ -380,10 +378,13 @@ def _hbm_controller_ports(
     generation: str,
     product_total_bandwidth_gbps: float,
     *,
+    channels_per_stack: int,
     prefix: str = "hbm",
 ) -> Tuple[PortSpec, ...]:
     """Create one controller port for every modeled physical HBM stack."""
 
+    if type(channels_per_stack) is not int or channels_per_stack <= 0:
+        raise ValueError("HBM channels per stack must be a positive integer")
     unit_bandwidth = product_total_bandwidth_gbps / stack_count
     return tuple(
         _port(
@@ -391,14 +392,14 @@ def _hbm_controller_ports(
             "HBM",
             "controller",
             version=generation,
-            lanes=16,
+            lanes=channels_per_stack,
             bandwidth_gbps=unit_bandwidth,
             metadata={
                 "physical_unit_kind": "HBM_stack",
                 "unit_index": index,
                 "unit_count_in_product": stack_count,
-                "physical_channel_total": 16,
-                "channels_per_stack": 16,
+                "physical_channel_total": channels_per_stack,
+                "channels_per_stack": channels_per_stack,
                 "bandwidth_derivation": "product_total_bandwidth_gbps / unit_count_in_product",
             },
         )
@@ -415,6 +416,7 @@ def _physical_hbm_stacks(
     package_id: str,
     generation: str,
     stack_count: int,
+    channels_per_stack: int,
     product_total_capacity_bytes: int,
     product_total_bandwidth_gbps: float,
     role: str,
@@ -436,6 +438,8 @@ def _physical_hbm_stacks(
 
     if stack_count <= 0:
         raise ValueError("physical HBM stack count must be positive")
+    if type(channels_per_stack) is not int or channels_per_stack <= 0:
+        raise ValueError("HBM channels per stack must be a positive integer")
     unit_bandwidth = product_total_bandwidth_gbps / stack_count
     components = []
     links = []
@@ -510,14 +514,14 @@ def _physical_hbm_stacks(
                         "HBM",
                         "device",
                         version=generation,
-                        lanes=16,
+                        lanes=channels_per_stack,
                         bandwidth_gbps=unit_bandwidth,
                         metadata={
                             "physical_unit_kind": "HBM_stack",
                             "unit_index": index,
                             "unit_count_in_product": stack_count,
-                            "physical_channel_total": 16,
-                            "channels_per_stack": 16,
+                            "physical_channel_total": channels_per_stack,
+                            "channels_per_stack": channels_per_stack,
                             "bandwidth_derivation": "product_total_bandwidth_gbps / unit_count_in_product",
                         },
                     ),
@@ -562,7 +566,7 @@ def _physical_hbm_stacks(
                 "host",
                 "HBM",
                 version=generation,
-                lanes=16,
+                lanes=channels_per_stack,
                 bandwidth_gbps=unit_bandwidth,
                 latency_ns=latency_ns,
                 metadata={
@@ -704,7 +708,7 @@ def _component(
         version = ports[0].version if ports else ""
         protocol = ports[0].protocol.upper() if ports else ""
         if kind in {"ssd", "high_io_ssd", "hbf"}:
-            component_metadata["physical_memory_config"] = _analytical_nand_config(
+            component_metadata["physical_memory_config"] = make_analytical_nand_config(
                 kind="HBF" if kind == "hbf" else "SSD",
                 capacity_bytes=capacity_bytes,
                 read_bandwidth_gbps=read_gbps,
@@ -715,12 +719,29 @@ def _component(
             )
         else:
             memory_kind = "HBM" if kind == "hbm" else "LPDDR" if "LPDDR" in protocol else "DDR"
-            component_metadata["physical_memory_config"] = _analytical_dram_config(
+            if kind == "hbm":
+                # HBM PortSpec.lanes denotes channels, not DQ pins. A single
+                # endpoint is the authority for this bundled component's
+                # interface; multiple endpoints need an explicit Core config
+                # to state whether their channels are shared or independent.
+                hbm_ports = [port for port in ports
+                             if port.protocol.upper() == "HBM"
+                             and port.role.lower() in {"device", "endpoint"}]
+                if len(hbm_ports) != 1:
+                    raise ValueError(
+                        "{} HBM preset requires exactly one HBM memory endpoint "
+                        "or an explicit physical_memory_config".format(component_id)
+                    )
+                memory_channels = hbm_ports[0].lanes
+                version = hbm_ports[0].version
+            else:
+                memory_channels = 8 if kind == "host_memory" else 1
+            component_metadata["physical_memory_config"] = make_analytical_dram_config(
                 kind=memory_kind, generation=version or memory_kind,
                 capacity_bytes=capacity_bytes,
                 read_bandwidth_gbps=read_gbps,
                 write_bandwidth_gbps=write_gbps,
-                channels=16 if kind == "hbm" else 8 if kind == "host_memory" else 1,
+                channels=memory_channels,
                 read_latency_ns=float(component_metadata.get("read_latency_ns", 35.0)),
                 write_latency_ns=float(component_metadata.get("write_latency_ns", 35.0)),
                 scope="architecture_preset_{}".format(component_id),
@@ -1002,6 +1023,7 @@ def _hbm_accelerator_cluster(
     name: str,
     gpu_model: str,
     memory_kind: str,
+    channels_per_stack: int,
     memory_capacity_gb: float,
     memory_bandwidth_gbps: float,
     peak_ops_per_s: float,
@@ -1070,6 +1092,7 @@ def _hbm_accelerator_cluster(
                     memory_physical_unit_count,
                     memory_kind,
                     memory_bandwidth_gbps,
+                    channels_per_stack=channels_per_stack,
                 )
                 + (
                     _port("fabric", fabric_protocol, "endpoint", version=fabric_version, lanes=fabric_lanes, bandwidth_gbps=fabric_bandwidth_gbps, metadata=fabric_metadata),
@@ -1127,6 +1150,7 @@ def _hbm_accelerator_cluster(
                 else None
             ),
             component_preset_id=memory_component_preset_id,
+            channels_per_stack=channels_per_stack,
         )
         components.extend(stack_components)
         switch_ports.append(
@@ -1197,6 +1221,7 @@ def _hbm_accelerator_cluster(
 
 def _gh200_superchip(
     *,
+    channels_per_stack: int,
     preset_id: str = "nvidia-gh200-superchip",
     name: str = "NVIDIA GH200 Grace Hopper Superchip (96GB HBM3 variant)",
     hbm_generation: str = "HBM3",
@@ -1215,7 +1240,7 @@ def _gh200_superchip(
         ), package_id="superchip0", die_id="grace_die", peak_ops_per_s=0.0, role="host_cpu", model="Grace CPU"),
         _component("hopper0", "gpu", (
             _port("cpu", "NVLink-C2C", "endpoint", version="GH200", bandwidth_gbps=3600.0),
-        ) + _hbm_controller_ports(hbm_stack_count, hbm_generation, hbm_bandwidth_gbps), package_id="superchip0", die_id="hopper_die", peak_ops_per_s=989_500_000_000_000.0, role="accelerator", model="Hopper GPU", peak_ops_basis=_peak_ops_basis("BF16_tensor", source_basis="vendor_product_specification")),
+        ) + _hbm_controller_ports(hbm_stack_count, hbm_generation, hbm_bandwidth_gbps, channels_per_stack=channels_per_stack), package_id="superchip0", die_id="hopper_die", peak_ops_per_s=989_500_000_000_000.0, role="accelerator", model="Hopper GPU", peak_ops_basis=_peak_ops_basis("BF16_tensor", source_basis="vendor_product_specification")),
         _component("lpddr0", "host_memory", (_port("host", "LPDDR5X", "device", version="GH200", bandwidth_gbps=4000.0),), package_id="superchip0", die_id="lpddr_array", capacity_bytes=_gb(480), read_bandwidth_gbps=4000.0, write_bandwidth_gbps=4000.0, role="coherent_host_memory", model="LPDDR5X aggregate", physical_composition={**_aggregate_composition("LPDDR5X_device", physical_unit_count=None, count_status="not_reliably_disclosed", known_multiple=True, source_basis="vendor_product_level_memory_subsystem"), "controller_component_id": "grace0", "memory_subsystem_id": "grace0", "component_preset_id": "lpddr5x-gh200-480gb-500gbs-aggregate", "component_preset_status": "catalog_reference"}, parameter_basis={"capacity_bytes": "vendor_product_aggregate_decimal", "bandwidth_gbps": "vendor_product_aggregate_memory_bandwidth"}, extra_metadata={"component_preset_id": "lpddr5x-gh200-480gb-500gbs-aggregate", "capacity_scope": "per_Grace_up_to_480GB", "bandwidth_scope": "vendor_per_Grace_500GBps_aggregate"}),
     ]
     hbm_components, hbm_links = _physical_hbm_stacks(
@@ -1234,6 +1259,7 @@ def _gh200_superchip(
         unit_count_formula=hbm_unit_count_formula,
         source_basis=hbm_source_basis,
         component_preset_id=hbm_component_preset_id,
+        channels_per_stack=channels_per_stack,
     )
     components.extend(hbm_components)
     links = [
@@ -1269,6 +1295,7 @@ def _gh200_superchip(
 
 def _gh200_nvl2(
     *,
+    channels_per_stack: int,
     preset_id: str = "nvidia-gh200-nvl2",
     name: str = "NVIDIA GH200 NVL2 (2×144GB HBM3E current variant)",
     hbm_generation: str = "HBM3E",
@@ -1291,7 +1318,7 @@ def _gh200_nvl2(
         lpddr = "lpddr{}".format(index)
         components.extend((
             _component(grace, "cpu", (_port("gpu", "NVLink-C2C", "endpoint", version="GH200", bandwidth_gbps=3600.0), _port("memory", "LPDDR5X", "controller", version="GH200", bandwidth_gbps=4000.0)), package_id="superchip{}".format(index), die_id="grace{}".format(index), role="host_cpu", model="Grace CPU"),
-            _component(hopper, "gpu", (_port("cpu", "NVLink-C2C", "endpoint", version="GH200", bandwidth_gbps=3600.0),) + _hbm_controller_ports(hbm_stack_count, hbm_generation, hbm_bandwidth_gbps_per_superchip) + (_port("peer", "NVLink", "endpoint", version="4.0", bandwidth_gbps=3600.0),), package_id="superchip{}".format(index), die_id="hopper{}".format(index), peak_ops_per_s=989_500_000_000_000.0, role="accelerator", model="Hopper GPU", peak_ops_basis=_peak_ops_basis("BF16_tensor", source_basis="vendor_product_specification")),
+            _component(hopper, "gpu", (_port("cpu", "NVLink-C2C", "endpoint", version="GH200", bandwidth_gbps=3600.0),) + _hbm_controller_ports(hbm_stack_count, hbm_generation, hbm_bandwidth_gbps_per_superchip, channels_per_stack=channels_per_stack) + (_port("peer", "NVLink", "endpoint", version="4.0", bandwidth_gbps=3600.0),), package_id="superchip{}".format(index), die_id="hopper{}".format(index), peak_ops_per_s=989_500_000_000_000.0, role="accelerator", model="Hopper GPU", peak_ops_basis=_peak_ops_basis("BF16_tensor", source_basis="vendor_product_specification")),
             _component(lpddr, "host_memory", (_port("host", "LPDDR5X", "device", version="GH200", bandwidth_gbps=4000.0),), package_id="superchip{}".format(index), die_id="lpddr{}".format(index), capacity_bytes=_gb(480), read_bandwidth_gbps=4000.0, write_bandwidth_gbps=4000.0, role="host_memory", model="LPDDR5X aggregate", physical_composition={**_aggregate_composition("LPDDR5X_device", physical_unit_count=None, count_status="not_reliably_disclosed", known_multiple=True, source_basis="vendor_product_level_memory_subsystem"), "controller_component_id": grace, "memory_subsystem_id": grace, "component_preset_id": "lpddr5x-gh200-480gb-500gbs-aggregate", "component_preset_status": "catalog_reference"}, parameter_basis={"capacity_bytes": "vendor_product_aggregate_decimal", "bandwidth_gbps": "vendor_product_aggregate_memory_bandwidth"}, extra_metadata={"component_preset_id": "lpddr5x-gh200-480gb-500gbs-aggregate", "capacity_scope": "per_Grace_up_to_480GB", "bandwidth_scope": "vendor_per_Grace_500GBps_aggregate"}),
         ))
         hbm_components, hbm_links = _physical_hbm_stacks(
@@ -1310,6 +1337,7 @@ def _gh200_nvl2(
             unit_count_formula=hbm_unit_count_formula,
             source_basis=hbm_source_basis,
             component_preset_id=hbm_component_preset_id,
+            channels_per_stack=channels_per_stack,
         )
         components.extend(hbm_components)
         links.extend((
@@ -1466,6 +1494,7 @@ def _gb200_system(
                         hbm_stack_count_per_gpu,
                         "HBM3E",
                         64000.0,
+                        channels_per_stack=16,
                     )
                     + (_port("fabric", "NVLink", "endpoint", version="5.0", bandwidth_gbps=7200.0),),
                     package_id="superchip{}".format(module),
@@ -1496,6 +1525,7 @@ def _gb200_system(
                 source_basis="NVIDIA Blackwell architecture brief stack-site count and GB200 aggregate memory specification",
                 product_total_raw_capacity_bytes=_gb(192),
                 component_preset_id="hbm3e-24gb-1_000tbs-gb200-slice",
+                channels_per_stack=16,
             )
             components.extend(hbm_components)
             switch_ports.append(_port(endpoint, "NVLink", "switch", version="5.0", bandwidth_gbps=7200.0))
@@ -1541,7 +1571,7 @@ def _gb200_system(
 def _mi300a(hbm_stack_count: int = 8) -> ArchitecturePresetDefinition:
     components = [
         _component("zen4_cpu0", "cpu", (_port("gpu", "InfinityFabric", "endpoint", version="4.0", bandwidth_gbps=2048.0),), package_id="mi300a0", die_id="cpu_complex", role="host_cpu_chiplets", model="Zen 4 CPU complex", approximation="CPU chiplets are collapsed into one logical component."),
-        _component("cdna_gpu0", "gpu", (_port("cpu", "InfinityFabric", "endpoint", version="4.0", bandwidth_gbps=2048.0),) + _hbm_controller_ports(hbm_stack_count, "HBM3", 42400.0), package_id="mi300a0", die_id="gpu_complex", peak_ops_per_s=980_600_000_000_000.0, role="gpu_chiplets", model="CDNA 3 GPU complex", approximation="GPU chiplets are collapsed into one logical component.", peak_ops_basis=_peak_ops_basis("BF16_matrix", source_basis="vendor_product_specification")),
+        _component("cdna_gpu0", "gpu", (_port("cpu", "InfinityFabric", "endpoint", version="4.0", bandwidth_gbps=2048.0),) + _hbm_controller_ports(hbm_stack_count, "HBM3", 42400.0, channels_per_stack=16), package_id="mi300a0", die_id="gpu_complex", peak_ops_per_s=980_600_000_000_000.0, role="gpu_chiplets", model="CDNA 3 GPU complex", approximation="GPU chiplets are collapsed into one logical component.", peak_ops_basis=_peak_ops_basis("BF16_matrix", source_basis="vendor_product_specification")),
     ]
     hbm_components, hbm_links = _physical_hbm_stacks(
         root_component_id="cdna_gpu0",
@@ -1559,6 +1589,7 @@ def _mi300a(hbm_stack_count: int = 8) -> ArchitecturePresetDefinition:
         unit_count_formula="cross-source MI300A package architecture count = 8 HBM3 stacks",
         source_basis="AMD product aggregate plus cross-source package-architecture count",
         component_preset_id="hbm3-16gb-0_6625tbs-mi300a-slice",
+        channels_per_stack=16,
     )
     components.extend(hbm_components)
     links = [
@@ -1576,7 +1607,7 @@ def _mi300a(hbm_stack_count: int = 8) -> ArchitecturePresetDefinition:
 
 def _mi300x_single(hbm_stack_count: int = 8) -> ArchitecturePresetDefinition:
     components = [
-        _component("mi300x0", "gpu", _hbm_controller_ports(hbm_stack_count, "HBM3", 42600.0), package_id="mi300x0", die_id="gpu_complex", peak_ops_per_s=1_307_400_000_000_000.0, role="accelerator", model="MI300X", peak_ops_basis=_peak_ops_basis("BF16_matrix", source_basis="vendor_product_specification")),
+        _component("mi300x0", "gpu", _hbm_controller_ports(hbm_stack_count, "HBM3", 42600.0, channels_per_stack=16), package_id="mi300x0", die_id="gpu_complex", peak_ops_per_s=1_307_400_000_000_000.0, role="accelerator", model="MI300X", peak_ops_basis=_peak_ops_basis("BF16_matrix", source_basis="vendor_product_specification")),
     ]
     hbm_components, hbm_links = _physical_hbm_stacks(
         root_component_id="mi300x0",
@@ -1594,6 +1625,7 @@ def _mi300x_single(hbm_stack_count: int = 8) -> ArchitecturePresetDefinition:
         unit_count_formula="AMD product architecture documents 8 HBM3 stacks",
         source_basis="AMD product architecture and aggregate memory specification",
         component_preset_id="hbm3-24gb-0_665625tbs-mi300x-slice",
+        channels_per_stack=16,
     )
     components.extend(hbm_components)
     hbm_ids = tuple(component.component_id for component in hbm_components)
@@ -1692,7 +1724,7 @@ def _gds() -> ArchitecturePresetDefinition:
     components = (
         _component("host0", "cpu", (_port("gpu", "PCIe", "root", version="5.0", lanes=16, bandwidth_gbps=504.12307692307695), _port("ssd", "PCIe", "root", version="5.0", lanes=4, bandwidth_gbps=126.03076923076924)), role="pcie_host", model="GDS-capable host"),
         _component("gpu0", "gpu", (_port("host", "PCIe", "endpoint", version="5.0", lanes=16, bandwidth_gbps=504.12307692307695),), peak_ops_per_s=989_500_000_000_000.0, role="gds_accelerator", model="Hopper-class GDS-capable GPU analysis node", peak_ops_basis=_peak_ops_basis("BF16_tensor", source_basis="analytical H100-class compute default; GDS source does not specify compute throughput")),
-        _component("nvme0", "high_io_ssd", (_port("host", "PCIe", "endpoint", version="5.0", lanes=4, bandwidth_gbps=126.03076923076924),), capacity_bytes=_gb(7680), read_bandwidth_gbps=112.0, write_bandwidth_gbps=56.8, role="nvme_storage", model="Samsung PM1743-class 7.68 TB NVMe SSD", physical_composition={"simulator_representation": "single_device_node", "simulator_node_count": 1, "physical_unit_kind": "NVMe_SSD", "physical_unit_count": 1, "physical_unit_count_status": "preset_scope"}, parameter_basis={"capacity_bytes": "vendor_product_decimal_capacity", "read_bandwidth_gbps": "vendor_sequential_read_14_GB_per_s", "write_bandwidth_gbps": "vendor_sequential_write_7.1_GB_per_s", "interface_bandwidth_gbps": "PCIe_5_x4_decoded_PHY_32_GTps_128b130b"}, extra_metadata={"read_latency_ns": 25_000.0, "write_latency_ns": 40_000.0, "transfer_granularity_bytes": 4096, "max_outstanding_requests": 256, "dma_bandwidth_gbps": 112.0, "dma_latency_ns": 1_200.0, "dma_energy_pj_per_byte": 0.0, "unknown_value_sentinels": {"dma_energy_pj_per_byte": "0.0 means unknown/not declared, not zero energy"}, "storage_transport_parameter_basis": "editable analytical GDS controller defaults; vendor evidence covers capacity and sequential media bandwidth"}),
+        _component("nvme0", "high_io_ssd", (_port("host", "PCIe", "endpoint", version="5.0", lanes=4, bandwidth_gbps=126.03076923076924),), capacity_bytes=_gb(7680), read_bandwidth_gbps=112.0, write_bandwidth_gbps=56.8, role="nvme_storage", model="Samsung PM1743-class 7.68 TB NVMe SSD", physical_composition={"simulator_representation": "single_device_node", "simulator_node_count": 1, "physical_unit_kind": "NVMe_SSD", "physical_unit_count": 1, "physical_unit_count_status": "preset_scope"}, parameter_basis={"capacity_bytes": "vendor_product_decimal_capacity", "read_bandwidth_gbps": "vendor_sequential_read_14_GB_per_s", "write_bandwidth_gbps": "vendor_sequential_write_7.1_GB_per_s", "interface_bandwidth_gbps": "PCIe_5_x4_decoded_PHY_32_GTps_128b130b"}, extra_metadata={"read_latency_ns": 25_000.0, "write_latency_ns": 40_000.0, "transfer_granularity_bytes": 4096, "max_outstanding_requests": 256, "dma_bandwidth_gbps": 112.0, "dma_latency_ns": 1_200.0, "storage_transport_parameter_basis": "editable analytical GDS controller defaults; vendor evidence covers capacity and sequential media bandwidth"}),
     )
     links = (
         _link("gpu_pcie", "host0", "gpu", "gpu0", "host", "PCIe", version="5.0", lanes=16, bandwidth_gbps=504.12307692307695, latency_ns=150.0),
@@ -1707,7 +1739,7 @@ def _gpu_hbf() -> ArchitecturePresetDefinition:
     pkg = "hbf_package0"
     components = (
         _component("gpu0", "gpu", (_port("hbf", "HBF", "endpoint", version="2.0", lanes=64, bandwidth_gbps=3904.0, payload="streaming", metadata={"physical_transport_protocol": "UCIe"}),), package_id=pkg, die_id="gpu_die", peak_ops_per_s=989_500_000_000_000.0, role="host_accelerator", model="parameterized GPU"),
-        _component("hbf0", "hbf", (_port("host", "HBF", "endpoint", version="2.0", lanes=64, bandwidth_gbps=3904.0, payload="streaming", metadata={"media_bandwidth_modeled_separately": True, "physical_transport_protocol": "UCIe"}),), package_id=pkg, die_id="hbf_die", capacity_bytes=_gb(512), read_bandwidth_gbps=3904.0, write_bandwidth_gbps=217.6, role="near_package_flash", model="HBF analytical device", physical_composition={"simulator_representation": "single_physical_unit_node", "simulator_node_count": 1, "physical_unit_kind": "HBF_stack", "physical_unit_count": 1, "physical_unit_count_status": "explicit_reference_node", "known_multiple": False, "unit_index": 0, "unit_count_in_product": 1, "unit_count_status": "experimental_reference_scope", "unit_count_formula": "one HBF reference stack in this experimental preset", "unit_capacity_bytes": _gb(512), "product_total_capacity_bytes": _gb(512), "source_basis": "user-configured HBF analytical coordinates"}, parameter_basis={"capacity_bytes": "up_to_512_GB_reference_capacity", "read_bandwidth_gbps": "488_GB_per_s_user_coordinate", "write_bandwidth_gbps": "27.2_GB_per_s_user_coordinate", "interface_bandwidth_gbps": "analytical_HBF_logical_link_over_UCIe"}, extra_metadata={"capacity_scope": "up_to_512GB", "bandwidth_scope": "user_configured_488GB_per_s_read_27_2GB_per_s_write", "access_mode": "memory", "read_only": False, "writable": True, "write_buffer_bytes": 0, "memory_service_owner": "hbf0.memory", "read_latency_ns": 4000.0, "write_latency_ns": 75000.0, "transfer_granularity_bytes": 4096, "max_outstanding_requests": 32, "dma_bandwidth_gbps": 3904.0, "dma_latency_ns": 800.0, "dma_energy_pj_per_byte": 0.0, "cost_profile_key": "host_memory", "cost_profile_template": {"bandwidth_gb_s": 488.0, "efficiency": 1.0, "energy_pj_per_byte": 12.0, "resource_id": "hbf0.memory", "name": "HBF analytical active-memory profile", "read_latency_ns": 4000.0, "write_latency_ns": 75000.0, "transaction_bytes": 4096, "max_outstanding_requests": 32, "read_bandwidth_gb_s": 488.0, "write_bandwidth_gb_s": 27.2}, "internal_nand_composition": {"dies_per_stack": "8-high_or_16-high", "correlation_status": "not_reliably_disclosed"}}),
+        _component("hbf0", "hbf", (_port("host", "HBF", "endpoint", version="2.0", lanes=64, bandwidth_gbps=3904.0, payload="streaming", metadata={"media_bandwidth_modeled_separately": True, "physical_transport_protocol": "UCIe"}),), package_id=pkg, die_id="hbf_die", capacity_bytes=_gb(512), read_bandwidth_gbps=3904.0, write_bandwidth_gbps=217.6, role="near_package_flash", model="HBF analytical device", physical_composition={"simulator_representation": "single_physical_unit_node", "simulator_node_count": 1, "physical_unit_kind": "HBF_stack", "physical_unit_count": 1, "physical_unit_count_status": "explicit_reference_node", "known_multiple": False, "unit_index": 0, "unit_count_in_product": 1, "unit_count_status": "experimental_reference_scope", "unit_count_formula": "one HBF reference stack in this experimental preset", "unit_capacity_bytes": _gb(512), "product_total_capacity_bytes": _gb(512), "source_basis": "user-configured HBF analytical coordinates"}, parameter_basis={"capacity_bytes": "up_to_512_GB_reference_capacity", "read_bandwidth_gbps": "488_GB_per_s_user_coordinate", "write_bandwidth_gbps": "27.2_GB_per_s_user_coordinate", "interface_bandwidth_gbps": "analytical_HBF_logical_link_over_UCIe"}, extra_metadata={"capacity_scope": "up_to_512GB", "bandwidth_scope": "user_configured_488GB_per_s_read_27_2GB_per_s_write", "access_mode": "memory", "read_only": False, "writable": True, "write_buffer_bytes": 0, "memory_service_owner": "hbf0.memory", "read_latency_ns": 4000.0, "write_latency_ns": 75000.0, "transfer_granularity_bytes": 4096, "max_outstanding_requests": 32, "dma_bandwidth_gbps": 3904.0, "dma_latency_ns": 800.0, "cost_profile_key": "host_memory", "cost_profile_template": {"bandwidth_gb_s": 488.0, "efficiency": 1.0, "resource_id": "hbf0.memory", "name": "HBF analytical active-memory profile", "read_latency_ns": 4000.0, "write_latency_ns": 75000.0, "transaction_bytes": 4096, "max_outstanding_requests": 32, "read_bandwidth_gb_s": 488.0, "write_bandwidth_gb_s": 27.2}, "internal_nand_composition": {"dies_per_stack": "8-high_or_16-high", "correlation_status": "not_reliably_disclosed"}}),
     )
     links = (_link("hbf0", "gpu0", "hbf", "hbf0", "host", "HBF", version="2.0", lanes=64, bandwidth_gbps=3904.0, latency_ns=4000.0, payload="streaming", metadata={"physical_transport_protocol": "UCIe"}),)
     groups = (_group("package0", "GPU and High Bandwidth Flash", ("gpu0", "hbf0"), "gpu0"),)
@@ -1732,7 +1764,7 @@ def _b200_hbf_hbm(component_catalog=None) -> ArchitecturePresetDefinition:
 
     # Compute and cache defaults are owned by the B200 component preset; the
     # architecture contributes only endpoint identity and links.
-    hbm_ports = _hbm_controller_ports(2, "HBM3E", hbm_total_bandwidth_gbps)
+    hbm_ports = _hbm_controller_ports(2, "HBM3E", hbm_total_bandwidth_gbps, channels_per_stack=16)
     gpu_ports = hbm_ports + (
         _port("hbf0", "HBF", "endpoint", version="2.0", lanes=64, bandwidth_gbps=3_904.0, payload="streaming", metadata={"physical_transport_protocol": "UCIe"}),
         _port("hbf1", "HBF", "endpoint", version="2.0", lanes=64, bandwidth_gbps=3_904.0, payload="streaming", metadata={"physical_transport_protocol": "UCIe"}),
@@ -1900,7 +1932,7 @@ def _b200_hbf_hbm(component_catalog=None) -> ArchitecturePresetDefinition:
     limitations = (
         "NVIDIA DGX B200 页面公开的是 8-GPU 系统聚合值（1,440 GB、64 TB/s），本预设另以 Samsung HBM3E 组件预设实例化两个可编辑 HBM 端点；DGX 聚合值仅保留为 GPU 产品参考。",
         "两个 HBM 节点的容量、读写带宽和 profile 均来自 samsung-hbm3e-36gb-9_2 组件预设；物理 B200 封装堆叠数量未由本拓扑推断。",
-        "B200 峰值采用 NVIDIA Blackwell Technical Overview Table 3 的 HGX B200 dense FP16/BF16 tensor 2.2 PFLOPS；SM 数、时钟、缓存、效率、时序和能耗字段均为可编辑分析假设。",
+        "B200 峰值采用 NVIDIA Blackwell Technical Overview Table 3 的 HGX B200 dense FP16/BF16 tensor 2.2 PFLOPS；SM 数、时钟、缓存、效率和时序字段均为可编辑分析假设。",
         "HBF 容量和媒体读带宽由 SK hynix HBF 组件预设提供；写带宽没有可靠通用公开值，因此以 unknown 状态保留。",
         "cpu0/hostmem0 仅为使仿真执行器具备 host orchestration 路径的栈外辅助参考；hostmem0 由 Samsung DDR5 32GB 组件预设提供，不改变 1 GPU + 2 HBM + 2 HBF 加速器组成。",
     )
@@ -1994,7 +2026,7 @@ def _soc_2x_dram_sram_cim(*, shared_phy_noc: bool = False) -> ArchitecturePreset
 
     preset_id = "soc-2x-dram-sram-cim" + ("-shared-phy-noc" if shared_phy_noc else "")
     name = "SoC + 2× stacked DRAM + SRAM-CIM" + (" (shared PHY/NoC)" if shared_phy_noc else " (independent controllers)")
-    package, stack, domain = "soc_package0", "stack0", "stack0.thermal"
+    package, stack = "soc_package0", "stack0"
     bandwidth = 2048.0  # Analytical 256 GB/s one-way interface, not a device specification.
     assumptions = {
         "value_status": "uncalibrated_analytical_scaffold",
@@ -2006,7 +2038,7 @@ def _soc_2x_dram_sram_cim(*, shared_phy_noc: bool = False) -> ArchitecturePreset
             "cost_profile_id": "reference registry scaffold; replace with domain-specific profiles before prediction",
         },
     }
-    stack_metadata = {**assumptions, "stack_id": stack, "thermal_domain_id": domain}
+    stack_metadata = {**assumptions, "stack_id": stack}
     components = [
         _component(
             "soc0", "gpu",
@@ -2042,7 +2074,7 @@ def _soc_2x_dram_sram_cim(*, shared_phy_noc: bool = False) -> ArchitecturePreset
             bandwidth_gbps=bandwidth, latency_ns=10.0,
             approximation="分析用垂直通路；不是 UCIe，也不表示实测 bump/TSV 布线。",
             metadata={**assumptions, "vertical_link": True, "stack_id": stack,
-                      "thermal_domain_id": domain, "physical_technology": "TSV",
+                      "physical_technology": "TSV",
                       "read_path": [dram_id, "soc0"], "write_path": ["soc0", dram_id],
                       "pass_through_layers": list(range(1, index + 1)),
                       "forwarding_model": "dedicated_through_stack_no_dram_forwarding",
@@ -2078,7 +2110,7 @@ def _soc_2x_dram_sram_cim(*, shared_phy_noc: bool = False) -> ArchitecturePreset
     links.extend((
         _link("soc_cim_noc", "soc0", "cim", "cim0", "soc", "NoC",
               bandwidth_gbps=bandwidth, latency_ns=2.0,
-              metadata={**assumptions, "on_die": True, "thermal_domain_id": domain,
+              metadata={**assumptions, "on_die": True,
                         "shared_bidirectional": True, "physical_resource_owner": noc_owner}),
         _link("host_soc", "cpu0", "soc", "soc0", "host", "PCIe", version="5.0", lanes=16,
               bandwidth_gbps=504.0, latency_ns=800.0, payload="coherent_dma", metadata=assumptions),
@@ -2091,7 +2123,7 @@ def _soc_2x_dram_sram_cim(*, shared_phy_noc: bool = False) -> ArchitecturePreset
         "dram1 通过独立穿层 TSV 通路接到 SoC，不经 dram0 存储控制器转发；不宣称所有 3D 封装都如此。",
         "两片 DRAM 控制器独立；共享版本将垂直通路与 CIM NoC 串行化到同一分析用 PHY/NoC owner，不自动增加峰值带宽。",
         "必须为两片 DRAM 分配独立 profile/resource_id；legacy-host-memory 只是载入 scaffold，不能当作两片器件的校准值。",
-        "cpu0/host_memory0 是栈外辅助主控参考；热参数默认关闭，仅支持显式给定的静态热工作点降额，不模拟动态温升。",
+        "cpu0/host_memory0 是栈外辅助主控参考。",
     )
     result = _definition(
         preset_id, name, "User-defined", "3D DRAM + SRAM-CIM", "stacked_dram_soc", "single_package_with_reference_host",
@@ -2108,7 +2140,6 @@ def _soc_2x_dram_sram_cim(*, shared_phy_noc: bool = False) -> ArchitecturePreset
                 "physical_resource_owners": owners,
                 "controller_mode": "independent",
                 "phy_noc_mode": "shared" if shared_phy_noc else "independent",
-                "thermal_operating_point": {"enabled": False, "mode": "static_derating_only", "calibrated": False},
                 "topology_evidence": {**result.hardware.metadata["topology_evidence"],
                                       "scope": "user_authored_analytical_topology",
                                       "source_scope": "user design brief only; no vendor or calibration evidence"}}
@@ -2367,9 +2398,9 @@ def _native_rtx5080_local(component_catalog=None) -> ArchitecturePresetDefinitio
 
 
 _LEGACY_ARCHITECTURE_PRESETS: Tuple[ArchitecturePresetDefinition, ...] = (
-    _hbm_accelerator_cluster(preset_id="nvidia-h100-sxm-8-nvswitch", name="8× NVIDIA H100 SXM + NVSwitch", gpu_model="H100 SXM", memory_kind="HBM3", memory_capacity_gb=80, memory_bandwidth_gbps=26800.0, peak_ops_per_s=989_500_000_000_000.0, count=8, fabric_protocol="NVLink", fabric_version="4.0", fabric_bandwidth_gbps=3600.0, fabric_lanes=18, vendor="NVIDIA", family="Hopper", sources=(NVIDIA_HOPPER,), support_level=ANALYTICAL_APPROXIMATION, memory_physical_unit_count=5, memory_count_status="vendor_documented_active_stacks", memory_component_preset_id="hbm3-16gb-0_670tbs-h100-slice"),
-    _hbm_accelerator_cluster(preset_id="nvidia-h200-sxm-8-nvswitch", name="8× NVIDIA H200 SXM + NVSwitch", gpu_model="H200 SXM", memory_kind="HBM3E", memory_capacity_gb=141, memory_bandwidth_gbps=38400.0, peak_ops_per_s=989_500_000_000_000.0, count=8, fabric_protocol="NVLink", fabric_version="4.0", fabric_bandwidth_gbps=3600.0, fabric_lanes=18, vendor="NVIDIA", family="Hopper", sources=(NVIDIA_H200,), support_level=ANALYTICAL_APPROXIMATION, memory_physical_unit_count=6, memory_count_status="derived_from_product_total_and_24GB_stack_class", memory_raw_capacity_gb=144.0, memory_count_formula="144 GB raw product capacity / 24 GB HBM3E stack class = 6; 141 GB is product-visible capacity", memory_source_basis="NVIDIA H200 141 GB visible aggregate plus six 24 GB raw HBM3E stack-class derivation", memory_component_preset_id="hbm3e-24gb-0_800tbs-h200-slice"),
-    _gh200_superchip(),
+    _hbm_accelerator_cluster(preset_id="nvidia-h100-sxm-8-nvswitch", name="8× NVIDIA H100 SXM + NVSwitch", gpu_model="H100 SXM", memory_kind="HBM3", memory_capacity_gb=80, memory_bandwidth_gbps=26800.0, peak_ops_per_s=989_500_000_000_000.0, count=8, fabric_protocol="NVLink", fabric_version="4.0", fabric_bandwidth_gbps=3600.0, fabric_lanes=18, vendor="NVIDIA", family="Hopper", sources=(NVIDIA_HOPPER,), support_level=ANALYTICAL_APPROXIMATION, memory_physical_unit_count=5, memory_count_status="vendor_documented_active_stacks", memory_component_preset_id="hbm3-16gb-0_670tbs-h100-slice", channels_per_stack=16),
+    _hbm_accelerator_cluster(preset_id="nvidia-h200-sxm-8-nvswitch", name="8× NVIDIA H200 SXM + NVSwitch", gpu_model="H200 SXM", memory_kind="HBM3E", memory_capacity_gb=141, memory_bandwidth_gbps=38400.0, peak_ops_per_s=989_500_000_000_000.0, count=8, fabric_protocol="NVLink", fabric_version="4.0", fabric_bandwidth_gbps=3600.0, fabric_lanes=18, vendor="NVIDIA", family="Hopper", sources=(NVIDIA_H200,), support_level=ANALYTICAL_APPROXIMATION, memory_physical_unit_count=6, memory_count_status="derived_from_product_total_and_24GB_stack_class", memory_raw_capacity_gb=144.0, memory_count_formula="144 GB raw product capacity / 24 GB HBM3E stack class = 6; 141 GB is product-visible capacity", memory_source_basis="NVIDIA H200 141 GB visible aggregate plus six 24 GB raw HBM3E stack-class derivation", memory_component_preset_id="hbm3e-24gb-0_800tbs-h200-slice", channels_per_stack=16),
+    _gh200_superchip(channels_per_stack=16),
     _gh200_superchip(
         preset_id="nvidia-gh200-superchip-144gb-hbm3e",
         name="NVIDIA GH200 Grace Hopper Superchip (144GB HBM3E variant)",
@@ -2380,8 +2411,9 @@ _LEGACY_ARCHITECTURE_PRESETS: Tuple[ArchitecturePresetDefinition, ...] = (
         hbm_unit_count_formula="144 GB product total / 24 GB HBM3E stack class = 6",
         hbm_source_basis="GH200 144 GB product total plus 24 GB HBM3E stack class; count is derived",
         hbm_component_preset_id="hbm3e-24gb-0_833tbs-gh200-slice",
+        channels_per_stack=16,
     ),
-    _gh200_nvl2(),
+    _gh200_nvl2(channels_per_stack=16),
     _gh200_nvl2(
         preset_id="nvidia-gh200-nvl2-96gb-hbm3",
         name="NVIDIA GH200 NVL2 (2×96GB HBM3 variant)",
@@ -2392,13 +2424,14 @@ _LEGACY_ARCHITECTURE_PRESETS: Tuple[ArchitecturePresetDefinition, ...] = (
         hbm_unit_count_formula="96 GB per-Superchip total / 16 GB HBM3 stack class = 6",
         hbm_source_basis="GH200 product total plus full-H100 six-stack implementation; count is derived",
         hbm_component_preset_id="hbm3-16gb-0_667tbs-product-slice",
+        channels_per_stack=16,
     ),
     _gb200_system(4, "nvidia-gb200-nvl4", "NVIDIA GB200 NVL4", "four_gpu"),
     _gb200_system(72, "nvidia-gb200-nvl72", "NVIDIA GB200 NVL72", "rack_scale"),
     _mi300a(),
     _mi300x_single(),
-    _hbm_accelerator_cluster(preset_id="amd-mi300x-8-infinity-fabric", name="8× AMD Instinct MI300X + Infinity Fabric", gpu_model="MI300X", memory_kind="HBM3", memory_capacity_gb=192, memory_bandwidth_gbps=42600.0, peak_ops_per_s=1_307_400_000_000_000.0, count=8, fabric_protocol="InfinityFabric", fabric_version="MI300X", fabric_bandwidth_gbps=3584.0, fabric_lanes=8, vendor="AMD", family="MI300", sources=(AMD_MI300X,), support_level=ANALYTICAL_APPROXIMATION, memory_physical_unit_count=8, memory_count_status="vendor_documented_stacks", peak_precision="BF16_matrix", memory_component_preset_id="hbm3-24gb-0_665625tbs-mi300x-slice"),
-    _hbm_accelerator_cluster(preset_id="intel-gaudi3-8-roce", name="8× Intel Gaudi 3 RoCE Reference Baseboard", gpu_model="Gaudi 3", memory_kind="HBM2E", memory_capacity_gb=128, memory_bandwidth_gbps=29600.0, peak_ops_per_s=1_835_000_000_000_000.0, count=8, fabric_protocol="RoCE", fabric_version="v2", fabric_bandwidth_gbps=1600.0, fabric_lanes=8, vendor="Intel", family="Gaudi", sources=(INTEL_GAUDI3,), support_level=ANALYTICAL_APPROXIMATION, fabric_kind="ethernet_switch", memory_physical_unit_count=8, memory_count_status="vendor_documented_stacks", peak_precision="BF16_MME", fabric_member_rate_gbps=200.0, fabric_total_physical_port_count=24, memory_component_preset_id="hbm2e-16gb-0_4625tbs-gaudi3-slice"),
+    _hbm_accelerator_cluster(preset_id="amd-mi300x-8-infinity-fabric", name="8× AMD Instinct MI300X + Infinity Fabric", gpu_model="MI300X", memory_kind="HBM3", memory_capacity_gb=192, memory_bandwidth_gbps=42600.0, peak_ops_per_s=1_307_400_000_000_000.0, count=8, fabric_protocol="InfinityFabric", fabric_version="MI300X", fabric_bandwidth_gbps=3584.0, fabric_lanes=8, vendor="AMD", family="MI300", sources=(AMD_MI300X,), support_level=ANALYTICAL_APPROXIMATION, memory_physical_unit_count=8, memory_count_status="vendor_documented_stacks", peak_precision="BF16_matrix", memory_component_preset_id="hbm3-24gb-0_665625tbs-mi300x-slice", channels_per_stack=16),
+    _hbm_accelerator_cluster(preset_id="intel-gaudi3-8-roce", name="8× Intel Gaudi 3 RoCE Reference Baseboard", gpu_model="Gaudi 3", memory_kind="HBM2E", memory_capacity_gb=128, memory_bandwidth_gbps=29600.0, peak_ops_per_s=1_835_000_000_000_000.0, count=8, fabric_protocol="RoCE", fabric_version="v2", fabric_bandwidth_gbps=1600.0, fabric_lanes=8, vendor="Intel", family="Gaudi", sources=(INTEL_GAUDI3,), support_level=ANALYTICAL_APPROXIMATION, fabric_kind="ethernet_switch", memory_physical_unit_count=8, memory_count_status="vendor_documented_stacks", peak_precision="BF16_MME", fabric_member_rate_gbps=200.0, fabric_total_physical_port_count=24, memory_component_preset_id="hbm2e-16gb-0_4625tbs-gaudi3-slice", channels_per_stack=16),
     _cxl_type3(),
     _cxl_pool(),
     _ucie_chiplet(),
@@ -2490,7 +2523,7 @@ def _compatibility(item: ArchitecturePresetDefinition) -> Dict[str, Any]:
         "capacity_must_fit_selected_mapping",
     ]
     if item.topology_class == "stacked_dram_soc":
-        constraints.extend(("uncalibrated_soc_gpu_proxy", "per_dram_controller_profile_binding_required", "thermal_disabled_without_explicit_operating_point"))
+        constraints.extend(("uncalibrated_soc_gpu_proxy", "per_dram_controller_profile_binding_required"))
     if "ep_for_moe" in parallelism:
         constraints.append("ep_requires_moe")
     if gpu_count:

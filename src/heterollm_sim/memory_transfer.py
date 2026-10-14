@@ -67,7 +67,7 @@ class ResourceTimeline:
     _interval_count: int = field(default=0, repr=False)
     _intervals_truncated: bool = field(default=False, repr=False)
     _touched: set[str] = field(default_factory=set, repr=False)
-    _interval_payloads: Dict[str, list[tuple[float, float, int, float]]] = field(default_factory=dict, repr=False)
+    _interval_payloads: Dict[str, list[tuple[float, float, int]]] = field(default_factory=dict, repr=False)
     # Optional lane calendar supplied by the event kernel.  Keeping this as a
     # shared mapping makes ordinary kernel demands and physical reservations
     # consult one authority while preserving the scalar ``ready_ns`` API.
@@ -161,7 +161,7 @@ class ResourceTimeline:
         if (resource_id in self._intervals and self._intervals[resource_id]
                 and self._intervals[resource_id][-1] == (reservation.start_ns, reservation.end_ns)):
             self._interval_payloads.setdefault(resource_id, []).append(
-                (reservation.start_ns, reservation.end_ns, bytes, 0.0)
+                (reservation.start_ns, reservation.end_ns, bytes)
             )
         return Transfer(resource_id, bytes, bandwidth_gb_s, reservation.start_ns, reservation.end_ns)
 

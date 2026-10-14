@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 import re
 import json
 import os
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .ir import ComponentSpec, LinkSpec, PortSpec, SCHEMA_VERSION
-from .memory_types import DramConfig, NandConfig
+from .physical_presets import make_analytical_dram_config, make_analytical_nand_config
 from .serde import to_primitive
 
 
@@ -40,7 +40,6 @@ CAPABILITY_UNITS: Mapping[str, str] = {
     "max_outstanding_requests": "request_count",
     "dma_bandwidth_gbps": "Gb/s_decimal_one_way",
     "dma_latency_ns": "ns",
-    "dma_energy_pj_per_byte": "pJ/B",
 }
 PORT_CAPABILITY_UNITS: Mapping[str, str] = {
     "lanes": "lane_count",
@@ -239,91 +238,6 @@ def _gb(value: float) -> int:
     return int(value * 1_000_000_000)
 
 
-def _analytical_dram_config(
-    *, kind: str, generation: str, capacity_bytes: int,
-    read_bandwidth_gbps: float, write_bandwidth_gbps: float,
-    channels: int = 1, data_width_bits: int = 64,
-    read_latency_ns: float = 35.0, write_latency_ns: float = 35.0,
-    scope: str = "equivalent_memory_subsystem",
-) -> Dict[str, Any]:
-    """Represent published capacity/bandwidth with explicitly synthetic geometry."""
-    groups, banks, row_bytes, burst_bytes = 4, 4, 8192, 64
-    bank_count = channels * groups * banks
-    rows = (capacity_bytes + bank_count * row_bytes - 1) // (bank_count * row_bytes)
-    interface_gb_s = max(read_bandwidth_gbps, write_bandwidth_gbps) / 8.0
-    lane_gb_s = interface_gb_s / channels
-    return asdict(DramConfig(
-        kind=kind, generation=generation, channels=channels,
-        ranks_per_channel=1, bank_groups_per_rank=groups,
-        banks_per_group=banks, rows_per_bank=rows, row_bytes=row_bytes,
-        burst_bytes=burst_bytes, interleave_bytes=burst_bytes,
-        data_width_bits=data_width_bits,
-        data_rate_mt_s=interface_gb_s * 8_000.0 / (channels * data_width_bits),
-        interface_bandwidth_gb_s=interface_gb_s,
-        read_bandwidth_gb_s=read_bandwidth_gbps / 8.0,
-        write_bandwidth_gb_s=write_bandwidth_gbps / 8.0,
-        open_ns=14.0, close_ns=14.0,
-        read_latency_ns=read_latency_ns, write_latency_ns=write_latency_ns,
-        burst_interval_ns=burst_bytes / lane_gb_s,
-        capacity_bytes=capacity_bytes, max_outstanding_requests=64,
-        metadata={
-            "parameter_basis": "analytical_equivalent_assumptions",
-            "configuration_scope": scope,
-            "known_values": "component capacity and one-way directional bandwidth",
-            "analytical_assumptions": [
-                "channel count unless separately cited by the preset",
-                "rank, bank, row and burst organization",
-                "open/close, command-to-data and recovery timings",
-                "burst interval is a payload scheduling budget, not measured tCCD",
-            ],
-            "capacity_basis": "declared capacity with an equivalent geometry rounded upward to whole rows",
-            "bandwidth_basis": "explicit component one-way bandwidth; synthetic lane width does not infer pin speed",
-            "data_rate_basis": "equivalent interface rate derived from declared aggregate bandwidth and synthetic width; not a measured pin speed",
-        },
-    ))
-
-
-def _analytical_nand_config(
-    *, kind: str, capacity_bytes: int, read_bandwidth_gbps: float,
-    write_bandwidth_gbps: float, read_latency_ns: float,
-    write_latency_ns: float, scope: str = "equivalent_flash_device",
-) -> Dict[str, Any]:
-    """Model a NAND-backed device without claiming undisclosed die layout."""
-    channels, targets, dies, luns, planes = 8, 2, 2, 1, 2
-    pages, page_bytes = 256, 16384
-    block_bytes = channels * targets * dies * luns * planes * pages * page_bytes
-    blocks = (capacity_bytes + block_bytes - 1) // block_bytes
-    return asdict(NandConfig(
-        kind=kind, channels=channels, targets_per_channel=targets,
-        dies_per_target=dies, luns_per_die=luns, planes_per_lun=planes,
-        blocks_per_plane=blocks, pages_per_block=pages, page_bytes=page_bytes,
-        host_granularity_bytes=4096,
-        host_bandwidth_gb_s=max(read_bandwidth_gbps, write_bandwidth_gbps) / 8.0,
-        internal_bandwidth_gb_s=max(read_bandwidth_gbps, write_bandwidth_gbps) / 8.0,
-        host_read_bandwidth_gb_s=read_bandwidth_gbps / 8.0,
-        host_write_bandwidth_gb_s=write_bandwidth_gbps / 8.0,
-        page_read_ns=read_latency_ns, page_program_ns=write_latency_ns,
-        block_erase_ns=3_000_000.0,
-        capacity_bytes=capacity_bytes, max_outstanding_requests=64,
-        write_buffer_bytes=0,
-        metadata={
-            "parameter_basis": "analytical_equivalent_assumptions",
-            "configuration_scope": scope,
-            "known_values": "component capacity and sequential read/write bandwidth",
-            "analytical_assumptions": [
-                "channel, target, die, LUN, plane, block and page organization",
-                "page read/program and block erase timings",
-                "internal bandwidth and scheduling parallelism",
-            ],
-            "directional_bandwidth_gb_s": {
-                "read": read_bandwidth_gbps / 8.0,
-                "write": write_bandwidth_gbps / 8.0,
-            },
-            "capacity_basis": "declared capacity with equivalent array rounded upward to whole blocks",
-        },
-    ))
-
-
 def _tb(value: float) -> int:
     return int(value * 1_000_000_000_000)
 
@@ -422,7 +336,6 @@ def _hbm_cost_profile_template(
     profile = {
         "bandwidth_gb_s": bandwidth_gb_s,
         "efficiency": 1.0,
-        "energy_pj_per_byte": 4.0,
         "resource_id": "{}.hbm_fabric".format(component_id),
         "read_latency_ns": read_latency_ns,
         "write_latency_ns": write_latency_ns,
@@ -437,7 +350,6 @@ def _hbm_cost_profile_template(
         "read_bandwidth_gb_s": "component.read_bandwidth_gbps / 8; symmetric peak envelope",
         "write_bandwidth_gb_s": "component.write_bandwidth_gbps / 8; symmetric peak envelope",
         "efficiency": "A_ANALYTICAL editable derating default; no vendor workload efficiency claimed",
-        "energy_pj_per_byte": "A_ANALYTICAL editable energy default; no product measurement claimed",
         "resource_id": "derived from the materialized component ID",
         "read_latency_ns": "A_ANALYTICAL editable HBM service-latency default; JEDEC does not specify end-to-end controller latency",
         "write_latency_ns": "A_ANALYTICAL editable HBM service-latency default; JEDEC does not specify end-to-end controller latency",
@@ -463,7 +375,6 @@ def _host_memory_cost_profile_template(
     profile = {
         "bandwidth_gb_s": bandwidth_gb_s,
         "efficiency": 1.0,
-        "energy_pj_per_byte": 12.0,
         "resource_id": "{}.memory".format(component_id),
         "name": name,
         "read_latency_ns": read_latency_ns,
@@ -479,7 +390,6 @@ def _host_memory_cost_profile_template(
         "read_bandwidth_gb_s": "component.read_bandwidth_gbps / 8; symmetric analytical envelope",
         "write_bandwidth_gb_s": "component.write_bandwidth_gbps / 8; symmetric analytical envelope",
         "efficiency": "A_ANALYTICAL editable memory-controller derating default",
-        "energy_pj_per_byte": "A_ANALYTICAL editable host-memory energy default",
         "resource_id": "derived from the materialized component ID",
         "name": "derived from product family",
         "read_latency_ns": "A_ANALYTICAL editable CPU-visible LPDDR service-latency default; product page does not publish end-to-end latency",
@@ -534,7 +444,6 @@ def _gpu_cost_profile_template(
                     "read_ports": 2,
                     "write_ports": 1,
                     "max_outstanding": 32,
-                    "energy_pj_per_byte": 0.15,
                     "resource_id": "{}.l1_shared".format(component_id),
                 },
                 {
@@ -548,7 +457,6 @@ def _gpu_cost_profile_template(
                     "read_ports": 2,
                     "write_ports": 1,
                     "max_outstanding": 128,
-                    "energy_pj_per_byte": 0.6,
                     "resource_id": "{}.l2".format(component_id),
                 },
             ],
@@ -566,10 +474,6 @@ def _gpu_cost_profile_template(
         "occupancy": 0.85,
         "attainable_efficiency": 0.65,
         "kernel_launch_ns": 1000.0,
-        "tensor_energy_pj_per_op": 0.2,
-        "scalar_energy_pj_per_op": 0.35,
-        "special_function_energy_pj_per_op": 1.2,
-        "launch_energy_pj": 10000.0,
         "scalar_resource_id": "{}.scalar".format(component_id),
         "special_function_resource_id": "{}.sfu".format(component_id),
         "launch_resource_id": "{}.frontend".format(component_id),
@@ -586,7 +490,6 @@ def _gpu_cost_profile_template(
         "occupancy": "A_ANALYTICAL editable scheduler default",
         "attainable_efficiency": "A_ANALYTICAL editable workload efficiency default",
         "kernel_launch_ns": "A_ANALYTICAL editable launch-latency default",
-        "*_energy": "A_ANALYTICAL editable energy defaults; no application measurement claimed",
         "resource_id": "derived from the materialized component ID",
     }
     return profile, basis
@@ -632,7 +535,6 @@ def _cpu_cost_profile_template(
                     "read_ports": 2,
                     "write_ports": 1,
                     "max_outstanding": 16,
-                    "energy_pj_per_byte": 0.2,
                     "resource_id": "{}.l1d".format(component_id),
                 },
                 {
@@ -646,7 +548,6 @@ def _cpu_cost_profile_template(
                     "read_ports": 2,
                     "write_ports": 1,
                     "max_outstanding": 32,
-                    "energy_pj_per_byte": 0.8,
                     "resource_id": "{}.l2".format(component_id),
                 },
                 {
@@ -660,7 +561,6 @@ def _cpu_cost_profile_template(
                     "read_ports": 2,
                     "write_ports": 1,
                     "max_outstanding": 64,
-                    "energy_pj_per_byte": 2.0,
                     "resource_id": "{}.l3".format(component_id),
                 },
             ],
@@ -670,11 +570,6 @@ def _cpu_cost_profile_template(
         "quantized_dot_capabilities": [],
         "attainable_efficiency": 0.72,
         "dispatch_ns": 80.0,
-        "gemm_energy_pj_per_op": 1.5,
-        "elementwise_energy_pj_per_op": 1.0,
-        "reduction_energy_pj_per_op": 1.2,
-        "special_function_energy_pj_per_op": 4.0,
-        "dispatch_energy_pj": 800.0,
         "name": "{}-cpu-profile".format(component_id),
     }
     basis = {
@@ -688,7 +583,6 @@ def _cpu_cost_profile_template(
         "cache_hierarchy.levels[1].capacity_bytes": "S2_VENDOR_DECLARED/architecture reference private L2 class",
         "cache_hierarchy.levels[2].capacity_bytes": "S2_VENDOR_DECLARED Grace system-cache capacity",
         "cache_hierarchy": "A_ANALYTICAL editable latency/bandwidth/port defaults where exact implementation detail is not public",
-        "*_energy": "A_ANALYTICAL editable energy defaults; no application measurement claimed",
         "resource_id": "derived from the materialized component ID",
     }
     return profile, basis
@@ -720,13 +614,6 @@ def _cim_cost_profile_template(component_id: str) -> Tuple[Dict[str, Any], Dict[
         "accumulator_guard_bits": 0,
         "supported_activation_bits": [1, 2, 4, 8, 16],
         "supported_weight_bits": [1, 2, 4, 8, 16],
-        "eval_energy_pj": 1.0,
-        "load_energy_pj_per_byte": 0.5,
-        "activation_energy_pj_per_byte": 0.2,
-        "output_energy_pj_per_byte": 0.2,
-        "noc_energy_pj_per_byte": 0.1,
-        "accumulator_energy_pj_per_op": 0.05,
-        "peripheral_energy_pj_per_element": 0.1,
         "array_resource_id": "{}.array".format(component_id),
         "load_resource_id": "{}.load".format(component_id),
         "activation_resource_id": "{}.activation".format(component_id),
@@ -740,8 +627,6 @@ def _cim_cost_profile_template(component_id: str) -> Tuple[Dict[str, Any], Dict[
         "conversion_scratch_capacity_bytes": 0,
         "activation_fp32_to_fp16_elements_per_ns": 0.0,
         "conversion_contract_basis": "",
-        "conversion_read_energy_pj_per_byte": 0.0,
-        "conversion_write_energy_pj_per_byte": 0.0,
     }
     basis = {
         "*": "A_ANALYTICAL internal simulator reference; not a fabricated product specification",
@@ -831,7 +716,7 @@ def _hbm_preset(
                 "value_scope": "单个 {} 本地显存介质的峰值读写带宽模板".format(generation),
                 "conditions": [
                     "十进制带宽单位",
-                    "未扣除 ECC、控制器开销、封装损耗或热降频",
+                    "未扣除 ECC、控制器开销、封装损耗",
                 ],
                 "derived_formula": "公开速度档乘以接口宽度，结果写入 IR 带宽字段",
                 "expires_at": "2027-08-22",
@@ -842,7 +727,7 @@ def _hbm_preset(
                 "cost_profile_template": cost_profile_template,
                 "cost_profile_parameter_basis": cost_profile_parameter_basis,
                 "cost_profile_key": "hbm",
-                "physical_memory_config": _analytical_dram_config(
+                "physical_memory_config": make_analytical_dram_config(
                     kind="HBM", generation=generation, capacity_bytes=_gb(capacity_gb),
                     read_bandwidth_gbps=bandwidth_gbps, write_bandwidth_gbps=bandwidth_gbps,
                     channels=channels, scope="single_hbm_stack_template",
@@ -1037,7 +922,7 @@ def _hbm_product_slice_preset(
 
     limitations = (
         "该模板是产品总可见容量与总显存带宽按物理堆叠数守恒拆分的单颗切片，不代表厂商逐堆叠公布了独立可用值。",
-        "原始堆叠容量与产品可见容量分别记录；未扣除 ECC、刷新、控制器、封装或热限制。",
+        "原始堆叠容量与产品可见容量分别记录；未扣除 ECC、刷新、控制器或封装开销。",
     ) + (
         ("HBM-PIM 数值是分析参考，不对应通用量产部件。",)
         if analytical_pim
@@ -1152,7 +1037,7 @@ def _hbm_product_slice_preset(
                 "cost_profile_parameter_basis": cost_profile_parameter_basis,
                 "cost_profile_key": "hbm",
                 "expires_at": "2027-08-23",
-                "physical_memory_config": _analytical_dram_config(
+                "physical_memory_config": make_analytical_dram_config(
                     kind="HBM", generation=generation,
                     capacity_bytes=_gb(visible_capacity_gb),
                     read_bandwidth_gbps=bandwidth_gbps,
@@ -1243,7 +1128,6 @@ def _gpu_preset(
     fp8_dense_tflops: float,
     fp8_sparse_tflops: float,
     bf16_sparse_tflops: float,
-    tdp_watts: int,
     mig_profiles: str,
     sources: Sequence[ComponentSource],
 ) -> ComponentPresetDefinition:
@@ -1282,7 +1166,6 @@ def _gpu_preset(
                 "fp8_tensor_sparse_tflops": fp8_sparse_tflops,
                 "bf16_tensor_sparse_tflops": bf16_sparse_tflops,
                 "peak_ops_condition": "dense BF16 Tensor Core, no sparsity",
-                "tdp_watts": tdp_watts,
                 "mig_profiles": mig_profiles,
             },
             sources=sources,
@@ -1343,7 +1226,7 @@ def _ssd_preset(
 ) -> ComponentPresetDefinition:
     default_conditions = (
         "顺序读写峰值",
-        "max_outstanding_requests 仅重叠启动延迟；不模拟完整 NVMe 队列调度、热降频或写放大",
+        "max_outstanding_requests 仅重叠启动延迟；不模拟完整 NVMe 队列调度或写放大",
     )
     high_io = kind == "high_io_ssd"
     analytical_transport = {
@@ -1353,10 +1236,6 @@ def _ssd_preset(
         "max_outstanding_requests": 64 if high_io else 32,
         "dma_bandwidth_gbps": max(read_gbps, write_gbps),
         "dma_latency_ns": 1_200.0 if high_io else 2_000.0,
-        "dma_energy_pj_per_byte": 0.0,
-        "unknown_value_sentinels": {
-            "dma_energy_pj_per_byte": "0.0 means unknown/not declared, not zero energy"
-        },
         "storage_transport_parameter_basis": (
             "editable analytical controller/queue defaults; vendor evidence only covers "
             "the separately declared capacity and sequential media bandwidth"
@@ -1402,7 +1281,7 @@ def _ssd_preset(
             measurement_basis="read_gbps/write_gbps 已是 IR 十进制 Gb/s；调用方必须先把厂商 MB/s 或 GB/s 除/乘换算后传入；随机 IOPS 不直接折算。",
             extras={
                 **analytical_transport,
-                "physical_memory_config": _analytical_nand_config(
+                "physical_memory_config": make_analytical_nand_config(
                     kind="SSD", capacity_bytes=capacity_bytes,
                     read_bandwidth_gbps=read_gbps, write_bandwidth_gbps=write_gbps,
                     read_latency_ns=analytical_transport["read_latency_ns"],
@@ -1743,7 +1622,7 @@ def _grace_lpddr_preset(
                 "cost_profile_template": cost_profile_template,
                 "cost_profile_parameter_basis": cost_profile_parameter_basis,
                 "cost_profile_key": "host_memory",
-                "physical_memory_config": _analytical_dram_config(
+                "physical_memory_config": make_analytical_dram_config(
                     kind="LPDDR", generation="LPDDR5X",
                     capacity_bytes=_gb(480.0),
                     read_bandwidth_gbps=bandwidth_gbps,
@@ -1829,7 +1708,7 @@ def _grace_cpu_preset(
             sources=(source,),
             evidence_level=S2_VENDOR_DECLARED,
             limitations=limitations,
-            notes="Grace CPU 计算侧模板；载入后须显式绑定 profiles.components.cpu 中的 Profile，才可校准分类吞吐、延迟和能耗。",
+            notes="Grace CPU 计算侧模板；载入后须显式绑定 profiles.components.cpu 中的 Profile，才可校准分类吞吐和延迟。",
             measurement_basis="采用厂商公开的 72 核 Grace CPU、产品级一致性接口和 LPDDR5X 聚合带宽；不推导未公开的通用 OPS。",
             extras={
                 "component_scope": "compute_side_only",
@@ -1879,7 +1758,6 @@ def _desktop_cpu_preset(
     boost_clock_ghz: float,
     l2_capacity_bytes: int,
     l3_capacity_bytes: int,
-    tdp_watts: int,
     memory_data_rate_mt_s: int,
     memory_channels: int,
     source: ComponentSource,
@@ -1943,7 +1821,7 @@ def _desktop_cpu_preset(
         ),
     )
     limitations = (
-        "AMD 页面给出频率、核心/线程、缓存和 TDP；端到端内存延迟及跨工作负载 OPS 不在产品规格中。",
+        "AMD 页面给出频率、核心/线程和缓存；端到端内存延迟及跨工作负载 OPS 不在产品规格中。",
         "capacity_bytes 保持 0；主机内存容量和介质吞吐必须由独立 host_memory 组件表达。",
         "peak_ops_per_s 保持 0；CPU 分类执行成本由组件绑定的 profiles.components.cpu 模板提供。",
     )
@@ -1966,7 +1844,6 @@ def _desktop_cpu_preset(
                 "boost_clock_ghz": boost_clock_ghz,
                 "l2_capacity_bytes": l2_capacity_bytes,
                 "l3_capacity_bytes": l3_capacity_bytes,
-                "tdp_watts": tdp_watts,
                 "socket": "AM5",
                 "memory_type": "DDR5",
                 "memory_data_rate_mt_s": memory_data_rate_mt_s,
@@ -1976,7 +1853,7 @@ def _desktop_cpu_preset(
             evidence_level=S2_VENDOR_DECLARED,
             limitations=limitations,
             notes="AMD Ryzen 9 9950X3D 桌面 CPU 计算端点；内存容量由独立 DDR5 组件提供。",
-            measurement_basis="核心/线程、频率、缓存、TDP 和内存速度来自 AMD 产品页；OPS、延迟和效率是可编辑分析参数。",
+            measurement_basis="核心/线程、频率、缓存和内存速度来自 AMD 产品页；OPS、延迟和效率是可编辑分析参数。",
             extras={
                 "component_scope": "compute_side_only",
                 "external_memory_required": True,
@@ -2006,7 +1883,6 @@ def _desktop_cpu_preset(
                     "boost_clock_ghz": {"value": boost_clock_ghz, "unit": "GHz", "source_field": "Max. Boost Clock"},
                     "l2_capacity_bytes": {"value": l2_capacity_bytes, "unit": "B", "source_field": "L2 Cache"},
                     "l3_capacity_bytes": {"value": l3_capacity_bytes, "unit": "B", "source_field": "L3 Cache"},
-                    "tdp_watts": {"value": tdp_watts, "unit": "W", "source_field": "Default TDP"},
                     "l2_capacity_bytes": {"value": l2_capacity_bytes, "unit": "B", "source_field": "L2 Cache; converted from 16 MB using 1 MiB = 1024² B"},
                     "l3_capacity_bytes": {"value": l3_capacity_bytes, "unit": "B", "source_field": "L3 Cache; converted from 128 MB using 1 MiB = 1024² B"},
                     "memory": {"value": memory_data_rate_mt_s, "unit": "MT/s", "source_field": "System Memory Specification"},
@@ -2042,7 +1918,6 @@ def _consumer_gpu_preset(
     memory_bus_bits: int,
     memory_bandwidth_gb_s: float,
     l2_capacity_bytes: int,
-    tgp_watts: int,
     bf16_dense_tflops: float,
     source: ComponentSource,
     architecture_source: Optional[ComponentSource] = None,
@@ -2107,7 +1982,6 @@ def _consumer_gpu_preset(
                 "device_memory_bus_width_bits": memory_bus_bits,
                 "device_memory_bandwidth_gb_s": memory_bandwidth_gb_s,
                 "l2_capacity_bytes": l2_capacity_bytes,
-                "tgp_watts": tgp_watts,
                 "bf16_dense_tflops": bf16_dense_tflops,
             },
             sources=source_items,
@@ -2117,7 +1991,7 @@ def _consumer_gpu_preset(
                 "BF16 Tensor Core 峰值采用 NVIDIA Blackwell 技术简报 RTX 5080 表格的 112.6 TFLOPS（FP32 accumulate）；实际应用吞吐取决于内核和占用率。",
             ),
             notes="NVIDIA GeForce RTX 5080 Blackwell 计算端点；显存通过 GDDR7 接口端口建模。",
-            measurement_basis="NVIDIA 官方页提供 CUDA 核心、显存、总线、速度、带宽和功耗；BF16 峰值是架构参数推导。",
+            measurement_basis="NVIDIA 官方页提供 CUDA 核心、显存、总线、速度和带宽；BF16 峰值是架构参数推导。",
             extras={
                 "component_scope": "compute_side_only",
                 "external_memory_modeled_in_metadata": False,
@@ -2144,7 +2018,6 @@ def _consumer_gpu_preset(
                     "memory_data_rate_gbps": {"value": memory_data_rate_gbps, "unit": "Gb/s_per_pin", "source_field": "Memory Speed"},
                     "memory_bus_bits": {"value": memory_bus_bits, "unit": "bit", "source_field": "Memory Interface Width"},
                     "memory_bandwidth_gb_s": {"value": memory_bandwidth_gb_s, "unit": "GB/s_decimal", "source_field": "Memory Bandwidth"},
-                    "tgp_watts": {"value": tgp_watts, "unit": "W", "source_field": "Total Graphics Power"},
                     "l2_capacity_bytes": {"value": l2_capacity_bytes, "unit": "B", "source_field": "NVIDIA RTX Blackwell Architecture Table 3; 65,536 KB"},
                     "bf16_dense_tflops": {"value": bf16_dense_tflops, "unit": "TFLOP/s", "status": "vendor_declared_blackwell_table_4"},
                 },
@@ -2377,7 +2250,7 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
         evidence_level=A_ANALYTICAL,
         limitations=(
             "1.024 TB/s 是 HBM3E 常见速度档分析模板；公开供应商页面也可能展示更高峰值。",
-            "带宽按公开 HBM3E 接口形态线性换算，未引入供应商时序、ECC 或功耗模型。",
+            "带宽按公开 HBM3E 接口形态线性换算，未引入供应商时序或 ECC 模型。",
         ),
         notes="适用于需要早期或常见 HBM3E 速度档、而不是最高公开速度档的拓扑分析。",
         sources=(SAMSUNG_HBM3E_SOURCE, MICRON_HBM3E_SOURCE),
@@ -2427,7 +2300,6 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
         fp8_dense_tflops=1979.0,
         fp8_sparse_tflops=3958.0,
         bf16_sparse_tflops=1979.0,
-        tdp_watts=700,
         mig_profiles="up to 7 MIGs @ 10GB each",
         sources=(NVIDIA_H100_SOURCE,),
     ),
@@ -2442,7 +2314,6 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
         fp8_dense_tflops=1979.0,
         fp8_sparse_tflops=3958.0,
         bf16_sparse_tflops=1979.0,
-        tdp_watts=700,
         mig_profiles="up to 7 MIGs @ 18GB each",
         sources=(NVIDIA_H200_SOURCE,),
     ),
@@ -2552,7 +2423,7 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
                 extras={
                     "read_latency_ns": 4000.0,
                     "write_latency_ns": 75000.0,
-                    "physical_memory_config": _analytical_nand_config(
+                    "physical_memory_config": make_analytical_nand_config(
                         kind="HBF", capacity_bytes=_gb(512.0),
                         read_bandwidth_gbps=3904.0,
                         write_bandwidth_gbps=217.6,
@@ -2563,10 +2434,6 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
                     "max_outstanding_requests": 32,
                     "dma_bandwidth_gbps": 2048.0,
                     "dma_latency_ns": 800.0,
-                    "dma_energy_pj_per_byte": 0.0,
-                    "unknown_value_sentinels": {
-                        "dma_energy_pj_per_byte": "0.0 means unknown/not declared, not zero energy",
-                    },
                     "storage_transport_parameter_basis": (
                         "editable analytical HBF controller/queue defaults; public evidence "
                         "only supports the separately declared capacity and read envelope"
@@ -2610,7 +2477,6 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
                     "cost_profile_template": {
                         "bandwidth_gb_s": 488.0,
                         "efficiency": 1.0,
-                        "energy_pj_per_byte": 12.0,
                         "resource_id": "ocp_hbf_2026_512gb.memory",
                         "name": "HBF analytical active-memory profile",
                         "read_latency_ns": 4000.0,
@@ -2670,7 +2536,7 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
                 sources=(INTERNAL_CIM_SOURCE,),
                 evidence_level=A_ANALYTICAL,
                 limitations=(
-                    "分析模板，不对应具体流片产品；能效、面积、频率和编译器约束需要按研究假设调整。",
+                    "分析模板，不对应具体流片产品；面积、频率和编译器约束需要按研究假设调整。",
                     "适合 MoE expert/MLP 权重驻留或近存计算探索，不自动修改 placement。",
                 ),
                 notes="内置数字 SRAM-CIM 分析模板，与参考场景的容量和互连规模保持一致。",
@@ -2680,7 +2546,7 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
                     "value_scope": "单个数字 SRAM-CIM 分析 tile",
                     "conditions": [
                         "非产品规格",
-                        "需要按研究假设调整能效、面积、频率和编译器约束",
+                        "需要按研究假设调整面积、频率和编译器约束",
                     ],
                     "derived_formula": "256 GB/s 乘以 8，写入 IR 带宽字段",
                     "expires_at": "2027-08-22",
@@ -2697,7 +2563,7 @@ _LEGACY_PRESETS: Tuple[ComponentPresetDefinition, ...] = (
         sources=(INTERNAL_CIM_SOURCE,),
         evidence_level=A_ANALYTICAL,
         limitations=(
-            "分析模板，不对应具体流片产品；能效、面积、频率和编译器约束需要按研究假设调整。",
+            "分析模板，不对应具体流片产品；面积、频率和编译器约束需要按研究假设调整。",
             "适合 MoE expert/MLP 权重驻留或近存计算探索，不自动修改 placement。",
         ),
         notes="内置数字 SRAM-CIM 分析模板，与参考场景的容量和互连规模保持一致。",
@@ -2826,7 +2692,7 @@ _GDDR6_REFERENCE = _gddr_preset(
     evidence_level=A_ANALYTICAL,
     limitations=(
         "GDDR6 20Gb/s 与 16GB/256-bit 是可编辑分析组合，不对应单一厂商 SKU。",
-        "时序、效率、能耗和持续带宽保留为分析参数，不能解读为器件级实测。",
+        "时序、效率和持续带宽保留为分析参数，不能解读为器件级实测。",
     ),
     notes="GDDR6 分析参考：20Gb/s/pin × 256-bit ÷ 8 = 640GB/s。",
     sources=(MICRON_GDDR_SOURCE,),
@@ -2936,7 +2802,6 @@ _SK_HYNIX_HBF.component.metadata["capability_status"] = {
     "write_bandwidth_gbps": "analytical_user_configured",
     "read_latency_ns": "analytical_user_configured",
     "write_latency_ns": "analytical_user_configured",
-    "dma_energy_pj_per_byte": "not_published",
 }
 _SK_HYNIX_HBF.component.metadata["facts"] = {
     "读带宽": "488 GB/s（用户指定分析参数）",
@@ -2944,7 +2809,6 @@ _SK_HYNIX_HBF.component.metadata["facts"] = {
     "读延迟": "4 us（用户指定分析参数）",
     "写延迟": "75 us（用户指定分析参数）",
     "链路协议": "HBF（逻辑）；UCIe（物理承载）",
-    "DMA 能耗状态": "未公开（not_published）；不得按 0 pJ/B 宣称零能耗",
 }
 _SK_HYNIX_HBF.component.metadata.update({
     # Opt in to the typed active-memory contract so the default B200
@@ -2963,7 +2827,6 @@ _SK_HYNIX_HBF.component.metadata.update({
     "cost_profile_template": {
         "bandwidth_gb_s": 488.0,
         "efficiency": 1.0,
-        "energy_pj_per_byte": 12.0,
         "resource_id": "sk_hynix_hbf_512gb.memory",
         "name": "HBF analytical active-memory profile",
         "read_latency_ns": 4000.0,
@@ -3064,7 +2927,7 @@ _SAMSUNG_DDR5.component.metadata["parameter_basis"] = {
     "read_bandwidth_gbps": "5600 MT/s × 64-bit payload ÷ 8 × 8 = 358.4 Gb/s",
     "write_bandwidth_gbps": "directional payload envelope; controller efficiency remains analytical",
 }
-_SAMSUNG_DDR5.component.metadata["physical_memory_config"] = _analytical_dram_config(
+_SAMSUNG_DDR5.component.metadata["physical_memory_config"] = make_analytical_dram_config(
     kind="DDR", generation="DDR5", capacity_bytes=_gb(32.0),
     read_bandwidth_gbps=358.4, write_bandwidth_gbps=358.4,
     channels=1, scope="single_samsung_ddr5_32gb_udimm_module",
@@ -3247,7 +3110,7 @@ _SRAM_CIM = _curated_clone(
     evidence_level=A_ANALYTICAL,
     limitations=(
         "仅为分析参考，不对应公开量产器件或特定厂家 SKU。",
-        "容量、OPS、片上带宽、能效和频率均需按研究假设或实测校准。",
+        "容量、OPS、片上带宽和频率均需按研究假设或实测校准。",
     ),
     notes="保留一个 SRAM-CIM 分析模板，明确不冒充厂家参数。",
     provenance={
@@ -3262,7 +3125,7 @@ _B200_GPU = _gpu_preset(
     device_memory_bandwidth_gbps=64000.0,
     bf16_dense_tflops=2250.0, fp8_dense_tflops=4500.0,
     fp8_sparse_tflops=9000.0, bf16_sparse_tflops=4500.0,
-    tdp_watts=1000, mig_profiles="未公开 MIG 配置",
+    mig_profiles="未公开 MIG 配置",
     sources=(NVIDIA_DGX_B200_OFFICIAL_SOURCE, NVIDIA_B200_OFFICIAL_SOURCE),
 )
 _B200_GPU = _curated_clone(
@@ -3279,14 +3142,13 @@ _B200_GPU = _curated_clone(
         "read_bandwidth_gbps": 0.0,
         "write_bandwidth_gbps": 0.0,
     },
-    technology_updates={"architecture": "NVIDIA Blackwell", "vendor": "NVIDIA", "device_memory_gb": 180.0, "device_memory_bandwidth_gbps": 64000.0, "bf16_tensor_dense_tflops": 2250.0, "tdp_watts": 1000},
+    technology_updates={"architecture": "NVIDIA Blackwell", "vendor": "NVIDIA", "device_memory_gb": 180.0, "device_memory_bandwidth_gbps": 64000.0, "bf16_tensor_dense_tflops": 2250.0},
     provenance={
         "device_memory_gb": {"value": 180, "unit": "GB_decimal", "formula": "DGX B200 1440GB ÷ 8 GPUs"},
         "device_memory_bandwidth_gbps": {"value": 64000, "unit": "Gb/s_decimal_one_way", "formula": "DGX B200 64TB/s ÷ 8 GPUs × 8"},
         "component_read_bandwidth_gbps": {"formula": "device memory aggregate 8TB/s × 8 = 64000Gb/s", "scope": "attached HBM3E aggregate"},
         "component_write_bandwidth_gbps": {"formula": "same directional HBM3E aggregate envelope", "status": "derived_directional_envelope"},
         "bf16_dense_tflops": {"value": 2250, "unit": "TFLOP/s", "status": "vendor Blackwell dense tensor aggregate"},
-        "tdp_watts": {"value": 1000, "unit": "W", "status": "vendor product power class"},
     },
 )
 _B200_GPU_PORTS = tuple(
@@ -3346,7 +3208,6 @@ _RYZEN_9_9950X3D = _desktop_cpu_preset(
     boost_clock_ghz=5.7,
     l2_capacity_bytes=16 * 1024 * 1024,
     l3_capacity_bytes=128 * 1024 * 1024,
-    tdp_watts=170,
     memory_data_rate_mt_s=5600,
     memory_channels=2,
     source=AMD_RYZEN_9_9950X3D_SOURCE,
@@ -3366,7 +3227,6 @@ _RTX_5080 = _consumer_gpu_preset(
     memory_bus_bits=256,
     memory_bandwidth_gb_s=960.0,
     l2_capacity_bytes=64 * 1024 * 1024,
-    tgp_watts=360,
     bf16_dense_tflops=112.6,
     source=NVIDIA_RTX_5080_SOURCE,
     architecture_source=NVIDIA_BLACKWELL_ARCHITECTURE_PDF_SOURCE,

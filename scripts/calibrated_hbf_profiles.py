@@ -297,9 +297,6 @@ def _profile_specs() -> tuple[CalibratedProfile, ...]:
                 "hbm_write_gb_s": 4000,
                 "hbf_read_gb_s": 1200,
                 "hbf_write_gb_s": 1200,
-                "thermal_effective_cap_gb_s": 202.27,
-                "thermal_power_w": 53.72,
-                "mapping": "nominal and thermal-cap runs are separate; do not add the cap to nominal bandwidth",
             },
             latency={
                 "hbf_read_us": 20,
@@ -315,7 +312,6 @@ def _profile_specs() -> tuple[CalibratedProfile, ...]:
             },
             buffering={
                 "controller_page_cache": "two page-cache buffers per bank (OCP §5.3)",
-                "thermal_throttle": True,
                 "source": "OCP/Section 8.1",
             },
             slo={
@@ -334,7 +330,6 @@ def _profile_specs() -> tuple[CalibratedProfile, ...]:
             calibration_notes=(
                 "Table 3(c) bandwidth is a shared secondary-tier modeled value; it is mapped to the host leg and not counted twice.",
                 "The paper supplies full TokenSim trace scheduling, near-tier capacity changes and queueing; this profile only supplies the physical memory path.",
-                "The thermal cap is reported as a separate sensitivity because it is a sustained write-heavy limit.",
             ),
         ),
         CalibratedProfile(
@@ -555,7 +550,7 @@ def _stream(core_hbm: Optional[DramCore], core_hbf: Optional[NandCore], *,
     }
 
 
-def _profile_hardware(profile: CalibratedProfile, *, thermal: bool = False,
+def _profile_hardware(profile: CalibratedProfile, *,
                       latency_override_us: Optional[tuple[float, float]] = None) -> tuple[Optional[DramCore], Optional[NandCore], dict[str, Any]]:
     p = profile
     bw = p.bandwidth
@@ -563,9 +558,6 @@ def _profile_hardware(profile: CalibratedProfile, *, thermal: bool = False,
     hbf_write_declared = bw.get("hbf_write_gb_s")
     hbf_write = float(hbf_write_declared or 0)
     applied = "nominal"
-    if thermal and bw.get("thermal_effective_cap_gb_s"):
-        hbf_read = hbf_write = float(bw["thermal_effective_cap_gb_s"])
-        applied = "thermal_effective_cap"
     hbm_read = float(bw.get("hbm_read_gb_s", 0) or 0)
     hbm_write = float(bw.get("hbm_write_gb_s", 0) or 0)
     hbm_cap = p.hardware.get("hbm_capacity_gb")
@@ -1119,12 +1111,12 @@ def _full_backend_summary(
     }
 
 
-def run_profile(profile: CalibratedProfile, *, thermal: bool = False,
+def run_profile(profile: CalibratedProfile, *,
                 kv_pages: int = 8, steps: int = 4,
                 latency_override_us: Optional[tuple[float, float]] = None) -> dict[str, Any]:
     if kv_pages < 2 or steps < 1:
         raise ValueError("kv_pages must be at least 2 and steps must be positive")
-    hbm, hbf, applied = _profile_hardware(profile, thermal=thermal, latency_override_us=latency_override_us)
+    hbm, hbf, applied = _profile_hardware(profile, latency_override_us=latency_override_us)
     traffic_page_bytes = hbf.config.page_bytes if hbf is not None else PAGE
     hbm_only = None
     if hbm is not None:
@@ -1149,7 +1141,7 @@ def run_profile(profile: CalibratedProfile, *, thermal: bool = False,
     if hbf is not None and profile.profile_id != "hot_cold_b200":
         # Each alternative starts with fresh resource queues.  Reusing the
         # baseline HBM core makes the HBF run wait for the preceding experiment.
-        hbm, hbf, _ = _profile_hardware(profile, thermal=thermal, latency_override_us=latency_override_us)
+        hbm, hbf, _ = _profile_hardware(profile, latency_override_us=latency_override_us)
         all_hbf = _stream(
             hbm, hbf, kv_pages=kv_pages, steps=steps,
             kv_read_tier="hbf", kv_write_tier="hbf",
@@ -1161,7 +1153,7 @@ def run_profile(profile: CalibratedProfile, *, thermal: bool = False,
         # Run with half the KV pages cold in HBF.  The cold tier is read on
         # the fixed stream, while generated KV remains an HBM write-on-evict
         # approximation for the mechanism comparison.
-        hbm, hbf, _ = _profile_hardware(profile, thermal=thermal, latency_override_us=latency_override_us)
+        hbm, hbf, _ = _profile_hardware(profile, latency_override_us=latency_override_us)
         cores = {"hbm": hbm, "hbf": hbf}
         by_tier: dict[str, list[Any]] = {"hbm": [], "hbf": []}
         clock = 0.0
@@ -1206,9 +1198,8 @@ def run_profile(profile: CalibratedProfile, *, thermal: bool = False,
             result["slo_scope"] = "maximum single-step memory service only; excludes compute and serving queueing"
     return {
         "profile_id": profile.profile_id,
-        "variant": "thermal_cap" if thermal else "nominal",
+        "variant": "nominal",
         "latency_override_us": latency_override_us,
-        "thermal": thermal,
         "applied": applied,
         "hbm_only": hbm_only,
         "all_hbf": all_hbf,
@@ -1332,7 +1323,6 @@ def build_report() -> dict[str, Any]:
         }
         results.append(nominal)
         if profile.profile_id == "hbf_sucks_hbf2_b200":
-            results.append(run_profile(profile, thermal=True))
             latency_sweep = []
             for read_us, write_us in profile.latency["sweep_us_read_write"]:
                 sweep = run_profile(profile, latency_override_us=(read_us, write_us))
@@ -1377,7 +1367,7 @@ def build_report() -> dict[str, Any]:
         "comparison_matrix": _comparison_matrix([row for row in results if "profile_id" in row and "hbm_only" in row]),
         "execution_plan_status": {
             "scope": "This runner produces parameterized memory diagnostics and eight small serving runs; it does not execute the complete research/acceptance plan.",
-            "executed": ["physical_memory_alternatives", "media_latency_sweep", "static_bandwidth_cap_sensitivity", "resume_block_fetch", "paired_full_backend_kv_probe"],
+            "executed": ["physical_memory_alternatives", "media_latency_sweep", "resume_block_fetch", "paired_full_backend_kv_probe"],
             "not_assessed_here": ["full_eight_experiment_matrix", "capacity_and_arrival_rate_sweeps", "write_buffer_acceptance", "session_lifecycle_acceptance", "package_tradeoff", "dense_and_moe_weight_placement", "direct_relay_dual_path", "named_GPU_validation", "paper_trace_reproduction"],
             "implementation_complete": None,
             "overall_plan_complete": None,
@@ -1392,7 +1382,6 @@ def build_report() -> dict[str, Any]:
             "Hot-Cold original agent trajectories and simulator are not public; the block-fetch run is a mechanism check only.",
             "HBF+ serving retains an extra HBM support tier; it is a synthetic KV-placement probe, not the paper's HBF-only package.",
             "Hot-Cold writable serving uses explicit assumed write bandwidth/program latency; its published read-only resume diagnostic does not validate these assumptions.",
-            "The thermal-cap row is a fixed bandwidth sensitivity, not a dynamic temperature/throttling simulation.",
             "Full-backend TPS/TTFT/TPOT/SLO-goodput are reported for a small synthetic trace, but are not paper-comparable without the paper model, trace and topology.",
         ],
     }

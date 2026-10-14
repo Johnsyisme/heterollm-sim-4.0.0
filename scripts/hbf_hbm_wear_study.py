@@ -1,4 +1,4 @@
-"""Opt-in physical NAND thermal/wear feedback, with explicit synthetic inputs.
+"""Opt-in physical NAND wear feedback, with explicit synthetic inputs.
 
 All delays below are produced by NandCore during execution. This study does
 not rescale an existing token-throughput result or claim silicon calibration.
@@ -14,20 +14,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 
-from heterollm_sim.memory_types import (AccessRequest, Operation, NandThermalConfig,
+from heterollm_sim.memory_types import (AccessRequest, Operation,
     NandWearConfig, make_hbf_config, parse_physical_memory_config)
 from heterollm_sim.nand_core import NandCore, summarize_nand_observations
 
 PAGE = 4096
 ASSUMPTION = "Authored stress sensitivity, not measured HBF/NAND properties or a silicon lifetime forecast"
-
-
-def thermal_assumption(*, serving=False):
-    return NandThermalConfig(ambient_c=35., initial_c=35., resistance_k_per_w=1.,
-        capacitance_j_per_k=0.00001 if serving else 0.001,
-        active_power_w=30., idle_power_w=0., throttle_threshold_c=45.,
-        hysteresis_c=5., throttled_service_rate=0.5, throttled_power_fraction=0.8,
-        assumption=ASSUMPTION + "; independent physical planes without mutual heating")
 
 
 def wear_assumption(*, initial_pe_cycles=2968):
@@ -36,9 +28,9 @@ def wear_assumption(*, initial_pe_cycles=2968):
         assumption=ASSUMPTION + "; authored program latency doubles at rated P/E and then caps")
 
 
-def run_controlled_trace(*, thermal_enabled=True, wear_enabled=True, cycles=32,
+def run_controlled_trace(*, wear_enabled=True, cycles=32,
                          idle_ns=32e6):
-    """Explicit erase/program bursts and skewed reads, with real idle cooling.
+    """Explicit erase/program bursts and skewed reads, with explicit idle intervals.
 
     Erases are submitted by the trace, not inferred from bytes or hidden FTL.
     Four physical planes share two execution slots; each cycle programs the
@@ -55,7 +47,6 @@ def run_controlled_trace(*, thermal_enabled=True, wear_enabled=True, cycles=32,
         host_bandwidth_gb_s=100., internal_bandwidth_gb_s=100.,
         page_read_ns=4000., page_program_ns=75000., block_erase_ns=3e6, front_ns=0.,
         detailed_observability=True,
-        dynamic_thermal=thermal_assumption() if thermal_enabled else None,
         wear_model=wear_assumption() if wear_enabled else None)
     core = NandCore(config, capture_details=False)
     observations, cycle_rows = [], []
@@ -82,9 +73,9 @@ def run_controlled_trace(*, thermal_enabled=True, wear_enabled=True, cycles=32,
                            "following_idle_ns":idle_ns if cycle+1 < cycles else 0.})
         now = read_done + (idle_ns if cycle+1 < cycles else 0.)
     summary = summarize_nand_observations(observations)
-    return {"id":f"trace-thermal-{int(thermal_enabled)}-wear-{int(wear_enabled)}",
+    return {"id":f"trace-wear-{int(wear_enabled)}",
         "mode":"physical_nand_trace_microbenchmark", "node_tps":None,
-        "thermal_enabled":thermal_enabled, "wear_enabled":wear_enabled,
+        "wear_enabled":wear_enabled,
         "assumption_status":"explicit_uncalibrated_sensitivity",
         "applied_config":asdict(config), "cycles":cycles, "request_count":operation_count,
         "duration_ns":now, "cycle_timeline":cycle_rows, **byte_totals,
@@ -94,7 +85,7 @@ def run_controlled_trace(*, thermal_enabled=True, wear_enabled=True, cycles=32,
         "wear_scope":"P/E equals initial authored cycles plus actual explicit block erases. Programs alone never imply erase. No FTL, ECC, data corruption or hard end-of-life failure model."}
 
 
-def build_feedback_scenario(architecture, *, thermal_enabled, wear_enabled=False,
+def build_feedback_scenario(architecture, *, wear_enabled=False,
                             prompt=128, output=8):
     from hbf_hbm_serving_study import build_study_scenario
     scenario = build_study_scenario(architecture, prompt=prompt, batch=1, output=output,
@@ -105,7 +96,6 @@ def build_feedback_scenario(architecture, *, thermal_enabled, wear_enabled=False
             metadata = {key:value for key,value in component.metadata.items() if key != "memory_service"}
             config = parse_physical_memory_config(metadata["physical_memory_config"])
             metadata["physical_memory_config"] = replace(config, detailed_observability=True,
-                dynamic_thermal=thermal_assumption(serving=True) if thermal_enabled else None,
                 wear_model=wear_assumption(initial_pe_cycles=3000) if wear_enabled else None)
             component = replace(component, metadata=metadata)
         components.append(component)
@@ -118,14 +108,10 @@ def run_serving_feedback():
     # Identical requests, GPU, memory capacities, weights and placement per pair.
     # The A pair is a negative control: its active path never uses HBF.
     for architecture in ("A_hbm_only", "B_all_kv_hbf"):
-        modes = ((False, False), (True, True)) if architecture == "A_hbm_only" else (
-            (False, False), (True, False), (False, True), (True, True))
-        for thermal_enabled, wear_enabled in modes:
-            row = serving_row(build_feedback_scenario(architecture,
-                thermal_enabled=thermal_enabled, wear_enabled=wear_enabled),
-                f"14-{architecture}-thermal-{int(thermal_enabled)}-wear-{int(wear_enabled)}", placement=architecture)
-            row["thermal_wear_assumptions"] = {
-                "thermal":asdict(thermal_assumption(serving=True)) if thermal_enabled else None,
+        for wear_enabled in (False, True):
+            row = serving_row(build_feedback_scenario(architecture, wear_enabled=wear_enabled),
+                f"14-{architecture}-wear-{int(wear_enabled)}", placement=architecture)
+            row["wear_assumptions"] = {
                 "wear":asdict(wear_assumption(initial_pe_cycles=3000)) if wear_enabled else None,
                 "mode":"online physical-stage feedback, affecting actual serving dependencies",
                 "wear_scope":"pre-aged initial P/E sensitivity; serving has no implicit erases",
@@ -134,42 +120,35 @@ def run_serving_feedback():
     return rows
 
 
-def run_thermal_wear_study():
-    traces = [run_controlled_trace(thermal_enabled=thermal, wear_enabled=wear)
-              for thermal, wear in ((False, False), (True, False), (False, True), (True, True))]
+def run_wear_study():
+    traces = [run_controlled_trace(wear_enabled=wear) for wear in (False, True)]
     rows = run_serving_feedback()
-    control, thermal, wear, combined = traces
-    a0, a1, b0, bt, bw, b1 = rows
+    control, wear = traces
+    a0, a1, b0, b1 = rows
     checks = {
         "identical_microbenchmark_bytes":len({(r["logical_bytes"],r["physical_read_bytes"],r["physical_write_bytes"]) for r in traces})==1,
         "long_trace_at_least_one_second":all(r["duration_ns"]>=1e9 for r in traces),
         "explicit_erase_program_conservation":all(r["observations"]["actual_erase_operations"]==4*r["cycles"] and r["observations"]["actual_program_operations"]==4*r["cycles"] for r in traces),
-        "thermal_changes_actual_completion":thermal["duration_ns"]>control["duration_ns"] and thermal["observations"]["thermal_extra_ns"]>0,
-        "idle_cooling_releases_throttle":combined["observations"]["idle_recoveries"]>0,
         "wear_changes_subsequent_program_work":wear["duration_ns"]>control["duration_ns"] and all(b["pe_cycles_after"]==3000 for b in wear["observations"]["wear_blocks"].values()),
-        "real_read_and_program_queues_recorded":combined["observations"]["read_queue_depth"]["peak"]>0 and combined["observations"]["program_queue_depth"]["peak"]>0,
-        "four_physical_planes_distinct_from_two_slots":combined["observations"]["physical_plane_imbalance"]["observed_planes"]==4 and len({e["execution_resource"] for e in combined["observations"]["events"]})==2,
+        "real_read_and_program_queues_recorded":wear["observations"]["read_queue_depth"]["peak"]>0 and wear["observations"]["program_queue_depth"]["peak"]>0,
+        "four_physical_planes_distinct_from_two_slots":wear["observations"]["physical_plane_imbalance"]["observed_planes"]==4 and len({e["execution_resource"] for e in wear["observations"]["events"]})==2,
         "full_serving_complete":all(r["completed_requests"]==r["request_count"]==2 and r["visible_output_tokens"]==16 for r in rows),
         "hbm_negative_control_unchanged":a0["node_tps"]==a1["node_tps"] and a0["ttft_ns"]==a1["ttft_ns"],
-        "hbf_feedback_reaches_request_metrics":b1["node_tps"]<b0["node_tps"] and b1["ttft_ns"]["p50"]>b0["ttft_ns"]["p50"] and b1["memory_metrics"]["dynamic_thermal_wear"]["thermal_extra_ns"]>0,
-        "thermal_only_feedback_reaches_serving":bt["node_tps"]<b0["node_tps"] and bt["memory_metrics"]["dynamic_thermal_wear"]["thermal_extra_ns"]>0,
-        "wear_only_feedback_reaches_serving":bw["node_tps"]<b0["node_tps"] and bw["memory_metrics"]["dynamic_thermal_wear"]["wear_extra_ns"]>0,
+        "hbf_feedback_reaches_request_metrics":b1["node_tps"]<b0["node_tps"] and b1["ttft_ns"]["p50"]>b0["ttft_ns"]["p50"] and b1["memory_metrics"]["dynamic_wear"]["wear_extra_ns"]>0,
         "serving_does_not_infer_erase_cycles":all(r["resources"]["storage_traffic"].get("nand_observations",{}).get("actual_erase_operations",0)==0 for r in rows),
     }
-    return {"id":"14_thermal_wear", "title":"动态温度、显式擦写磨损与真实页队列/plane反馈",
+    return {"id":"14_wear", "title":"显式擦写磨损与真实页队列/plane反馈",
         "status":"passed" if all(checks.values()) else "failed", "checks":checks,
         "capability":{"supported":all(checks.values()), "modeled":True,"calibrated":False,
-            "scope":"independent physical-plane RC state, explicit per-block erase counts, program-latency wear assumption, eligible page queue timelines and actual mapped plane loads"},
+            "scope":"explicit per-block erase counts, program-latency wear assumption, eligible page queue timelines and actual mapped plane loads"},
         "rows":rows, "trace_rows":traces,
         "serving_comparisons":[{"placement":architecture,
             "baseline_id":base["id"],"feedback_id":feedback["id"],
             "feedback_over_baseline_tps":feedback["node_tps"]/base["node_tps"],
             "feedback_over_baseline_ttft_p50":feedback["ttft_ns"]["p50"]/base["ttft_ns"]["p50"]}
-            for architecture,base,feedback in (("A_hbm_only",a0,a1),("B_all_kv_hbf",b0,bt),
-                ("B_all_kv_hbf",b0,bw),("B_all_kv_hbf",b0,b1))],
+            for architecture,base,feedback in (("A_hbm_only",a0,a1),("B_all_kv_hbf",b0,b1))],
         "limitations":[
-            "All thermal powers, RC constants, thresholds and wear-latency curves are explicit stress assumptions, not vendor specs or external calibration.",
-            "Thermal state is per authored physical plane without package coupling; summed throttle plane-ns is not elapsed device throttle time.",
+            "Wear-latency curves are explicit stress assumptions, not vendor specs or external calibration.",
             "Read/program queues measure eligible-to-array-start wait excluding service. Program eligibility follows data arrival at the NAND plane; host admission and buffer waits are separate.",
             "Physical-plane load follows configured address mapping. Effective execution slots may be shared and are reported separately.",
             "P/E advances only on trace-authored block erase; FTL, automatic GC, ECC, retention, cell contents and end-of-life failure remain outside this study.",
@@ -180,9 +159,9 @@ def run_thermal_wear_study():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=Path, default=ROOT/"artifacts/hbf_hbm/14_thermal_wear.json")
+    parser.add_argument("--out", type=Path, default=ROOT/"artifacts/hbf_hbm/14_wear.json")
     args = parser.parse_args()
-    result = run_thermal_wear_study()
+    result = run_wear_study()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     print(json.dumps({"status":result["status"],"checks":result["checks"],"out":str(args.out)}))

@@ -1,4 +1,4 @@
-"""Physical task admission, rollback and endpoint energy accounting."""
+"""Physical task admission, rollback and endpoint byte accounting."""
 from dataclasses import replace
 
 import pytest
@@ -98,7 +98,7 @@ def test_task_aggregates_buffer_waits_and_merges_instead_of_last_request():
 
 
 @pytest.mark.parametrize("medium", ["dram", "nand"])
-def test_memory_energy_is_charged_once_and_compute_demand_preserved(medium):
+def test_memory_bytes_are_charged_once_and_compute_demand_preserved(medium):
     if medium == "dram":
         config = make_hbm_config(capacity_bytes=1024 * 1024, burst_bytes=64)
         expected_media_bytes = 64
@@ -107,13 +107,11 @@ def test_memory_energy_is_charged_once_and_compute_demand_preserved(medium):
         # A one-byte partial page write reads and programs one whole page.
         expected_media_bytes = 2 * 16384
     original = task(config, [{"operation": "write", "address": 0, "byte_count": 1,
-                              "resource_id": "memory"}], physical_energy_pj_per_byte=3.0)
+                              "resource_id": "memory"}])
     original = replace(original, demands=(ResourceDemand("gpu:compute", 200),
                                           ResourceDemand("memory", 999999)))
     resolved = resolve_physical_task(original, PhysicalRuntimeContext(), 0.0)
     execution = resolved.metadata["physical_execution"]
     assert execution["physical_bytes"] == expected_media_bytes
-    assert execution["energy_pj"] == pytest.approx(3.0 * expected_media_bytes)
-    assert sum(d.energy_pj for d in resolved.demands) == pytest.approx(3.0 * expected_media_bytes)
     assert resolved.demands[0] == ResourceDemand("gpu:compute", 200)
     assert all(d.resource_id != "memory" for d in resolved.demands)

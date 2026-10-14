@@ -21,7 +21,6 @@ from heterollm_sim.event_kernel import UnifiedEventKernel
 from heterollm_sim.ir import ComponentSpec, HardwareSpec, LayerSpec, LinkSpec
 from heterollm_sim.parallel import _layer_stage_cost, shard_extent
 from heterollm_sim.precision import canonical_dtype, layer_precision_bits
-from heterollm_sim.thermal import ThermalOperatingPoint, _derate_profile
 
 
 def cache():
@@ -60,7 +59,7 @@ def test_explicit_bf16_selects_its_own_compute_throughput(attention):
 
 @pytest.mark.parametrize("head_dim", [16, 24, 32])
 def test_attention_mma_padding_is_per_independent_head(head_dim):
-    device = gpu(tensor_energy_pj_per_op=2.)
+    device = gpu()
     work = FusedAttentionWorkload(16, 16, 8 * head_dim, score_heads=8,
                                   kv_hidden_size=2 * head_dim)
     result = estimate_gpu_fused_attention(device, HBMProfile(1000), work)
@@ -72,7 +71,6 @@ def test_attention_mma_padding_is_per_independent_head(head_dim):
     assert result.metadata["tensor_operations"] == 4 * 16 * 16 * 8 * head_dim
     demand = next(d for p in result.phases for d in p.demands
                   if d.resource_id == device.tensor_core.resource_id)
-    assert demand.energy_pj == issued * 2
     assert result.metadata["kv_read_bytes"] == 2 * 16 * 2 * head_dim * 2
 
 
@@ -81,35 +79,33 @@ def test_attention_rejects_fractional_head_width():
         FusedAttentionWorkload(1, 16, 65, score_heads=8)
 
 
-def test_pure_sfu_kernel_has_service_work_and_energy_without_fake_memory():
-    device = gpu(special_function_energy_pj_per_op=3.)
+def test_pure_sfu_kernel_has_service_and_work_without_fake_memory():
+    device = gpu()
     work = TensorKernelWorkload(0, 0, 0, transcendental_operations=10)
     result = estimate_gpu_tensor_kernel(device, HBMProfile(1000), work)
     assert result.service_ns == 10.
-    assert result.energy_pj == 30.
     assert result.bytes_moved == 0
     sfu = next(d for p in result.phases for d in p.demands
                if d.resource_id == device.special_function_resource_id)
     assert sfu.work_units == 10
 
 
-def test_cpu_gops_gpu_tops_and_sum_energy_max_service_units():
+def test_cpu_gops_gpu_tops_and_max_service_units():
     work = GemmWorkload(16, 16, 16, activation_bits=16, weight_bits=16)
-    device = gpu(tensor_energy_pj_per_op=2., kernel_launch_ns=5., launch_energy_pj=7.)
-    result = estimate_gpu_gemm(device, HBMProfile(1000, energy_pj_per_byte=3.), work)
+    device = gpu( kernel_launch_ns=5.)
+    result = estimate_gpu_gemm(device, HBMProfile(1000), work)
     assert result.metadata["compute_service_ns"] == 1.
     assert result.metadata["memory_service_ns"] == 1536 / 1000
     assert result.service_ns == 5. + max(1., 1536 / 1000)
-    assert result.energy_pj == 7. + 8192 * 2. + 1536 * 3.
     cpu = CPUProfile(CPUPipelineProfile(1, 1, 16, 4, 4, 4), cache())
     host = estimate_cpu_gemm(cpu, HostMemoryProfile(1000), work)
     assert host.metadata["throughput_compute_service_ns"] == 8192 / 2
 
 
 @pytest.mark.parametrize("m, segmented", [(1, False), (3, False), (3, True)])
-def test_cpu_generic_quantized_transform_energy_matches_scheduled_work(m, segmented):
+def test_cpu_generic_quantized_transform_matches_scheduled_work(m, segmented):
     cpu = CPUProfile(CPUPipelineProfile(1, 1, 16, 4, 4, 4), cache(),
-        gemm_energy_pj_per_op=1., elementwise_energy_pj_per_op=3.)
+        )
     work = GemmWorkload(m, 32, 4, activation_bits=16, weight_bits=4,
         packed_weight_formats=("Q4_0",), packed_weight_transform_operations=100,
         packed_weight_format_segments=(("Q4_0", 4, 100),) if segmented else ())
@@ -117,8 +113,6 @@ def test_cpu_generic_quantized_transform_energy_matches_scheduled_work(m, segmen
     operations = 100 * m if segmented else 100
     schedule = result.metadata["instruction_schedule"]
     assert schedule["packed_weight_transform_instructions"] == operations
-    assert schedule["auxiliary_energy_equivalent_operations"] == operations
-    assert result.energy_pj == work.operations + operations * 3
 
 
 def test_batch_evaluator_units_overlap_and_stable_ranking():
@@ -146,7 +140,7 @@ def router(*, shared=True, depth=1):
     nodes = tuple(ComponentSpec(c, "gpu") for c in ("a", "b"))
     edge = LinkSpec("ab", "a", "p", "b", "p", "pcie", bandwidth_gbps=8,
         latency_ns=20, metadata={"shared_bidirectional": shared,
-            "queue_depth": depth, "energy_pj_per_byte": 3})
+            "queue_depth": depth})
     return TopologyRouter(HardwareSpec("test", nodes, (edge,)))
 
 
@@ -163,11 +157,10 @@ def test_link_direction_sharing_serializes_bytes_not_latency_twice(shared, expec
     rows = [kernel.step(), kernel.step()]
     assert max(row.end_ns for row in rows) == expected
     assert sum(d.bytes_moved for task in tasks for d in task.demands) == 200
-    assert sum(d.energy_pj for task in tasks for d in task.demands) == 600
 
 
-def test_zero_byte_hop_has_no_startup_or_energy():
-    hop = RouteHop("link", "a", "b", "wire", 8, 50, 2)
+def test_zero_byte_hop_has_no_startup():
+    hop = RouteHop("link", "a", "b", "wire", 8, 50)
     assert hop.transfer_ns(0) == 0
     assert hop.demands(0) == ()
 
@@ -232,18 +225,9 @@ def test_sharding_never_loses_elements_or_accepts_fractional_dimensions():
             shard_extent(*args)
 
 
-def test_precision_storage_contract_and_static_frequency_derating():
+def test_precision_storage_contract():
     assert canonical_dtype("BFloat16") == "bf16"
     assert layer_precision_bits("bf16", "W4A8", unsupported_dtype_message="dtype") == (8, 4)
-    device = gpu()
-    slowed = _derate_profile(device, ThermalOperatingPoint("gpu", enabled=True,
-        frequency_scale=.5, evidence="test sensitivity; not calibrated"))
-    work = GemmWorkload(16, 16, 16, activation_bits=16, weight_bits=16)
-    original = estimate_gpu_gemm(device, HBMProfile(1000), work)
-    changed = estimate_gpu_gemm(slowed, HBMProfile(1000), work)
-    assert changed.metadata["compute_service_ns"] == original.metadata["compute_service_ns"] * 2
-    assert changed.bytes_moved == original.bytes_moved
-    assert changed.energy_pj == original.energy_pj
 
 
 @pytest.mark.parametrize("path, weight_format", [
@@ -268,12 +252,11 @@ def test_conversion_source_dag_preserves_input_padding_output_and_dependencies(p
         derive_conversion_work(m=3, k=543, weight_format=weight_format, path=path, contract=contract)
 
 
-def test_cim_bit_slices_reduction_and_cold_load_energy_conserve_work():
+def test_cim_bit_slices_reduction_and_cold_load_conserve_work():
     profile = DigitalSramCimProfile(array_count=4, p_m=1, p_k=4, p_n=4,
-        eval_energy_pj=5, load_energy_pj_per_byte=7,
-        activation_energy_pj_per_byte=3, output_energy_pj_per_byte=13,
-        noc_energy_pj_per_byte=11, accumulator_energy_pj_per_op=19,
-        peripheral_energy_pj_per_element=17)
+
+
+         )
     work = GemmWorkload(2, 8, 8, activation_bits=2, weight_bits=2)
     cold = estimate_cim_gemm(profile, work)
     warm = estimate_cim_gemm(profile, work, weights_resident=True)
@@ -281,8 +264,6 @@ def test_cim_bit_slices_reduction_and_cold_load_energy_conserve_work():
     array = cold.phase("cim_array_eval")
     assert next(d.work_units for d in array.demands if d.resource_id == profile.array_resource_id) == 32
     assert cold.phase("cim_accumulate_reduce").metadata["accumulation_ops"] == 112
-    assert cold.energy_pj == 32 * 5 + 16 * 7 + 4 * 3 + 68 * 11 + 112 * 19 + 16 * 17 + 32 * 13
-    assert cold.energy_pj - warm.energy_pj == 16 * 7
     assert cold.service_ns - warm.service_ns == cold.phase("weight_load").service_ns
 
 

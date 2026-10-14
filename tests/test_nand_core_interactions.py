@@ -1,13 +1,12 @@
-"""Cross-request staging readers and operation-local thermal windows."""
+"""Cross-request staging readers and media completion semantics."""
 import copy
 
 import pytest
 
 from heterollm_sim.data_motion import PhysicalRuntimeContext, _PhysicalRuntime
 from heterollm_sim.memory_transfer import ResourceTimeline
-from heterollm_sim.memory_types import AccessRequest, NandConfig, NandThermalConfig, Operation
-from heterollm_sim.nand_core import NandCore, summarize_nand_observations
-from heterollm_sim.thermal import advance_nand_thermal
+from heterollm_sim.memory_types import AccessRequest, NandConfig, Operation
+from heterollm_sim.nand_core import NandCore
 
 
 PAGE = 1024
@@ -23,39 +22,6 @@ def config(**updates):
                   page_read_ns=10., page_program_ns=20., block_erase_ns=100.)
     values.update(updates)
     return NandConfig(**values)
-
-
-def test_cold_operation_peak_excludes_the_previous_hot_operation_and_idle_gap():
-    thermal = NandThermalConfig(initial_c=75., capacitance_j_per_k=1e-7,
-                               active_power_w=10., idle_power_w=0., assumption='thermal window test')
-    core = NandCore(config(page_read_ns=100., dynamic_thermal=thermal))
-    hot = core.submit(request('hot', Operation.READ))
-    cold = core.submit(request('cold', Operation.READ, arrival=hot.completion_ns + 10000.))
-    event = cold.counters['nand_observations']['events'][0]
-    assert event['temperature_start_c'] == pytest.approx(35.)
-    assert event['temperature_end_c'] == pytest.approx(41.32120558828558)
-    assert event['peak_temperature_c'] == event['temperature_end_c']
-    assert event['duration_ns'] == 100.
-    assert event['thermal_extra_ns'] == event['thermal_throttle_ns'] == 0.
-    current = summarize_nand_observations([cold.counters['nand_observations']])
-    history = summarize_nand_observations([hot.counters['nand_observations'], cold.counters['nand_observations']])
-    assert current['peak_temperature_c'] == event['temperature_end_c']
-    assert history['peak_temperature_c'] == 75.
-
-
-def test_hysteresis_execution_time_and_state_are_invariant_to_serial_work_partition():
-    thermal = NandThermalConfig(capacitance_j_per_k=1e-6, active_power_w=50., idle_power_w=0.,
-                               throttled_power_fraction=.2, assumption='serial RC composition')
-    whole, whole_event = advance_nand_thermal(None, thermal, 0., 20000.)
-    state, events = None, []
-    for _ in range(20):
-        state, event = advance_nand_thermal(state, thermal, state['end_ns'] if state else 0., 1000.)
-        events.append(event)
-    assert state['end_ns'] == pytest.approx(whole['end_ns'], rel=1e-11)
-    assert state['temperature_c'] == pytest.approx(whole['temperature_c'], rel=1e-11)
-    assert state['throttled'] == whole['throttled']
-    assert sum(e['thermal_throttle_ns'] for e in events) == pytest.approx(whole_event['thermal_throttle_ns'])
-    assert whole_event['thermal_switches'] > 0
 
 
 @pytest.mark.parametrize('partial', [False, True])

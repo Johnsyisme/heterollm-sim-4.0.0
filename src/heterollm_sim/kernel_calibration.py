@@ -345,7 +345,7 @@ class KernelExecutionContext:
 def _phase_signature(phase: CostPhase) -> str:
     return _digest_document({"name": phase.name, "category": phase.category.value,
         "demands": [{"resource_id": d.resource_id, "service_ns": d.service_ns,
-                     "bytes_moved": d.bytes_moved, "energy_pj": d.energy_pj,
+                     "bytes_moved": d.bytes_moved,
                      "work_units": d.work_units} for d in phase.demands],
         "metadata": _plain(phase.metadata)})
 
@@ -1180,7 +1180,7 @@ def apply_kernel_calibration(phase: CostPhase, profile: KernelCalibrationProfile
                               execution_context: KernelExecutionContext | None = None, invocation_id: str | None = None) -> CostPhase:
     """Append one conditional device envelope in the SAME concurrent phase.
 
-    Existing analytical demands, bytes, energy and launch phases are preserved.
+    Existing analytical demands, bytes and launch phases are preserved.
     The returned duration is max(analytical, measured), never their sum.  Only a
     hash-verified, explicitly single-stream owner may introduce the envelope.
     """

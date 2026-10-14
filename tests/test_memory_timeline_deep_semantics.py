@@ -5,7 +5,6 @@ import pytest
 
 from heterollm_sim.data_motion import PhysicalRuntimeContext
 from heterollm_sim.memory_transfer import ResourceTimeline
-from heterollm_sim.memory_types import NandThermalConfig
 
 
 def test_direction_history_and_lane_choice_are_slot_local():
@@ -68,13 +67,3 @@ def test_overflowing_reservation_rejects_without_publishing_infinity():
     with pytest.raises(ValueError, match="finite timing"):
         timeline.reserve("wire", 1e308, 1e308)
     assert vars(timeline) == before
-
-
-@pytest.mark.parametrize("values", [
-    {"resistance_k_per_w": 1e-250, "capacitance_j_per_k": 1e-250},
-    {"resistance_k_per_w": 1e250, "capacitance_j_per_k": 1e250},
-    {"resistance_k_per_w": 1e100, "capacitance_j_per_k": 1e-100, "active_power_w": 1e250},
-])
-def test_unrepresentable_thermal_derived_values_are_rejected(values):
-    with pytest.raises(ValueError, match="thermal .*finite"):
-        NandThermalConfig(assumption="synthetic numerical boundary", **values)

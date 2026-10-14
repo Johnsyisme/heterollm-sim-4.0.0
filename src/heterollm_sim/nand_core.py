@@ -31,7 +31,7 @@ class _StagedPage:
 
 
 class NandCore:
-    """Page read/program/erase with optional thermal and explicit erase wear.
+    """Page read/program/erase with optional explicit erase wear.
 
     There is no FTL, garbage collector or cell-content validity model.
     """
@@ -72,10 +72,9 @@ class NandCore:
         self._staged_pages: Dict[tuple[int, ...], _StagedPage] = {}
         self._buffer_merge_bytes = 0
         self._media_drain_completion_ns = 0.0
-        self._plane_thermal_state: Dict[str, dict] = {}
         self._block_wear_state: Dict[str, dict] = {}
         self._observation_events: list[dict] = []
-        self._observe_media = bool(config.detailed_observability or config.dynamic_thermal or config.wear_model)
+        self._observe_media = bool(config.detailed_observability or config.wear_model)
 
     @property
     def buffered_write_mode(self) -> bool:
@@ -175,13 +174,6 @@ class NandCore:
                     Fraction.from_float(float(growth))*pe_before/wear_config.rated_pe_cycles)
             wear_scale = min(wear_config.max_program_latency_scale, 1.+float(extra))
         work = float(duration)*wear_scale
-        thermal = {}
-        if self.config.dynamic_thermal:
-            from .thermal import advance_nand_thermal
-            state, thermal = advance_nand_thermal(self._plane_thermal_state.get(plane),
-                self.config.dynamic_thermal, start, work)
-            work = thermal["duration_ns"]
-            self._plane_thermal_state[plane] = state
         stage = self._array_stage(name, resource, start, work)
         if wear_config:
             wear = {"programs": wear["programs"]+int(name == "PAGE_PROGRAM"),
@@ -200,7 +192,6 @@ class NandCore:
             "block_erases_after": wear["erases"] if wear_config else None,
             "wear_enabled": wear_config is not None,
             "rated_pe_cycles": wear_config.rated_pe_cycles if wear_config else None,
-            **thermal,
         })
         return stage
 
@@ -211,7 +202,6 @@ class NandCore:
             "events": tuple(self._observation_events[first:]),
             "configured_plane_count": self.config.channels*self.config.targets_per_channel*self.config.dies_per_target*self.config.luns_per_die*self.config.planes_per_lun,
             "plane_owner_prefix": str(self.config.metadata.get("array_resource_prefix", "nand:array")),
-            "thermal_enabled": self.config.dynamic_thermal is not None,
             "wear_enabled": self.config.wear_model is not None,
             "scope": "actual modeled physical page array operations; queue is eligible-to-array-start waiting, excluding in-service operations; physical mapping geometry is authored, not calibrated",
         }}
@@ -984,7 +974,6 @@ def summarize_nand_observations(observations):
     mean = sum(busy)/count if count else 0.
     variance = (sum((x-mean)**2 for x in busy)+(count-len(busy))*mean**2)/count if count else 0.
     return {"events": events, "configured_planes_by_owner": planes_by_owner,
-        "thermal_enabled": any(item.get("thermal_enabled") for item in observations),
         "wear_enabled": any(item.get("wear_enabled") for item in observations),
         "measurement_window": {"start_ns": start, "end_ns": end, "duration_ns": window},
         "read_queue_depth": queues["read"], "program_queue_depth": queues["program"],
@@ -998,11 +987,7 @@ def summarize_nand_observations(observations):
         "actual_erase_operations": sum(e["operation"] == "erase" for e in events),
         "actual_program_operations": sum(e["operation"] == "program" for e in events),
         "wear_extra_ns": sum(e.get("wear_extra_ns", 0.) for e in events),
-        "thermal_extra_ns": sum(e.get("thermal_extra_ns", 0.) for e in events),
-        "thermal_throttle_plane_ns": sum(e.get("thermal_throttle_ns", 0.) for e in events),
-        "peak_temperature_c": max((e["peak_temperature_c"] for e in events if "peak_temperature_c" in e), default=None),
-        "idle_recoveries": sum(e.get("idle_recoveries", 0) for e in events),
-        "scope": "actual executed array stages; independent-plane RC and explicit erase-count wear feedback when enabled; no FTL or implicit erase inference"}
+        "scope": "actual executed array stages; explicit erase-count wear feedback when enabled; no FTL or implicit erase inference"}
 
 
 __all__ = ["NandCore", "nand_service", "summarize_nand_observations"]

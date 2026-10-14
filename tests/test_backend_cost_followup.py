@@ -21,7 +21,6 @@ def device(*, native=True, tensor_core=None):
         CacheHierarchyProfile((CacheLevelProfile("cache", 1 << 20, 64, 0, 1000.),)),
         scalar_lanes_per_sm=32, scalar_ops_per_cycle=1, reduction_ops_per_cycle_per_sm=1,
         special_function_units_per_sm=1, special_function_ops_per_cycle=1,
-        tensor_energy_pj_per_op=2.,
         kernel_model=KernelModelProfile("device", "runtime", "architecture", kernels=(capability,)) if native else None)
 
 
@@ -35,7 +34,6 @@ def test_native_attention_counts_independent_head_mma_padding(head_dim, shape):
     demand = next(d for d in native.phases[-1].demands if d.resource_id == "gpu.tensor_core")
     expected = basic.metadata["issued_tensor_operations"]
     assert demand.work_units == expected
-    assert demand.energy_pj == 2. * expected
     assert native.metadata["kernel_model"]["issued_dot_operations"] == expected
     assert native.metadata["kernel_model"]["read_bytes"] == work.read_bytes
     assert native.metadata["kernel_model"]["write_bytes"] == work.write_bytes
@@ -129,7 +127,7 @@ def test_native_profile_does_not_silently_discard_explicit_mmvq_issue_contract()
 
 
 def test_declared_gemm_epilogue_remains_priced_without_fixed_unfused_source():
-    gpu = replace(device(), scalar_energy_pj_per_op=3., special_function_energy_pj_per_op=5.,
+    gpu = replace(device(),
         kernel_model=KernelModelProfile("device", "runtime", "architecture", kernels=(
             KernelCapability("gemm", ("fp16",), "fp16", "prefill", "tensor",
                 "analytical declaration", internal_dtype="fp16", epilogue="activation"),)))
@@ -137,5 +135,3 @@ def test_declared_gemm_epilogue_remains_priced_without_fixed_unfused_source():
         epilogue_operations=11, epilogue_transcendental_operations=7, epilogue_name="activation")
     result = estimate_gpu_gemm(gpu, HBMProfile(1000.), work)
     demands = {d.resource_id: d for d in result.phases[-1].demands}
-    assert demands[gpu.scalar_resource_id].energy_pj == 33.
-    assert demands[gpu.special_function_resource_id].energy_pj == 35.

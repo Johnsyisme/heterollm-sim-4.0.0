@@ -2,7 +2,7 @@
 import pytest
 
 from heterollm_sim.data_motion import PhysicalRuntimeContext, _PhysicalRuntime
-from heterollm_sim.memory_types import (AccessRequest, NandConfig, NandThermalConfig,
+from heterollm_sim.memory_types import (AccessRequest, NandConfig,
                                        NandWearConfig, Operation)
 from heterollm_sim.memory_transfer import ResourceTimeline
 from heterollm_sim.nand_core import NandCore
@@ -178,7 +178,6 @@ def test_partial_staging_read_waits_for_dirty_overlay_only_when_ranges_overlap(o
 def test_snapshot_replay_restores_staged_drains_feedback_and_resource_costs():
     runtime = PhysicalRuntimeContext()
     core = NandCore(config(write_buffer_bytes=PAGE, metadata={'buffered_write_mode': True},
-                          dynamic_thermal=NandThermalConfig(assumption='synthetic test'),
                           wear_model=NandWearConfig(assumption='synthetic test')), runtime.timeline)
     runtime.runtimes['nand'] = _PhysicalRuntime(core)
     core.submit(access('first', Operation.WRITE, count=1024))

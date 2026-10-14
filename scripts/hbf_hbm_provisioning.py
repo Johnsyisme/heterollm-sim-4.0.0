@@ -11,7 +11,7 @@ from heterollm_sim.planner import ScenarioValidationError
 
 HBM_CAPACITY = 36_000_000_000
 HBF_CAPACITY = 512_000_000_000
-BUDGETS = {"gpu_count": 1, "memory_area_mm2": 400., "active_node_power_w": 900.,
+BUDGETS = {"gpu_count": 1, "memory_area_mm2": 400.,
            "node_capex_usd": 15500., "total_memory_capacity_bytes": 1_600_000_000_000}
 
 
@@ -81,7 +81,6 @@ def build_package_scenario(hbm_packages, hbf_packages, architecture, *, model_id
 def budget_feasibility(cost):
     return {"fixed_gpu_count":cost["gpu_count"]==BUDGETS["gpu_count"],
         "area_ceiling":cost["memory_package_area_mm2"]<=BUDGETS["memory_area_mm2"],
-        "power_ceiling":cost["active_node_power_w"]<=BUDGETS["active_node_power_w"],
         "cost_ceiling":cost["capex_usd"]<=BUDGETS["node_capex_usd"],
         "capacity_ceiling":cost["hbm_capacity_bytes"]+cost["hbf_capacity_bytes"]<=BUDGETS["total_memory_capacity_bytes"]}
 
@@ -111,7 +110,7 @@ def run_provisioning_study(*, model_id="llama3_1-70b", progress=True):
                     row={"id":row_id,"mode":"configuration_rejected","placement":architecture,"reason":str(error)}
             if row["mode"]=="full_operator_serving":
                 cost=conditional_node_cost(hbm_packages=hbm,hbf_packages=hbf,active_output_tps=row["node_tps"])
-                cost["formula_scope"]="Package counts match this re-executed serving row; price/power/area remain hypothetical inputs, not measured node characteristics."
+                cost["formula_scope"]="Package counts match this re-executed serving row; price/area remain hypothetical inputs, not measured node characteristics."
                 row["conditional_5yr_cost"]=conditional_node_cost(hbm_packages=hbm,hbf_packages=hbf,years=5.,active_output_tps=row["node_tps"])
                 row["conditional_slo_cost"]=conditional_node_cost(hbm_packages=hbm,hbf_packages=hbf,active_output_tps=row["goodput_tps"])
                 for field in ("conditional_5yr_cost","conditional_slo_cost"):
@@ -128,10 +127,10 @@ def run_provisioning_study(*, model_id="llama3_1-70b", progress=True):
         "all_reported_rates_finite":all(math.isfinite(r["node_tps"]) and r["node_tps"]>0 for r in full)}
     return group("11_provisioning","⑪ 预算约束下重新执行服务",rows,checks,
         ["固定4槽、GPU和SLO，重新执行70B代表工作量后进行有限候选预算筛选与条件成本比较"],
-        ["容量、功率、成本是共同上限而非每点消耗完全相等；价格/面积/功耗是假设。",
+        ["容量、面积、购置成本是共同上限而非每点消耗完全相等；价格和面积是假设。",
          "每种内存使用一个物理Core设备，容量、带宽和并行度同时随栈数改变；不是实际多栈布线模型。",
-         "单请求2K/8输出、有限候选不构成全工作负载全局最优；热降额、磨损和成本尚未闭环。",
+         "单请求2K/8输出、有限候选不构成全工作负载全局最优；磨损和购置成本尚未闭环。",
          "无可行候选时保留null，不放宽SLO或预算以制造赢家。"],
         budgets=BUDGETS,selected_candidate_id=selected["id"] if selected else None,
-        selection_objective="minimum conditional dollars per million SLO-qualified tokens among actually executed feasible candidates",
+        selection_objective="minimum conditional purchase dollars per million SLO-qualified tokens among actually executed feasible candidates",
         feasible_candidate_ids=[r["id"] for r in candidates])

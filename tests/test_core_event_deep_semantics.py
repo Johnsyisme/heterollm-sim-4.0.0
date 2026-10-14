@@ -78,7 +78,6 @@ def test_shared_wire_collects_each_device_admission_wait_once():
     task = TaskSpec("shared", "request", "shared", TaskCategory.MEMORY,
         metadata={"physical_memory_config": config,
                   "physical_memory_configs": {"a": config, "b": config},
-                  "physical_energy_pj_per_byte_by_owner": {"a": 0, "b": 0},
                   "memory_accesses": [
                       {"physical_owner": owner, "operation": "read",
                        "address": 64 * index, "byte_count": 64}

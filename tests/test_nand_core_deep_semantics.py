@@ -4,7 +4,7 @@ import copy
 import pytest
 
 from heterollm_sim.memory_transfer import ResourceTimeline
-from heterollm_sim.memory_types import (AccessRequest, NandConfig, NandThermalConfig,
+from heterollm_sim.memory_types import (AccessRequest, NandConfig,
                                        NandWearConfig, Operation)
 from heterollm_sim.nand_core import NandCore, summarize_nand_observations
 
@@ -24,10 +24,9 @@ def req(name, op, address=0, count=PAGE, arrival=0.):
     return AccessRequest(name, op, address, count, arrival)
 
 
-@pytest.mark.parametrize('thermal', [False, True])
 @pytest.mark.parametrize('details', [False, True])
-def test_erase_then_program_waits_for_physical_array_even_with_spare_execution_lane(thermal, details):
-    core = NandCore(config(dynamic_thermal=NandThermalConfig(assumption='test') if thermal else None),
+def test_erase_then_program_waits_for_physical_array_even_with_spare_execution_lane(details):
+    core = NandCore(config(),
                     ResourceTimeline(lane_available={'nand:array:0': [0., 0.]}),
                     capture_details=details)
     erased = core.submit(req('erase', Operation.ERASE))

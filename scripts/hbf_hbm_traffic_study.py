@@ -283,7 +283,7 @@ def run_traffic_study() -> dict[str, Any]:
         "status": "passed" if passed else "failed", "rows": rows, "checks": checks,
         "scope": "production physical memory cores, dynamic KV pool and physical transfers; microbenchmarks only",
         "capability": {"supported": ["显式页序列产生准确50/80/95/99%热读，冷读执行真实双向迁移", "固定总容量的0/10/25/50%HBM预算与staging拒绝", "固定一页写入下实际1/10/100/1000页读取的分向有效带宽"] if passed else [],
-                       "unsupported": ["GPU TPS/TTFT/TPOT或生产服务尾延迟", "预测器命中率或最优动态冷热placement", "真实硅片参数、功耗和封装校准"]},
+                       "unsupported": ["GPU TPS/TTFT/TPOT或生产服务尾延迟", "预测器命中率或最优动态冷热placement", "真实硅片参数和封装校准"]},
         "limitations": [
             "All device parameters and the 100-page capacity budget are explicit synthetic assumptions, not commercial hardware specifications.",
             "The hot set remains eight pages across capacity ratios; extra HBM is not automatically filled. This isolates applied capacity without pretending to optimize placement.",

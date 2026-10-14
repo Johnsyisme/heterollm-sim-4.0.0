@@ -68,6 +68,7 @@ def execute_compiled(core, request):
     count = len(ids)
     bankrows = np.full(total_banks, -1, dtype=np.int64)
     bankready = np.zeros(total_banks, dtype=np.float64)
+    bankactivation = np.zeros(total_banks, dtype=np.float64)
     banktouched = np.zeros(total_banks, dtype=np.bool_)
     calendar = np.zeros(count, dtype=np.float64)
     busy = np.zeros(count, dtype=np.float64)
@@ -102,11 +103,12 @@ def execute_compiled(core, request):
                             return None
                         bankrows[index] = bank.open_row
                     bankready[index] = bank.ready_ns
+                    bankactivation[index] = bank.activation_ready_ns
     except (ValueError, TypeError, OverflowError):
         return None
     if (not math.isfinite(request.arrival_ns)
             or not all(np.isfinite(values).all() for values in
-                       (bankready, calendar, busy, last_start, last_end, durations))):
+                       (bankready, bankactivation, calendar, busy, last_start, last_end, durations))):
         return None
     try:
         from ._dram_numeric import run_numeric
@@ -116,9 +118,9 @@ def execute_compiled(core, request):
         return None
     completion, hits, misses, conflicts, skipped = run_numeric(
         first, stop, float(request.arrival_ns), read, geometry, durations, bool(shared),
-        bankrows, bankready, banktouched, calendar, busy, moved, directions, last_start, last_end, touched)
+        bankrows, bankready, bankactivation, banktouched, calendar, busy, moved, directions, last_start, last_end, touched)
     if (not math.isfinite(completion)
-            or not all(np.isfinite(values).all() for values in (bankready, calendar, busy, last_start, last_end))):
+            or not all(np.isfinite(values).all() for values in (bankready, bankactivation, calendar, busy, last_start, last_end))):
         return None
     # Commit only visited entries; calendars supplied by the kernel retain
     # their list identity. No BankState object survives transaction rollback.
@@ -129,6 +131,7 @@ def execute_compiled(core, request):
             bank = _BankState()
             core._banks[rid] = bank
         bank.open_row, bank.ready_ns = int(bankrows[index]), float(bankready[index])
+        bank.activation_ready_ns = float(bankactivation[index])
     first_data = total_banks + (1 if shared else lanes)
     for index in np.flatnonzero(touched):
         rid = ids[index]
@@ -210,6 +213,7 @@ def execute_compiled_many(core, requests):
     count = len(ids)
     bankrows = np.full(total_banks, -1, dtype=np.int64)
     bankready = np.zeros(total_banks, dtype=np.float64)
+    bankactivation = np.zeros(total_banks, dtype=np.float64)
     banktouched = np.zeros(total_banks, dtype=np.bool_)
     calendar = np.zeros(count, dtype=np.float64)
     busy = np.zeros(count, dtype=np.float64)
@@ -244,11 +248,12 @@ def execute_compiled_many(core, requests):
                             return None
                         bankrows[index] = bank.open_row
                     bankready[index] = bank.ready_ns
+                    bankactivation[index] = bank.activation_ready_ns
     except (ValueError, TypeError, OverflowError):
         return None
     if (not math.isfinite(request.arrival_ns)
             or not all(np.isfinite(values).all() for values in
-                       (bankready, calendar, busy, last_start, last_end, durations))):
+                       (bankready, bankactivation, calendar, busy, last_start, last_end, durations))):
         return None
     if (not math.isfinite(core._acceptance_ns)
             or not all(math.isfinite(value) for value in core._inflight)
@@ -280,10 +285,10 @@ def execute_compiled_many(core, requests):
         return None
     output = run_numeric_many(firsts, stops, arrivals, reads, config.max_outstanding_requests,
         float(core._acceptance_ns), inflight, len(core._inflight), geometry, duration_pairs, bool(shared),
-        bankrows, bankready, banktouched, calendar, busy, moved, directions, last_start, last_end, touched)
+        bankrows, bankready, bankactivation, banktouched, calendar, busy, moved, directions, last_start, last_end, touched)
     ends, waits, counts, busy_delta, byte_delta, starts_by_request, ends_by_request, touched_by_request, acceptance, inflight_count = output
     if (not np.isfinite(ends).all() or not all(np.isfinite(values).all()
-            for values in (bankready, calendar, busy, last_start, last_end))):
+            for values in (bankready, bankactivation, calendar, busy, last_start, last_end))):
         return None
     results = []
     for index, item in enumerate(requests):
@@ -318,6 +323,7 @@ def execute_compiled_many(core, requests):
             bank = _BankState()
             core._banks[rid] = bank
         bank.open_row, bank.ready_ns = int(bankrows[index]), float(bankready[index])
+        bank.activation_ready_ns = float(bankactivation[index])
     first_data = total_banks + (1 if shared else lanes)
     all_touched = touched_by_request.any(axis=0)
     for index in np.flatnonzero(all_touched):

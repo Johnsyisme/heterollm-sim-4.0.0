@@ -59,24 +59,23 @@ def test_online_report_includes_executed_paged_io_once_without_inventing_batches
     # A separate physical executor's ledger is additive; it is not another
     # task schedule to run, nor another serving batch to extend the wall time.
     ledger = {"schema_version": "heterollm.paged-kv-physical-cost/v1",
-        "energy_pj": 200., "resource_accounted_bytes": 2**53 + 1,
+        "resource_accounted_bytes": 2**53 + 1,
         "resource_busy_ns": {"migration-wire": 40.}, "phase_count": 3,
         "dram_traffic": {"task_count": 1, "logical_read_bytes": 64,
             "physical_bytes": 128, "resource_totals": {"dram-wire": {
-                "owner": "hbm0", "bytes_moved": 128, "service_ns": 4., "energy_pj": 80.}}},
+                "owner": "hbm0", "bytes_moved": 128, "service_ns": 4.}}},
         "storage_traffic": {"task_count": 1, "logical_write_bytes": 64,
             "physical_write_bytes": 16384, "resource_totals": {"nand-wire": {
-                "owner": "hbf0", "bytes_moved": 64, "service_ns": 8., "energy_pj": 120.}}}}
+                "owner": "hbf0", "bytes_moved": 64, "service_ns": 8.}}}}
     changed = replace(original, serving=replace(serving, runtime_kernel_metrics={
         **empty_metrics, "paged_kv_transfers": {"cost_ledger": ledger}}))
     after = _online_report_core(changed)
-    assert after.summary["total_energy_pj"] - before.summary["total_energy_pj"] == 200.
+    assert "total_energy_pj" not in after.summary
     assert after.summary["resource_accounted_bytes"] - before.summary["resource_accounted_bytes"] == 2**53 + 1
     assert after.resource_utilization["migration-wire"] == 40. / before.summary["makespan_ns"]
     assert after.summary["dram_traffic"]["physical_bytes"] == 128
     assert after.summary["storage_traffic"]["physical_write_bytes"] == 16384
-    assert after.summary["simulated_subtargets"]["power"]["modeled_total_dynamic_power_mean_w"] == (
-        after.summary["total_energy_pj"] / after.summary["makespan_ns"] * 1e-3)
+    assert "power" not in after.summary.get("simulated_subtargets", {})
     for key in ("batch_count", "task_count", "makespan_ns", "throughput"):
         assert after.summary[key] == before.summary[key]
     assert _online_report_core(changed).summary == after.summary
@@ -90,12 +89,11 @@ def test_real_paged_transfer_reports_core_and_link_cost_in_sync_and_prefetch_mod
     assert ledger["phase_count"] > 0
     result = OnlineScenarioResult(runner.plan.scenario, serving, manifest(), (), "aggregate")
     report = _online_report_core(result)
-    assert report.summary["total_energy_pj"] == pytest.approx(
-        sum(b.cost.energy_pj for b in serving.batches) + sum(p["energy_pj"] for p in ledger["phases"]))
+    assert "total_energy_pj" not in report.summary
     assert report.summary["resource_accounted_bytes"] == (
         sum(b.cost.metadata.get("resource_accounted_bytes", 0) for b in serving.batches)
         + sum(sum(p["resource_bytes"].values()) for p in ledger["phases"]))
-    assert ledger["energy_pj"] > 0
+    assert "energy_pj" not in ledger
     for key in ("dram_traffic", "storage_traffic"):
         assert report.summary[key]["physical_bytes"] >= ledger[key]["physical_bytes"] > 0
     components, links, _ = _online_activity_samples(result)

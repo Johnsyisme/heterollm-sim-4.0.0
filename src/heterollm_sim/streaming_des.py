@@ -51,7 +51,6 @@ class ScheduleExecutionResult:
     trace: SimulationTrace
     metrics: MetricsSummary
     task_count: int
-    total_energy_pj: float
     resource_accounted_bytes: int
     proposed_tokens: int
     accepted_tokens: int
@@ -679,7 +678,6 @@ def _merge_storage_traffic(target: Dict[str, object], source: Mapping[str, objec
             "erase_operations": 0,
             "rmw_read_operations": 0,
             "service_ns": 0.0,
-            "energy_pj": 0.0,
             "operation_counts": {},
             "resource_totals": {},
             "profile_evidence": [],
@@ -689,7 +687,7 @@ def _merge_storage_traffic(target: Dict[str, object], source: Mapping[str, objec
     for key in (
         "task_count", "logical_bytes", "host_transfer_bytes", "physical_bytes",
         "physical_read_bytes", "physical_write_bytes", "erase_operations", "queue_wait_ns",
-        "service_ns", "energy_pj",
+        "service_ns",
     ):
         target[key] = target.get(key, 0) + source.get(key, 0)
     optional = ("logical_read_bytes", "logical_write_bytes", "internal_transfer_bytes",
@@ -739,13 +737,11 @@ def _merge_storage_traffic(target: Dict[str, object], source: Mapping[str, objec
             "owner": raw.get("owner", "unknown"),
             "bytes_moved": 0,
             "service_ns": 0.0,
-            "energy_pj": 0.0,
         })
         if row["owner"] != raw.get("owner", "unknown"):
             row["owner"] = str(resource_id)
         row["bytes_moved"] += int(raw.get("bytes_moved", 0) or 0)
         row["service_ns"] += float(raw.get("service_ns", 0.0) or 0.0)
-        row["energy_pj"] += float(raw.get("energy_pj", 0.0) or 0.0)
     for key in ("profile_evidence", "background_work", "organization_profiles"):
         values = target[key]
         for value in source.get(key, ()) or ():
@@ -788,13 +784,11 @@ def _merge_dram_traffic(target: Dict[str, object], source: Mapping[str, object])
     rows = target["resource_totals"]
     for resource_id, raw in (source.get("resource_totals", {}) or {}).items():
         row = rows.setdefault(str(resource_id), {"owner": raw.get("owner", "unknown"),
-                                                   "bytes_moved": 0, "service_ns": 0.0,
-                                                   "energy_pj": 0.0})
+                                                   "bytes_moved": 0, "service_ns": 0.0})
         if row["owner"] != raw.get("owner", "unknown"):
             row["owner"] = str(resource_id)
         row["bytes_moved"] += int(raw.get("bytes_moved", 0) or 0)
         row["service_ns"] += float(raw.get("service_ns", 0.0) or 0.0)
-        row["energy_pj"] += float(raw.get("energy_pj", 0.0) or 0.0)
     profiles = target["organization_profiles"]
     for value in source.get("organization_profiles", ()) or ():
         if value not in profiles and len(profiles) < 32:
@@ -820,8 +814,6 @@ class _ResultAccumulator:
         self.requests: Dict[str, _RequestMetricsAccumulator] = {}
         self.category_ns: Dict[TaskCategory, float] = {}
         self.resource_busy_ns: Dict[str, float] = {}
-        self.total_energy_pj = 0.0
-        self._energy_compensation_pj = 0.0
         self.bytes_moved = 0
         self.proposed_tokens = 0
         self.accepted_tokens = 0
@@ -978,18 +970,6 @@ class _ResultAccumulator:
                 self.resource_busy_ns.get(demand.resource_id, 0.0)
                 + demand.service_ns
             )
-            # Incremental execution observes demands in completion order,
-            # while the exact trace reports them in deterministic task order.
-            # Kahan summation keeps the aggregate invariant to the harmless
-            # rounding drift exposed by large KV traffic energy totals.
-            adjusted_energy = (
-                float(demand.energy_pj) - self._energy_compensation_pj
-            )
-            updated_energy = self.total_energy_pj + adjusted_energy
-            self._energy_compensation_pj = (
-                updated_energy - self.total_energy_pj
-            ) - adjusted_energy
-            self.total_energy_pj = updated_energy
             self.bytes_moved += demand.bytes_moved
         self._observe_coverage(task, demands, duration_ns)
 
@@ -1029,7 +1009,6 @@ class _ResultAccumulator:
                 "operations": 0.0,
                 "bytes": 0.0,
                 "latency_ns": 0.0,
-                "energy_pj": 0.0,
                 "operator_ids": set(),
                 "tensor_ids": set(),
             },
@@ -1040,9 +1019,6 @@ class _ResultAccumulator:
         )
         row["bytes"] = float(row["bytes"]) + sum(
             float(demand.bytes_moved) for demand in demands
-        )
-        row["energy_pj"] = float(row["energy_pj"]) + sum(
-            float(demand.energy_pj) for demand in demands
         )
         row["latency_ns"] = float(row["latency_ns"]) + duration_ns
         operator_id = metadata.get("model_operator_id", metadata.get("operator_id"))
@@ -1170,7 +1146,6 @@ class _ResultAccumulator:
             trace=trace,
             metrics=metrics,
             task_count=self.task_count,
-            total_energy_pj=self.total_energy_pj,
             resource_accounted_bytes=self.bytes_moved,
             proposed_tokens=self.proposed_tokens,
             accepted_tokens=self.accepted_tokens,

@@ -7191,13 +7191,13 @@ dialog.model-presets-dialog.is-viewport-fullscreen .preset-dialog-shell {
  * Keep this pass at the end of the cascade.  These controls are rendered by
  * app.js in several Inspector variants, so their shared sizing must win over
  * the older, generic form and high-zoom rules above. */
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) {
   min-width: 0;
   border: 1px solid var(--line-soft);
   background: var(--surface-raised);
 }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary {
   min-width: 0;
   min-height: max(calc(36px * var(--layout-scale)), 36px);
   display: flex;
@@ -7214,9 +7214,9 @@ details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .i
   cursor: pointer;
 }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary::-webkit-details-marker { display: none; }
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary::-webkit-details-marker { display: none; }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary::before {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary::before {
   content: "▸";
   flex: 0 0 auto;
   color: var(--copper-bright);
@@ -7225,22 +7225,22 @@ details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .i
   line-height: 1;
 }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers)[open] > summary::before { content: "▾"; }
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers)[open] > summary::before { content: "▾"; }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary > :first-child {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary > :first-child {
   min-width: 0;
   flex: 1 1 auto;
   overflow-wrap: anywhere;
 }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary :is(strong, .control-section-title) {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary :is(strong, .control-section-title) {
   margin: 0;
   color: inherit;
   font-size: inherit;
   line-height: inherit;
 }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary small {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary small {
   display: block;
   margin-top: 2px;
   color: var(--muted-readable);
@@ -7249,17 +7249,17 @@ details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .i
   line-height: 1.35;
 }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers)[open] > summary {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers)[open] > summary {
   border-bottom: 1px solid var(--line-soft);
   color: var(--cyan-bright);
 }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary:focus-visible {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > summary:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
 
-details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .inspector-section.thermal-operating-point, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > :is(p, .field-grid-2, .profile-contract-callout, .inspector-section-body, .control-section-body) {
+details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .control-plane-policy-section, .placement-target-constraints, .control-plane-memory-tiers) > :is(p, .field-grid-2, .profile-contract-callout, .inspector-section-body, .control-section-body) {
   min-width: 0;
   padding-inline: calc(9px * var(--layout-scale));
 }
@@ -7481,15 +7481,6 @@ details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .i
 .memory-tier-group th,
 .memory-tier-group td { white-space: normal; overflow-wrap: anywhere; }
 
-.thermal-operating-point { margin-bottom: calc(10px * var(--layout-scale)); }
-.thermal-operating-point .readout-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 calc(8px * var(--layout-scale));
-  padding: 0 calc(9px * var(--layout-scale)) calc(7px * var(--layout-scale));
-}
-.thermal-operating-point .readout { min-width: 0; border-bottom: 1px solid var(--line-soft); }
-
 :root:is([data-font-band="large"], [data-font-band="extreme"]) .topbar {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -7518,7 +7509,6 @@ details:is(.inspector-advanced-profile, .inspector-section.hbf-media-section, .i
 @media (max-width: 900px) {
   .placement-target-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .placement-target-delete { grid-column: 1 / -1; justify-self: end; }
-  .thermal-operating-point .readout-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* At phone widths the old fixed left rail consumed most of the main stage.

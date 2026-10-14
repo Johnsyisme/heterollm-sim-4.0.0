@@ -15,7 +15,7 @@ import numpy as np
 @njit(cache=True, nogil=True, fastmath=False)
 def run_numeric_many(firsts, stops, arrivals, reads, max_outstanding, acceptance,
                      inflight, inflight_count, geometry, duration_pairs, shared,
-                     bankrows, bankready, banktouched, calendar, busy, moved,
+                     bankrows, bankready, bankactivation, banktouched, calendar, busy, moved,
                      directions, last_start, last_end, touched):
     """Execute ordered requests with the same admission gate as submit()."""
     count, resources = len(firsts), len(calendar)
@@ -55,7 +55,7 @@ def run_numeric_many(firsts, stops, arrivals, reads, max_outstanding, acceptance
         if stop - first >= 64:
             completion, hits, misses, conflicts, skipped = run_numeric(
                 first, stop, effective, read, geometry, durations, shared,
-                bankrows, bankready, banktouched, calendar, busy, moved,
+                bankrows, bankready, bankactivation, banktouched, calendar, busy, moved,
                 directions, last_start, last_end, touched)
         else:
             # Small requests normally use the Python burst loop. Preserve its
@@ -69,7 +69,7 @@ def run_numeric_many(firsts, stops, arrivals, reads, max_outstanding, acceptance
                 row_stop = min(stop, (linear_row + 1) * row_span)
                 cursor, completion, h, m, c = _burst_range(
                     cursor, row_stop, row, unit, effective, read, geometry, durations, shared,
-                    bankrows, bankready, banktouched, calendar, busy, moved,
+                    bankrows, bankready, bankactivation, banktouched, calendar, busy, moved,
                     directions, last_start, last_end, touched, completion)
                 hits += h
                 misses += m
@@ -127,7 +127,7 @@ def _reserve(rid, earliest, duration, byte_count, direction, rtw, wtr,
 
 @njit(cache=True, nogil=True, fastmath=False)
 def _burst_range(cursor, target, row, unit, arrival, read, geometry, durations,
-                 shared, bankrows, bankready, banktouched, calendar, busy,
+                 shared, bankrows, bankready, bankactivation, banktouched, calendar, busy,
                  moved, directions, last_start, last_end, touched, completion):
     lanes, banks, inner = geometry[0], geometry[1], geometry[2]
     period = lanes * banks * inner
@@ -143,7 +143,7 @@ def _burst_range(cursor, target, row, unit, arrival, read, geometry, durations,
         lane, bank = slot % lanes, slot // lanes
         bank_id = (unit * lanes + lane) * banks + bank
         banktouched[bank_id] = True
-        dependency = arrival
+        dependency = max(arrival, bankactivation[bank_id])
         if bankrows[bank_id] == row:
             hits += 1
         else:
@@ -158,6 +158,7 @@ def _burst_range(cursor, target, row, unit, arrival, read, geometry, durations,
                 bank_id, max(dependency, bankready[bank_id]), open_ns, 0, 0, rtw, wtr,
                 calendar, busy, moved, directions, last_start, last_end, touched)
             bankrows[bank_id], bankready[bank_id] = row, dependency
+            bankactivation[bank_id] = dependency
         command_id = total_banks + (0 if shared else lane)
         data_id = total_banks + commands + lane
         command_start, _ = _reserve(
@@ -174,7 +175,7 @@ def _burst_range(cursor, target, row, unit, arrival, read, geometry, durations,
 
 @njit(cache=True, nogil=True, fastmath=False)
 def run_numeric(first, stop, arrival, read, geometry, durations, shared,
-                bankrows, bankready, banktouched, calendar, busy, moved,
+                bankrows, bankready, bankactivation, banktouched, calendar, busy, moved,
                 directions, last_start, last_end, touched):
     lanes, banks, inner, bursts_per_row, rows_per_bank, dies_per_stack = geometry
     period = lanes * banks * inner
@@ -194,13 +195,13 @@ def run_numeric(first, stop, arrival, read, geometry, durations, shared,
         target = min(row_stop, (cursor // period + 1) * period)
         cursor, completion, h, m, c = _burst_range(
             cursor, target, row, unit, arrival, read, geometry, durations, shared,
-            bankrows, bankready, banktouched, calendar, busy, moved, directions,
+            bankrows, bankready, bankactivation, banktouched, calendar, busy, moved, directions,
             last_start, last_end, touched, completion)
         hits += h; misses += m; conflicts += c
         if not aligned and cursor + period <= row_stop:
             cursor, completion, h, m, c = _burst_range(
                 cursor, cursor + period, row, unit, arrival, read, geometry, durations, shared,
-                bankrows, bankready, banktouched, calendar, busy, moved, directions,
+                bankrows, bankready, bankactivation, banktouched, calendar, busy, moved, directions,
                 last_start, last_end, touched, completion)
             hits += h; misses += m; conflicts += c
         cycles = (row_stop - cursor) // period
@@ -243,7 +244,7 @@ def run_numeric(first, stop, arrival, read, geometry, durations, shared,
             cursor += count * period
         cursor, completion, h, m, c = _burst_range(
             cursor, row_stop, row, unit, arrival, read, geometry, durations, shared,
-            bankrows, bankready, banktouched, calendar, busy, moved, directions,
+            bankrows, bankready, bankactivation, banktouched, calendar, busy, moved, directions,
             last_start, last_end, touched, completion)
         hits += h; misses += m; conflicts += c
     return completion, hits, misses, conflicts, skipped

@@ -410,9 +410,9 @@ def system_figure(groups, output):
 def internal_feedback_figure(groups, output):
     ablation=[r for r in groups.get('12_ablation_paths',{}).get('rows',[]) if full_row(r) and r['id'].startswith('ablation/')]
     agents=[r for r in groups.get('13_agent_lifecycle',{}).get('rows',[]) if r['id'] in ('agent-static-cold','agent-heuristic')]
-    thermal=[r for r in groups.get('14_thermal_wear',{}).get('rows',[]) if full_row(r) and r['placement']==B]
+    wear=[r for r in groups.get('14_wear',{}).get('rows',[]) if full_row(r) and r['placement']==B]
     fig,axes=plt.subplots(1,3,figsize=(17,5.6));fig.subplots_adjust(top=.79,bottom=.28,wspace=.32)
-    fig.suptitle(tr('内部机制进入完整服务：消融、会话与热反馈','Full serving: ablation, agent sessions and thermal feedback'),y=.97,fontsize=15)
+    fig.suptitle(tr('内部机制进入完整服务：消融、会话与磨损反馈','Full serving: ablation, agent sessions and wear feedback'),y=.97,fontsize=15)
     if ablation:
         xs=list(range(len(ablation)));vs=[r['relative_to_ideal_hbm']['tps_ratio'] for r in ablation]
         axes[0].bar(xs,vs,color='#2364AA');axes[0].set_xticks(xs,['HBM','HBF','Read','Write','Units','R+W','R+W+U'],rotation=35)
@@ -421,10 +421,10 @@ def internal_feedback_figure(groups, output):
         axes[1].bar([0,1],[r['agent_lifecycle']['cold_write_bytes']/1024 for r in agents],color=['#6D52A4','#21887B'])
         axes[1].set_xticks([0,1],['Static cold','Heuristic']);axes[1].set_ylabel(tr('实际冷迁移写入（KiB）','Cold migration writes (KiB)'))
         for i,r in enumerate(agents): axes[1].text(i,r['agent_lifecycle']['cold_write_bytes']/1024+1,f"{r['node_tps']:,.0f} TPS",ha='center',fontsize=9)
-    if thermal:
-        base=thermal[0]['node_tps'];vals=[r['node_tps']/base for r in thermal]
-        bars=axes[2].bar(range(len(vals)),vals,color=['#8C9BAB','#E07632','#6D52A4','#B22D43'])
-        axes[2].set_xticks(range(len(vals)),['Off','Thermal','Wear','Both']);axes[2].set_ylabel('B TPS / feedback-off TPS')
+    if wear:
+        base=wear[0]['node_tps'];vals=[r['node_tps']/base for r in wear]
+        bars=axes[2].bar(range(len(vals)),vals,color=['#8C9BAB','#6D52A4'])
+        axes[2].set_xticks(range(len(vals)),['Off','Wear']);axes[2].set_ylabel('B TPS / feedback-off TPS')
         for b,v in zip(bars,vals): axes[2].text(b.get_x()+b.get_width()/2,v+.025,f'{v:.3f}',ha='center')
     for ax,title in zip(axes,[tr('完整服务逐项消融','Full-serving ablation'),tr('真实三轮KV继承','Three-turn physical KV reuse'),tr('动态NAND时延反馈','Dynamic NAND latency feedback')]):
         ax.set_title(title);style(ax);ax.set_ylim(0,max(1,ax.get_ylim()[1])*1.15)
@@ -432,11 +432,11 @@ def internal_feedback_figure(groups, output):
         axes[0].set_yscale('log');axes[0].set_ylim(min(vs)*.35,2.)
         axes[0].set_ylabel(tr('TPS / 理想HBM（对数轴）','TPS / ideal HBM (log scale)'))
         for i,v in enumerate(vs): axes[0].text(i,v*1.18,f'{v:.2g}',ha='center',fontsize=8)
-    fig.text(.06,.065,tr('三列是各自严格配对的独立实验，不能跨列比较绝对TPS。热/磨损曲线是压力假设；wear为预老化P/E敏感性。\nRead=读延迟，Write=写限制，Units=有限并行；理想零延迟下Units单独加入可不改变吞吐。',
-        'Each panel is a separate paired experiment. Thermal/wear curves are stress assumptions; wear is pre-aged P/E sensitivity.\nRead=latency, Write=write limit, Units=finite parallelism; units alone may have no effect at ideal zero latency.'),fontsize=9)
-    return save(fig,output,'06_internal_feedback',title='完整服务中的消融、真实多轮会话与动态热反馈',
-        caption='分别对照理想介质、静态/启发式冷热策略和开关热磨损反馈。所有倍率只使用同一列对应基准；压力参数不代表真实设备。',rows=ablation+agents+thermal,
-        status='complete' if len(ablation)==7 and len(agents)==2 and len(thermal)==4 else 'partial_data')
+    fig.text(.06,.065,tr('三列是各自严格配对的独立实验，不能跨列比较绝对TPS。磨损曲线是压力假设；wear为预老化P/E敏感性。\nRead=读延迟，Write=写限制，Units=有限并行；理想零延迟下Units单独加入可不改变吞吐。',
+        'Each panel is a separate paired experiment. Wear curves are stress assumptions; wear is pre-aged P/E sensitivity.\nRead=latency, Write=write limit, Units=finite parallelism; units alone may have no effect at ideal zero latency.'),fontsize=9)
+    return save(fig,output,'06_internal_feedback',title='完整服务中的消融、真实多轮会话与动态磨损反馈',
+        caption='分别对照理想介质、静态/启发式冷热策略和开关磨损反馈。所有倍率只使用同一列对应基准；压力参数不代表真实设备。',rows=ablation+agents+wear,
+        status='complete' if len(ablation)==7 and len(agents)==2 and len(wear)==2 else 'partial_data')
 
 
 def sustained_figure(groups,output):

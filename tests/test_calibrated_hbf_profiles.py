@@ -36,6 +36,8 @@ class CalibratedHbfProfileTests(unittest.TestCase):
         self.assertEqual({item["profile_id"] for item in fixed}, {
             "son_hbf", "son_hbf_plus", "hbf_sucks_hbf2_b200", "hot_cold_b200",
         })
+        self.assertEqual(len(fixed), 4)
+        self.assertTrue(all(item["variant"] == "nominal" for item in fixed))
         son = next(item for item in fixed if item["profile_id"] == "son_hbf")
         self.assertGreater(son["all_hbf"]["service_ns"], son["hbm_only"]["service_ns"])
         self.assertTrue(son["full_backend"]["full_backend_used"])

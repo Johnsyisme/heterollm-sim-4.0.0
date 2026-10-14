@@ -295,17 +295,16 @@ const CONCEPT_HELP_ZH = Object.freeze({
   transfer_granularity: "传输粒度是一次数据搬移按模型计费或对齐的最小字节块；小于该粒度的传输仍可能按完整块占用容量或带宽。",
   dma_latency: "DMA 延迟是启动一次直接内存访问搬移所需的固定分析开销；实际搬移时间还要叠加传输粒度、字节数、带宽与路径时延。",
   dma_bandwidth: "DMA 带宽是组件 DMA 引擎可持续搬移的单向分析吞吐上限，独立于介质读写带宽和拓扑链路带宽；一次传输受三者中最慢阶段约束。",
-  dma_energy: "DMA 能耗按每字节 pJ 累计，只覆盖声明的 DMA 搬移阶段；填 0 表示当前分析不计该项，并不代表实测能耗为零。",
   dma_resource: "DMA 资源 ID 决定哪些搬移共享同一串行资源。留空时后端按组件生成独立资源；不同组件若显式使用同一 ID，会产生资源竞争。",
   outstanding_requests: "最大并发请求数只允许多个存储事务的固定启动延迟重叠，不会提高介质串行带宽、DMA 带宽或链路带宽。",
   cpu: "CPU（Central Processing Unit）在本项目中是具有独立 GEMM、逐元素、归约吞吐和 Host Memory 成本的执行组件，不沿用 GPU 峰值。",
-  cost_profile: "成本 Profile 是组件执行、内存与能耗参数的权威集合；组件通过 cost_profile_id 绑定同类 Profile，多个组件可以共享，也可以显式复制后独立调整。",
+  cost_profile: "成本 Profile 是组件执行与内存参数的权威集合；组件通过 cost_profile_id 绑定同类 Profile，多个组件可以共享，也可以显式复制后独立调整。",
   cache_hierarchy: "Cache Hierarchy 描述组件内部各级缓存的容量、Cache Line、命中延迟、带宽、端口和并发限制；它不会由组件峰值带宽自动推断。",
   tensor_core: "Tensor Core / MMA 参数用 SM 数、每 SM 单元数、频率、M/N/K 几何与每次 MMA 周期推导矩阵乘法能力，而不是直接填写一项无来源的 TOPS。",
   occupancy: "Occupancy（占用率）表示 GPU 可用于隐藏延迟并保持并行工作的有效驻留比例，取值大于 0 且不超过 1；它不是结果页的资源忙碌率。",
   attainable_efficiency: "Attainable Efficiency（可达效率）是分析模型对理论微架构能力施加的可实现比例，取值大于 0 且不超过 1；它不会消除带宽、启动或调度瓶颈。",
   pipeline: "CPU Pipeline 参数共同描述乱序前端、SIMD 宽度、发射/退休宽度、ROB、LSQ 与内存级并行能力；任何单个宽度都不等于整颗 CPU 的最终吞吐。",
-  noc: "NoC（Network-on-Chip，片上网络）描述 CIM 阵列、累加器与外围阶段之间的片上传输带宽、单跳延迟、归约扇入和能耗；它与外部 UCIe/PCIe 链路分开建模。",
+  noc: "NoC（Network-on-Chip，片上网络）描述 CIM 阵列、累加器与外围阶段之间的片上传输带宽、单跳延迟和归约扇入；它与外部 UCIe/PCIe 链路分开建模。",
   link_bandwidth: "链路单向带宽是一个显式拓扑连接在指定方向上的传输上限；它与组件介质带宽、端口声明值和应用吞吐分别建模。",
   protocol: "协议定义互连端点的身份、版本、方向、通道与载荷契约；界面只按场景中显式声明的端口和链路语义建模，不会由名称推断完整协议栈行为。",
   bandwidth_semantics: "协议带宽口径区分原始线路速率、扣除编码与载荷开销后的单向有效带宽，以及两个方向相加的双向聚合值；三者不能互换为同一条链路的可用吞吐。",
@@ -463,7 +462,6 @@ const CONCEPT_HELP_ZH = Object.freeze({
   request_metrics: "请求明细逐请求展示状态、拒绝原因、到达时间、TTFT、TBT、TPOT、E2E 与实际可见 Token。",
   visible_tokens: "可见 Token 数是请求最终对用户可见的实际输出数量；它可能少于配置的最大输出 Token 数。",
   makespan: "Makespan 是本次仿真从最早开始到最后完成的总时间跨度，不等同于任一单请求的端到端延迟。",
-  energy: "Total Energy 是分析模型按任务与资源累计的能耗估算；在 profiles 未校准时不代表实测功耗或电费。",
   rejection_reason: "Rejection Reason 说明请求未被服务的准入、容量、SLO 或调度原因；空值仅表示报告未声明原因。",
   percentile: "p50 / p95 是样本分位数：p50 表示中位水平，p95 表示 95% 样本不超过该值；样本为空时不生成数值。",
   critical_path: "关键路径是事件依赖图中决定总完成时间的最长路径；类别累计时间不一定等于关键路径时间。",
@@ -549,17 +547,16 @@ const CONCEPT_HELP_EN = Object.freeze({
   transfer_granularity: "Transfer granularity is the smallest byte block charged or aligned for a modeled movement. A smaller payload may still consume a full block of capacity or bandwidth.",
   dma_latency: "DMA latency is the fixed analytical startup overhead for one direct-memory-access movement. Total movement time also includes granularity, bytes, bandwidth, and route latency.",
   dma_bandwidth: "DMA bandwidth is the analytical one-way sustained limit of a component DMA engine, separate from media and topology-link bandwidth. The slowest stage constrains a transfer.",
-  dma_energy: "DMA energy accumulates in pJ per byte for the declared DMA phase only. Zero means this analytical term is currently omitted, not measured zero energy.",
   dma_resource: "A DMA resource ID controls which movements contend for the same serialized resource. If omitted, the backend derives a component-local resource; reusing an explicit ID creates contention.",
   outstanding_requests: "Maximum outstanding requests overlaps only fixed storage-transaction startup latency. It does not increase media, DMA, or link bandwidth.",
   cpu: "A CPU (Central Processing Unit) is an execution component with independent GEMM, element-wise, reduction, and Host Memory costs; it never inherits GPU peak rate.",
-  cost_profile: "A Cost Profile is the authoritative set of execution, memory, and energy parameters for a component. Components bind same-kind profiles through cost_profile_id and may share or explicitly duplicate them.",
+  cost_profile: "A Cost Profile is the authoritative set of execution and memory parameters for a component. Components bind same-kind profiles through cost_profile_id and may share or explicitly duplicate them.",
   cache_hierarchy: "Cache Hierarchy declares each internal cache level's capacity, Cache Line, hit latency, bandwidth, ports, and concurrency limits; none are inferred from component peak bandwidth.",
   tensor_core: "Tensor Core and MMA parameters derive matrix-multiply capability from SM count, units per SM, frequency, M/N/K geometry, and cycles per MMA instead of an ungrounded TOPS field.",
   occupancy: "Occupancy is the effective resident fraction available to hide latency and sustain GPU parallel work. It is greater than zero and at most one, and is not the report's resource busy fraction.",
   attainable_efficiency: "Attainable Efficiency is the achievable fraction applied to theoretical microarchitecture capability. It is greater than zero and at most one and does not erase bandwidth, launch, or scheduling bottlenecks.",
   pipeline: "CPU Pipeline parameters jointly describe the out-of-order front end, SIMD width, issue/retire width, ROB, LSQ, and memory-level parallelism; no single width is final CPU throughput.",
-  noc: "A Network-on-Chip (NoC) models on-chip bandwidth, hop latency, reduction fan-in, and energy between CIM arrays, accumulators, and peripheral stages, separately from external UCIe or PCIe links.",
+  noc: "A Network-on-Chip (NoC) models on-chip bandwidth, hop latency, and reduction fan-in between CIM arrays, accumulators, and peripheral stages, separately from external UCIe or PCIe links.",
   link_bandwidth: "One-way link bandwidth is the transfer limit of an explicit topology connection in one direction; it is modeled separately from media, port, and application throughput.",
   protocol: "A protocol defines interconnect endpoint identity, version, direction, lanes, and payload contract. The UI models only explicitly declared port and link semantics and does not infer full protocol-stack behavior from a name.",
   bandwidth_semantics: "Protocol bandwidth distinguishes raw line rate, effective one-way bandwidth after encoding and payload overhead, and aggregate bidirectional bandwidth summed across both directions; these values are not interchangeable as one link's usable throughput.",
@@ -716,7 +713,6 @@ const CONCEPT_HELP_EN = Object.freeze({
   request_metrics: "Request Metrics shows per-request status, rejection reason, arrival, TTFT, TBT, TPOT, E2E, and actual visible Tokens.",
   visible_tokens: "Visible Tokens is the actual output count exposed to the user and can be lower than configured maximum Output Tokens.",
   makespan: "Makespan is the span from the earliest start to final completion, not the end-to-end latency of one request.",
-  energy: "Total Energy is an analytical accumulation over tasks and resources; without calibrated profiles it is not measured power or cost.",
   rejection_reason: "Rejection Reason explains admission, capacity, SLO, or scheduling failure. An empty value only means the report did not state one.",
   percentile: "p50 is the median and p95 is the value not exceeded by 95% of samples; empty samples produce no value.",
   critical_path: "The critical path is the longest dependency path determining completion time; category totals need not equal it.",
@@ -796,7 +792,7 @@ const CONCEPT_HELP_SECTION_LABELS = Object.freeze([
 ]);
 const CONCEPT_HELP_DISPLAY_KEYS = new Set([
   "bandwidth_utilization", "bottleneck", "busy_fraction", "compute_utilization", "critical_path", "e2e",
-  "energy", "makespan", "memory_residency", "optimality_gap", "percentile", "rejection_reason",
+  "makespan", "memory_residency", "optimality_gap", "percentile", "rejection_reason",
   "storage_occupancy", "tbt", "throughput", "request_throughput", "token_throughput", "tpot", "ttft", "utilization", "simulation_results",
   "runtime_summary", "kv_traffic_summary", "kv_movement_summary", "runtime_execution_mode", "total_batches", "peak_batch", "preemption_count",
   "preemption_breakdown", "kv_peak_occupancy", "kv_max_live_tokens", "kv_swap_summary", "kv_capacity_pages",
@@ -809,7 +805,7 @@ const CONCEPT_HELP_DISPLAY_KEYS = new Set([
 const CONCEPT_HELP_PROFILE_KEYS = Object.freeze({
   hardware: new Set([
     "hbm", "gddr", "hbf", "cim", "chiplet", "pcie", "cxl", "ucie", "nvlink", "roce", "sram", "dma",
-    "read_latency", "write_latency", "transfer_granularity", "dma_latency", "dma_bandwidth", "dma_energy",
+    "read_latency", "write_latency", "transfer_granularity", "dma_latency", "dma_bandwidth",
     "dma_resource", "outstanding_requests", "capacity", "peak_ops", "gemm_throughput",
     "elementwise_throughput", "reduction_throughput", "bandwidth", "protocol", "bandwidth_semantics",
     "cost_profile", "cache_hierarchy", "tensor_core", "occupancy", "attainable_efficiency", "pipeline", "noc",
@@ -854,14 +850,14 @@ const CONCEPT_HELP_DETAIL_PROFILES = Object.freeze({
       "硬件与协议字段进入容量、算力和可达路径约束；模拟器只使用当前组件、端口、链路与证据中显式声明的值。",
       "可编辑检查器接受组件能力、协议版本、lane、载荷、延迟与带宽；标准名和预设说明是只读，预设应用仍需确认或校验。",
       "容量使用 B/KB…PB，带宽显示 MB/s、GB/s、TB/s，时延使用 ns，运算率使用 OPS/s；0、空值与 auto 仅在对应控件明确允许时有效。",
-      "修改能力或互连参数会使映射过期，并可改变容量门禁、路由、传输时间、瓶颈和能耗估算。",
+      "修改能力或互连参数会使映射过期，并可改变容量门禁、路由、传输时间和瓶颈。",
       "不建模未声明的缓存、队列或协议效率。例如端口峰值不会自动成为端到端应用吞吐。",
     ]),
     en: Object.freeze([
       "Hardware and protocol fields feed capacity, compute, and reachability constraints; the simulator uses only values explicitly declared by current components, ports, links, and evidence.",
       "Editable inspectors accept component capabilities, protocol version, lanes, payload, latency, and bandwidth. Standard names and preset notes are read-only, and applying a preset still requires confirmation or validation.",
       "Capacity uses B/KB through PB, bandwidth uses MB/s, GB/s, or TB/s, latency uses ns, and compute rate uses OPS/s. Zero, empty, and auto are valid only where the control explicitly allows them.",
-      "Changing capability or interconnect values invalidates placement and can alter capacity gates, routes, transfer time, bottlenecks, and energy estimates.",
+      "Changing capability or interconnect values invalidates placement and can alter capacity gates, routes, transfer time, and bottlenecks.",
       "Undeclared caches, queues, and protocol efficiency are not modeled. For example, port peak rate does not automatically become end-to-end application throughput.",
     ]),
   }),
@@ -933,16 +929,16 @@ const CONCEPT_HELP_DETAIL_PROFILES = Object.freeze({
     "zh-CN": Object.freeze([
       "后端从当前仿真报告产生该只读指标；界面保留原始口径、分位数、保真度和缺失状态。",
       "用户不能直接填写结果值；筛选、比较或图表尺度只改变呈现，重新运行才会生成新指标。",
-      "单位随指标显示，常见为 ns、%、tok/s、req/s、B 或 pJ；NA 表示后端未提供可验证值，不能当作 0。",
-      "指标用于比较延迟、吞吐、容量、资源压力和能耗，应与负载、映射、样本数及 Fidelity 一起解释。",
-      "分析结果不是无条件适用的硬件实测。例如 p95 需要足够样本，未校准能耗也不能直接推导电费。",
+      "单位随指标显示，常见为 ns、%、tok/s、req/s 或 B；NA 表示后端未提供可验证值，不能当作 0。",
+      "指标用于比较延迟、吞吐、容量和资源压力，应与负载、映射、样本数及 Fidelity 一起解释。",
+      "分析结果不是无条件适用的硬件实测。例如 p95 需要足够样本。",
     ]),
     en: Object.freeze([
       "The backend produces this read-only metric from the current simulation report, and the UI preserves its scope, percentile, fidelity, and missing state.",
       "Users cannot enter the result directly. Filters, comparison, and chart scale change presentation only; rerunning produces new metrics.",
-      "Units are printed with the metric and commonly include ns, %, tok/s, req/s, B, or pJ. NA means no verifiable backend value and is not zero.",
-      "Use the metric to compare latency, throughput, capacity, resource pressure, and energy together with workload, placement, sample count, and Fidelity.",
-      "An analytical result is not an unconditional hardware measurement. For example, p95 needs enough samples, and uncalibrated energy cannot directly determine cost.",
+      "Units are printed with the metric and commonly include ns, %, tok/s, req/s, or B. NA means no verifiable backend value and is not zero.",
+      "Use the metric to compare latency, throughput, capacity and resource pressure together with workload, placement, sample count, and Fidelity.",
+      "An analytical result is not an unconditional hardware measurement. For example, p95 needs enough samples.",
     ]),
   }),
 });
@@ -1048,8 +1044,8 @@ const CONCEPT_HELP_220_DETAIL_OVERRIDES = Object.freeze({
     "Source: whether workload.mtp is null.|Toggle candidate proposal and acceptance modeling.|Boolean state.|Enabling it adds proposal cost and MTP statistics.|When disabled, Candidate/Acceptance/Proposal controls are disabled and MTP results cannot be fabricated.",
   ),
   simulation_results: conceptHelp220Detail(
-    "来源是当前完成的仿真 report。｜只读汇总清单、指标、运行时、时序和请求明细。｜各卡片保留自己的 ns、%、rate、bytes 或 pJ 单位。｜它支持比较与诊断但不修改场景。｜结果页标题不是 Fidelity；精确度由每项证据另行声明。",
-    "Source: the current completed simulation report.|Read-only manifest, metrics, runtime, series, and request detail.|Each card retains its own ns, percent, rate, byte, or pJ unit.|It supports comparison and diagnosis without editing the scenario.|The page title is not Fidelity; evidence quality is declared per result.",
+    "来源是当前完成的仿真 report。｜只读汇总清单、指标、运行时、时序和请求明细。｜各卡片保留自己的 ns、%、rate 或 bytes 单位。｜它支持比较与诊断但不修改场景。｜结果页标题不是 Fidelity；精确度由每项证据另行声明。",
+    "Source: the current completed simulation report.|Read-only manifest, metrics, runtime, series, and request detail.|Each card retains its own ns, percent, rate, or byte unit.|It supports comparison and diagnosis without editing the scenario.|The page title is not Fidelity; evidence quality is declared per result.",
   ),
   runtime_summary: conceptHelp220Detail(
     "来源是 report 的 parallel、scheduler、kv_cache、mtp 与 goodput 对象。｜只读分组展示运行时统计。｜每项保留 events、Tokens、bytes、ns 或 rate 单位。｜它把配置结果与实际调度行为并列。｜缺失字段显示 NA/—，不会由相邻指标推断。",
@@ -1408,7 +1404,7 @@ const CONCEPT_HELP_COVERAGE_BY_VIEW = Object.freeze({
     "hardware_topology", "gpu", "cpu", "accelerator", "hbm", "hbm_stack", "host_memory", "cxl_memory", "hbf", "ssd",
     "high_io_ssd", "cim", "sram", "fabric_switch", "io_die", "chiplet", "physical_link", "bidirectional_link",
     "pcie", "cxl", "ucie", "nvlink", "roce", "lanes", "payload", "bandwidth", "link_bandwidth", "link_latency", "capacity",
-    "peak_ops", "gemm_throughput", "elementwise_throughput", "reduction_throughput", "read_latency", "write_latency", "transfer_granularity", "dma", "dma_latency", "dma_bandwidth", "dma_energy",
+    "peak_ops", "gemm_throughput", "elementwise_throughput", "reduction_throughput", "read_latency", "write_latency", "transfer_granularity", "dma", "dma_latency", "dma_bandwidth",
     "dma_resource", "outstanding_requests", "cost_profile", "cache_hierarchy", "tensor_core", "occupancy", "attainable_efficiency", "pipeline", "noc", "component_preset",
     "architecture_preset", "evidence", "protocol", "bandwidth_semantics", "roofline",
   ]),
@@ -1447,7 +1443,7 @@ const CONCEPT_HELP_COVERAGE_BY_VIEW = Object.freeze({
     "kv_offload_total", "kv_prefetch_total", "kv_migration_total", "kv_recompute", "kv_swap_transfer_time", "kv_prefetch_distance",
     "mtp_proposed_tokens", "mtp_accepted_tokens", "mtp_committed_tokens", "mtp_rejected_tokens", "mtp_effective_rate",
     "goodput", "goodput_request_rate", "goodput_token_rate", "goodput_qualified_requests", "category_time", "request_metrics",
-    "visible_tokens", "ttft", "tbt", "tpot", "e2e", "throughput", "request_throughput", "token_throughput", "makespan", "energy", "percentile", "rejection_reason",
+    "visible_tokens", "ttft", "tbt", "tpot", "e2e", "throughput", "request_throughput", "token_throughput", "makespan", "percentile", "rejection_reason",
     "critical_path", "bottleneck", "utilization", "busy_fraction", "compute_utilization", "memory_residency",
     "storage_occupancy", "bandwidth_utilization", "component_timeseries", "roofline", "fidelity", "analytical_report", "run_manifest",
   ]),
@@ -1540,7 +1536,7 @@ const CONCEPT_TERM_PATTERNS = Object.freeze([
   ["nvlink", /\bNVLink(?:-C2C)?\b/iu], ["roce", /\bRoCE\b/iu], ["sram", /\bSRAM\b/iu],
   ["read_latency", /读取延迟|Read Latency/iu], ["write_latency", /写入延迟|Write Latency/iu],
   ["transfer_granularity", /传输粒度|Transfer Granularity/iu], ["dma_latency", /DMA 延迟|DMA Latency/iu],
-  ["dma_bandwidth", /DMA 带宽|DMA Bandwidth/iu], ["dma_energy", /DMA 能耗|DMA Energy/iu],
+  ["dma_bandwidth", /DMA 带宽|DMA Bandwidth/iu],
   ["dma_resource", /DMA 资源(?: ID)?|DMA Resource(?: ID)?/iu],
   ["outstanding_requests", /最大并发请求|Max(?:imum)? Outstanding Requests/iu], ["dma", /\bDMA\b/iu],
   ["cache_hierarchy", /Cache\s*(?:Hierarchy|Level|Line)|缓存层级/iu],
@@ -1609,7 +1605,7 @@ const CONCEPT_TERM_PATTERNS = Object.freeze([
   ["compute_utilization", /Compute Utilization|计算利用率|GPU busy/iu], ["storage_occupancy", /Storage Occupancy|存储占用/iu], ["memory_residency", /Residency|容量驻留/iu],
   ["bandwidth_utilization", /Bandwidth Utilization|带宽利用率/iu], ["run_manifest", /Run Manifest|运行清单/iu],
   ["ttft", /\bTTFT\b|首 Token/iu], ["tbt", /\bTBT\b|Token 间/iu],
-  ["e2e", /\bE2E\b|端到端/iu], ["makespan", /总历时|Makespan/iu], ["energy", /总能耗|Total Energy/iu],
+  ["e2e", /\bE2E\b|端到端/iu], ["makespan", /总历时|Makespan/iu],
   ["rejection_reason", /拒绝原因|Rejection Reason/iu], ["percentile", /\bp(?:50|95|99)\b|分位数|Percentile/iu], ["critical_path", /关键路径|Critical Path/iu],
   ["bottleneck", /瓶颈|Bottleneck/iu], ["utilization", /利用率|Utilization/iu], ["model_graph", /模型语义组件图|Model Graph/iu],
   ["typed_port", /端口|Port/iu], ["tensor_shape", /形状|Shape|维度/iu], ["explicit_transform", /显式变换|Transform/iu],
@@ -5070,6 +5066,15 @@ const DRAM_PHYSICAL_REQUIRED_FIELDS = [
   "open_ns", "close_ns", "read_latency_ns", "write_latency_ns", "burst_interval_ns",
   "read_recovery_ns", "write_recovery_ns", "read_to_write_ns", "write_to_read_ns", "max_outstanding_requests",
 ];
+const DRAM_BANK_GROUP_TIMING_FIELDS = [
+  ["column_same_group_ns", "同组同方向列命令间隔", "Same-group, same-direction column interval"],
+  ["column_different_group_ns", "异组同方向列命令间隔", "Different-group, same-direction column interval"],
+  ["activate_same_group_ns", "同组 ACT 起点间隔", "Same-group ACT start interval"],
+  ["activate_different_group_ns", "异组 ACT 起点间隔", "Different-group ACT start interval"],
+  ["four_activate_window_ns", "最多四次 ACT 的窗口", "Window allowing at most four ACTs"],
+  ["write_to_read_same_group_ns", "同组写数据结束至读命令间隔", "Same-group write-data end to read-command interval"],
+  ["write_to_read_different_group_ns", "异组写数据结束至读命令间隔", "Different-group write-data end to read-command interval"],
+];
 const NAND_PHYSICAL_REQUIRED_FIELDS = [
   "channels", "targets_per_channel", "dies_per_target", "luns_per_die", "planes_per_lun",
   "blocks_per_plane", "pages_per_block", "page_bytes", "host_granularity_bytes",
@@ -5135,6 +5140,13 @@ function validatePhysicalMemoryConfig(value, component) {
       throw new Error(`physical_memory_config.${field} 必须是非负有限数。`);
     }
   });
+  if (!nand) DRAM_BANK_GROUP_TIMING_FIELDS.forEach(([field]) => {
+    if (Object.hasOwn(value, field) && (
+      typeof value[field] !== "number" || !Number.isFinite(value[field]) || value[field] < 0
+    )) {
+      throw new Error(`physical_memory_config.${field} 必须是非负有限数；0 表示关闭该约束。`);
+    }
+  });
   if (nand && typeof value.planes_independent !== "boolean") {
     throw new Error("physical_memory_config.planes_independent 必须是布尔值。");
   }
@@ -5153,6 +5165,19 @@ function validatePhysicalMemoryConfig(value, component) {
     throw new Error("physical_memory_config.capacity_bytes 必须为正整数且与组件 capacity_bytes 一致。");
   }
   return { ...value, kind };
+}
+
+function dramBankGroupTimingMarkup(config) {
+  if (!config || !["DDR", "LPDDR", "HBM", "GDDR"].includes(String(config.kind || "").toUpperCase())) return "";
+  const enabled = DRAM_BANK_GROUP_TIMING_FIELDS.some(([field]) => Number(config[field] || 0) > 0);
+  return `<details class="inspector-section dram-bank-group-timing">
+    <summary><span>${uiText("Bank group 时序约束（可选）", "Bank-group timing constraints (optional)")}</span><span class="section-summary-state ${enabled ? "is-active" : ""}">${uiText(enabled ? "已启用" : "全零关闭", enabled ? "Enabled" : "All zero: disabled")}</span></summary>
+    <div class="inspector-section-body">
+      <p class="muted">${uiText("作用域是同一 stack / die / lane / rank。同方向列命令只约束 READ→READ 和 WRITE→WRITE 的命令起点；ACT 是打开行的命令，窗口内最多允许四次 ACT。写转读约束从最后写数据结束算到读命令起点，与数据总线的方向切换时间分别生效。", "Scope is one stack / die / lane / rank. Column intervals constrain READ→READ and WRITE→WRITE command starts. ACT opens a row; its window allows at most four ACTs. Write-to-read intervals run from the last write-data end to the read-command start, separately from data-bus turnaround.")}</p>
+      <div class="field-grid-2">${DRAM_BANK_GROUP_TIMING_FIELDS.map(([field, zh, en]) => `<label class="field"><span>${escapeHtml(uiText(zh, en))}（ns）</span><input type="number" min="0" step="any" data-inspector-bank-group-timing="${field}" aria-label="${field}" value="${escapeHtml(config[field] ?? 0)}"></label>`).join("")}</div>
+      <p class="muted">${uiText("每项 0 表示关闭该项约束，旧配置省略时仍为 0。这里不填入任何厂商默认时序；数值需由用户提供。启用这些约束仍不代表完整 JEDEC 模型，刷新等机制未包括在内。", "Zero disables each constraint; omitted legacy fields remain zero. No vendor timing defaults are supplied; provide values explicitly. These constraints do not make the model a complete JEDEC implementation; refresh and other mechanisms remain outside its scope.")}</p>
+    </div>
+  </details>`;
 }
 
 function missingScenarioInputIssues(scenario = state.scenario) {
@@ -7247,9 +7272,9 @@ function addComponent(kind) {
     gddr: { capacity_bytes: gddrDefaultCapacityBytes, peak_ops_per_s: 0, read_bandwidth_gbps: 5120, write_bandwidth_gbps: 5120, metadata: { evidence_status: "analytical", generation: "GDDR6", node_scope: "equivalent_gpu_memory_subsystem", capacity_unit: gddrDefaultCapacityUnit, read_latency_ns: 35, write_latency_ns: 35, transfer_granularity_bytes: 256, max_outstanding_requests: 64, dma_latency_ns: 0, physical_memory_config: { kind: "GDDR", generation: "GDDR6", channels: 1, data_lanes: 8, data_width_bits: 32, effective_pin_data_rate_gbps: 20, bandwidth_input_mode: "data_rate", stacks: 1, dies_per_stack: 1, ranks_per_channel: 1, bank_groups_per_rank: 4, banks_per_group: 4, rows_per_bank: 131072, row_bytes: 8192, burst_bytes: 64, interleave_bytes: 64, open_ns: 14, close_ns: 14, read_latency_ns: 35, write_latency_ns: 35, burst_interval_ns: 0.8, max_outstanding_requests: 64, capacity_bytes: gddrDefaultCapacityBytes, metadata: { capacity_unit: gddrDefaultCapacityUnit, command_interval_model: "per_lane_burst_payload_budget" } } } },
     dram: { capacity_bytes: 32 * 1024 ** 3, peak_ops_per_s: 0, read_bandwidth_gbps: 2048, write_bandwidth_gbps: 2048, metadata: { evidence_status: "analytical", read_latency_ns: 60, write_latency_ns: 60, transfer_granularity_bytes: 256, dma_latency_ns: 0 } },
     host_memory: { capacity_bytes: 128 * 1024 ** 3, peak_ops_per_s: 0, read_bandwidth_gbps: 1600, write_bandwidth_gbps: 1600, metadata: { evidence_status: "analytical", source: "editable-reference-default", read_latency_ns: 100, write_latency_ns: 100, transfer_granularity_bytes: 64, dma_latency_ns: 0 } },
-    hbf: { capacity_bytes: 512 * 1024 ** 3, peak_ops_per_s: 0, read_bandwidth_gbps: 3904, write_bandwidth_gbps: 217.6, metadata: { evidence_status: "analytical_user_configured", source: "user-configured-hbf-coordinates", dma_parameter_basis: "editable analytical assumption bounded by the HBF logical path", reference_capacity: "512 GB", reference_read_bandwidth: "488 GB/s", reference_write_bandwidth: "27.2 GB/s", read_only: false, writable: true, access_mode: "memory", write_buffer_bytes: 0, read_latency_ns: 4000, write_latency_ns: 75000, transfer_granularity_bytes: 4096, max_outstanding_requests: 32, dma_bandwidth_gbps: 3904, dma_latency_ns: 800, dma_energy_pj_per_byte: 0 } },
-    ssd: { capacity_bytes: 4 * 1024 ** 4, peak_ops_per_s: 0, read_bandwidth_gbps: 64, write_bandwidth_gbps: 48, metadata: { evidence_status: "analytical", source: "reference-default", dma_parameter_basis: "editable analytical storage-controller assumption", read_latency_ns: 80000, write_latency_ns: 100000, transfer_granularity_bytes: 4096, max_outstanding_requests: 32, dma_bandwidth_gbps: 64, dma_latency_ns: 2000, dma_energy_pj_per_byte: 0 } },
-    high_io_ssd: { capacity_bytes: 8 * 1024 ** 4, peak_ops_per_s: 0, read_bandwidth_gbps: 448, write_bandwidth_gbps: 224, metadata: { evidence_status: "analytical", source: "reference-default", dma_parameter_basis: "editable analytical high-I/O controller assumption", read_latency_ns: 25000, write_latency_ns: 40000, transfer_granularity_bytes: 4096, max_outstanding_requests: 64, dma_bandwidth_gbps: 448, dma_latency_ns: 1200, dma_energy_pj_per_byte: 0 } },
+    hbf: { capacity_bytes: 512 * 1024 ** 3, peak_ops_per_s: 0, read_bandwidth_gbps: 3904, write_bandwidth_gbps: 217.6, metadata: { evidence_status: "analytical_user_configured", source: "user-configured-hbf-coordinates", dma_parameter_basis: "editable analytical assumption bounded by the HBF logical path", reference_capacity: "512 GB", reference_read_bandwidth: "488 GB/s", reference_write_bandwidth: "27.2 GB/s", read_only: false, writable: true, access_mode: "memory", write_buffer_bytes: 0, read_latency_ns: 4000, write_latency_ns: 75000, transfer_granularity_bytes: 4096, max_outstanding_requests: 32, dma_bandwidth_gbps: 3904, dma_latency_ns: 800 } },
+    ssd: { capacity_bytes: 4 * 1024 ** 4, peak_ops_per_s: 0, read_bandwidth_gbps: 64, write_bandwidth_gbps: 48, metadata: { evidence_status: "analytical", source: "reference-default", dma_parameter_basis: "editable analytical storage-controller assumption", read_latency_ns: 80000, write_latency_ns: 100000, transfer_granularity_bytes: 4096, max_outstanding_requests: 32, dma_bandwidth_gbps: 64, dma_latency_ns: 2000 } },
+    high_io_ssd: { capacity_bytes: 8 * 1024 ** 4, peak_ops_per_s: 0, read_bandwidth_gbps: 448, write_bandwidth_gbps: 224, metadata: { evidence_status: "analytical", source: "reference-default", dma_parameter_basis: "editable analytical high-I/O controller assumption", read_latency_ns: 25000, write_latency_ns: 40000, transfer_granularity_bytes: 4096, max_outstanding_requests: 64, dma_bandwidth_gbps: 448, dma_latency_ns: 1200 } },
     digital_sram_cim: { capacity_bytes: 512 * 1024 * 1024, peak_ops_per_s: 0, read_bandwidth_gbps: 0, write_bandwidth_gbps: 0, metadata: { evidence_status: "analytical", read_latency_ns: 5, write_latency_ns: 5, transfer_granularity_bytes: 64, dma_latency_ns: 0 } },
   }[kind];
   if (!defaults) {
@@ -7855,18 +7880,16 @@ const COST_PROFILE_FIELD_RULES = Object.freeze({
     reduction_ops_per_cycle_per_sm: "positive", special_function_units_per_sm: "positive_integer",
     special_function_ops_per_cycle: "positive", occupancy: "efficiency",
     attainable_efficiency: "efficiency", kernel_launch_ns: "nonnegative",
-    tensor_energy_pj_per_op: "nonnegative", scalar_energy_pj_per_op: "nonnegative",
-    special_function_energy_pj_per_op: "nonnegative", launch_energy_pj: "nonnegative",
     scalar_resource_id: "text", special_function_resource_id: "text", launch_resource_id: "text", name: "text",
   }),
   hbm: Object.freeze({
-    bandwidth_gb_s: "positive", efficiency: "efficiency", measured_effective_bandwidth_gb_s: "optional_positive", energy_pj_per_byte: "nonnegative", resource_id: "text",
+    bandwidth_gb_s: "positive", efficiency: "efficiency", measured_effective_bandwidth_gb_s: "optional_positive", resource_id: "text",
     read_bandwidth_gb_s: "optional_positive", write_bandwidth_gb_s: "optional_positive",
     read_latency_ns: "nonnegative", write_latency_ns: "nonnegative",
     transaction_bytes: "positive_integer", max_outstanding_requests: "positive_integer",
   }),
   gddr: Object.freeze({
-    bandwidth_gb_s: "positive", efficiency: "efficiency", measured_effective_bandwidth_gb_s: "optional_positive", energy_pj_per_byte: "nonnegative", resource_id: "text",
+    bandwidth_gb_s: "positive", efficiency: "efficiency", measured_effective_bandwidth_gb_s: "optional_positive", resource_id: "text",
     read_bandwidth_gb_s: "optional_positive", write_bandwidth_gb_s: "optional_positive",
     read_latency_ns: "nonnegative", write_latency_ns: "nonnegative",
     transaction_bytes: "positive_integer", max_outstanding_requests: "positive_integer", parallel_lanes: "positive_integer",
@@ -7882,12 +7905,10 @@ const COST_PROFILE_FIELD_RULES = Object.freeze({
     "pipeline.load_store_queue_entries": "positive_integer", "pipeline.memory_level_parallelism": "positive_integer",
     "pipeline.branch_mispredict_ns": "nonnegative", "pipeline.resource_id": "text",
     attainable_efficiency: "efficiency", dispatch_ns: "nonnegative",
-    gemm_energy_pj_per_op: "nonnegative", elementwise_energy_pj_per_op: "nonnegative",
-    reduction_energy_pj_per_op: "nonnegative", special_function_energy_pj_per_op: "nonnegative",
-    dispatch_energy_pj: "nonnegative", name: "text",
+    name: "text",
   }),
   host_memory: Object.freeze({
-    bandwidth_gb_s: "positive", efficiency: "efficiency", measured_effective_bandwidth_gb_s: "optional_positive", energy_pj_per_byte: "nonnegative", resource_id: "text", name: "text",
+    bandwidth_gb_s: "positive", efficiency: "efficiency", measured_effective_bandwidth_gb_s: "optional_positive", resource_id: "text", name: "text",
     read_bandwidth_gb_s: "optional_positive", write_bandwidth_gb_s: "optional_positive",
     read_latency_ns: "nonnegative", write_latency_ns: "nonnegative",
     transaction_bytes: "positive_integer", max_outstanding_requests: "positive_integer",
@@ -7900,9 +7921,6 @@ const COST_PROFILE_FIELD_RULES = Object.freeze({
     noc_bandwidth_gb_s: "positive", accumulator_outputs_per_cycle: "positive", peripheral_elements_per_cycle: "positive",
     load_latency_ns: "nonnegative", noc_hop_latency_ns: "nonnegative", noc_reduce_fan_in: "positive_integer",
     peripheral_latency_ns: "nonnegative", accumulator_bits: "positive_integer", accumulator_guard_bits: "nonnegative_integer",
-    eval_energy_pj: "nonnegative", load_energy_pj_per_byte: "nonnegative", activation_energy_pj_per_byte: "nonnegative",
-    output_energy_pj_per_byte: "nonnegative", noc_energy_pj_per_byte: "nonnegative",
-    accumulator_energy_pj_per_op: "nonnegative", peripheral_energy_pj_per_element: "nonnegative",
     array_resource_id: "text", load_resource_id: "text", activation_resource_id: "text", noc_resource_id: "text",
     accumulator_resource_id: "text", peripheral_resource_id: "text", name: "text",
     arithmetic_mode: "enum", float_cycles_per_eval: "optional_positive",
@@ -7910,8 +7928,8 @@ const COST_PROFILE_FIELD_RULES = Object.freeze({
     weight_conversion_mode: "enum", weight_decode_elements_per_ns: "nonnegative",
     conversion_scratch_capacity_bytes: "nonnegative_integer",
     activation_fp32_to_fp16_elements_per_ns: "nonnegative",
-    conversion_contract_basis: "text", conversion_read_energy_pj_per_byte: "nonnegative",
-    conversion_write_energy_pj_per_byte: "nonnegative", tile_m: "positive_integer",
+    conversion_contract_basis: "text",
+    tile_m: "positive_integer",
     tile_k: "positive_integer", tile_n: "positive_integer",
   }),
 });
@@ -8135,7 +8153,7 @@ function costProfileProvenanceMarkup(profileKey, component) {
   const links = sources.length
     ? sources.map((source) => `<a href="${escapeHtml(source.url)}" target="_blank" rel="noreferrer">${escapeHtml(source.title)}</a>`).join(" · ")
     : "当前场景未声明公开来源（No public source declared in this scenario）";
-  return `<p class="muted profile-provenance-note"><strong>来源与假设（Source &amp; assumptions）</strong>：公开产品事实可由以下来源核对：${links}。占用率、可达效率、缓存时序、能耗与 Pipeline issue 参数是分析/校准值，不是厂商规格（analytical defaults, not vendor facts）。</p>`;
+  return `<p class="muted profile-provenance-note"><strong>来源与假设（Source &amp; assumptions）</strong>：公开产品事实可由以下来源核对：${links}。占用率、可达效率、缓存时序与 Pipeline issue 参数是分析/校准值，不是厂商规格（analytical defaults, not vendor facts）。</p>`;
 }
 
 function costProfileComponent(profileKey, selectedComponent, scenario = state.scenario) {
@@ -8153,8 +8171,8 @@ function costProfileDraft(profileKey, selectedComponent, scenario = state.scenar
     const cacheHierarchy = asObject(current.cache_hierarchy);
     const hostGemmOffload = asObject(current.host_gemm_offload);
     const defaultCacheLevels = [
-      { name: "l1_shared", capacity_bytes: 30 * 1024 ** 2, line_bytes: 128, hit_latency_ns: 20, bandwidth_gb_s: 24000, associativity: 16, banks: 3840, read_ports: 2, write_ports: 1, max_outstanding: 32, energy_pj_per_byte: 0.15, resource_id: `${componentId}.l1_shared` },
-      { name: "l2", capacity_bytes: 50 * 1024 ** 2, line_bytes: 128, hit_latency_ns: 120, bandwidth_gb_s: 12000, associativity: 16, banks: 128, read_ports: 2, write_ports: 1, max_outstanding: 128, energy_pj_per_byte: 0.6, resource_id: `${componentId}.l2` },
+      { name: "l1_shared", capacity_bytes: 30 * 1024 ** 2, line_bytes: 128, hit_latency_ns: 20, bandwidth_gb_s: 24000, associativity: 16, banks: 3840, read_ports: 2, write_ports: 1, max_outstanding: 32, resource_id: `${componentId}.l1_shared` },
+      { name: "l2", capacity_bytes: 50 * 1024 ** 2, line_bytes: 128, hit_latency_ns: 120, bandwidth_gb_s: 12000, associativity: 16, banks: 128, read_ports: 2, write_ports: 1, max_outstanding: 128, resource_id: `${componentId}.l2` },
     ];
     const currentLevels = asArray(cacheHierarchy.levels);
     return {
@@ -8195,10 +8213,6 @@ function costProfileDraft(profileKey, selectedComponent, scenario = state.scenar
       occupancy: efficiencyProfileNumber(current.occupancy, 0.85),
       attainable_efficiency: efficiencyProfileNumber(current.attainable_efficiency, 0.65),
       kernel_launch_ns: nonnegativeProfileNumber(current.kernel_launch_ns),
-      tensor_energy_pj_per_op: nonnegativeProfileNumber(current.tensor_energy_pj_per_op, 0.2),
-      scalar_energy_pj_per_op: nonnegativeProfileNumber(current.scalar_energy_pj_per_op, 0.35),
-      special_function_energy_pj_per_op: nonnegativeProfileNumber(current.special_function_energy_pj_per_op, 1.2),
-      launch_energy_pj: nonnegativeProfileNumber(current.launch_energy_pj),
       scalar_resource_id: String(current.scalar_resource_id || `${componentId}.scalar`),
       special_function_resource_id: String(current.special_function_resource_id || `${componentId}.sfu`),
       launch_resource_id: String(current.launch_resource_id || `${componentId}.frontend`),
@@ -8224,7 +8238,6 @@ function costProfileDraft(profileKey, selectedComponent, scenario = state.scenar
       write_latency_ns: nonnegativeProfileNumber(current.write_latency_ns, nonnegativeProfileNumber(metadata.write_latency_ns)),
       transaction_bytes: positiveProfileNumber(current.transaction_bytes, positiveProfileNumber(metadata.transfer_granularity_bytes, 256)),
       max_outstanding_requests: positiveProfileNumber(current.max_outstanding_requests, positiveProfileNumber(metadata.max_outstanding_requests, 32)),
-      energy_pj_per_byte: nonnegativeProfileNumber(current.energy_pj_per_byte),
       resource_id: String(current.resource_id || `${componentId}.${profileKey}_fabric`),
     };
   }
@@ -8232,9 +8245,9 @@ function costProfileDraft(profileKey, selectedComponent, scenario = state.scenar
     const pipeline = asObject(current.pipeline);
     const cacheHierarchy = asObject(current.cache_hierarchy);
     const defaultCacheLevels = [
-      { name: "l1d", capacity_bytes: 16 * 48 * 1024, line_bytes: 64, hit_latency_ns: 1, bandwidth_gb_s: 3000, associativity: 12, banks: 128, read_ports: 3, write_ports: 2, max_outstanding: 16, energy_pj_per_byte: 0.2, resource_id: `${componentId}.l1d` },
-      { name: "l2", capacity_bytes: 16 * 2 * 1024 ** 2, line_bytes: 64, hit_latency_ns: 4, bandwidth_gb_s: 1500, associativity: 16, banks: 128, read_ports: 2, write_ports: 1, max_outstanding: 32, energy_pj_per_byte: 0.8, resource_id: `${componentId}.l2` },
-      { name: "l3", capacity_bytes: 64 * 1024 ** 2, line_bytes: 64, hit_latency_ns: 18, bandwidth_gb_s: 800, associativity: 16, banks: 64, read_ports: 2, write_ports: 1, max_outstanding: 64, energy_pj_per_byte: 2, resource_id: `${componentId}.l3` },
+      { name: "l1d", capacity_bytes: 16 * 48 * 1024, line_bytes: 64, hit_latency_ns: 1, bandwidth_gb_s: 3000, associativity: 12, banks: 128, read_ports: 3, write_ports: 2, max_outstanding: 16, resource_id: `${componentId}.l1d` },
+      { name: "l2", capacity_bytes: 16 * 2 * 1024 ** 2, line_bytes: 64, hit_latency_ns: 4, bandwidth_gb_s: 1500, associativity: 16, banks: 128, read_ports: 2, write_ports: 1, max_outstanding: 32, resource_id: `${componentId}.l2` },
+      { name: "l3", capacity_bytes: 64 * 1024 ** 2, line_bytes: 64, hit_latency_ns: 18, bandwidth_gb_s: 800, associativity: 16, banks: 64, read_ports: 2, write_ports: 1, max_outstanding: 64, resource_id: `${componentId}.l3` },
     ];
     const currentLevels = asArray(cacheHierarchy.levels);
     return {
@@ -8272,11 +8285,6 @@ function costProfileDraft(profileKey, selectedComponent, scenario = state.scenar
         .map((capability) => deepClone(asObject(capability))),
       attainable_efficiency: efficiencyProfileNumber(current.attainable_efficiency, 0.72),
       dispatch_ns: nonnegativeProfileNumber(current.dispatch_ns),
-      gemm_energy_pj_per_op: nonnegativeProfileNumber(current.gemm_energy_pj_per_op, 1.5),
-      elementwise_energy_pj_per_op: nonnegativeProfileNumber(current.elementwise_energy_pj_per_op, 1),
-      reduction_energy_pj_per_op: nonnegativeProfileNumber(current.reduction_energy_pj_per_op, 1.2),
-      special_function_energy_pj_per_op: nonnegativeProfileNumber(current.special_function_energy_pj_per_op, 4),
-      dispatch_energy_pj: nonnegativeProfileNumber(current.dispatch_energy_pj, 800),
       name: String(current.name || `${componentId}-cpu-profile`),
     };
   }
@@ -8292,7 +8300,6 @@ function costProfileDraft(profileKey, selectedComponent, scenario = state.scenar
       write_latency_ns: nonnegativeProfileNumber(current.write_latency_ns, nonnegativeProfileNumber(metadata.write_latency_ns)),
       transaction_bytes: positiveProfileNumber(current.transaction_bytes, positiveProfileNumber(metadata.transfer_granularity_bytes, 256)),
       max_outstanding_requests: positiveProfileNumber(current.max_outstanding_requests, positiveProfileNumber(metadata.max_outstanding_requests, 32)),
-      energy_pj_per_byte: nonnegativeProfileNumber(current.energy_pj_per_byte),
       resource_id: String(current.resource_id || `${componentId}.memory`),
       name: String(current.name || `${componentId}-memory-profile`),
     };
@@ -8324,13 +8331,6 @@ function costProfileDraft(profileKey, selectedComponent, scenario = state.scenar
       accumulator_guard_bits: nonnegativeProfileNumber(current.accumulator_guard_bits),
       supported_activation_bits: asArray(current.supported_activation_bits).length ? deepClone(current.supported_activation_bits) : [1, 2, 4, 8, 16],
       supported_weight_bits: asArray(current.supported_weight_bits).length ? deepClone(current.supported_weight_bits) : [1, 2, 4, 8, 16],
-      eval_energy_pj: nonnegativeProfileNumber(current.eval_energy_pj),
-      load_energy_pj_per_byte: nonnegativeProfileNumber(current.load_energy_pj_per_byte),
-      activation_energy_pj_per_byte: nonnegativeProfileNumber(current.activation_energy_pj_per_byte),
-      output_energy_pj_per_byte: nonnegativeProfileNumber(current.output_energy_pj_per_byte),
-      noc_energy_pj_per_byte: nonnegativeProfileNumber(current.noc_energy_pj_per_byte),
-      accumulator_energy_pj_per_op: nonnegativeProfileNumber(current.accumulator_energy_pj_per_op),
-      peripheral_energy_pj_per_element: nonnegativeProfileNumber(current.peripheral_energy_pj_per_element),
       array_resource_id: String(current.array_resource_id || `${componentId}.array`),
       load_resource_id: String(current.load_resource_id || `${componentId}.load`),
       activation_resource_id: String(current.activation_resource_id || `${componentId}.activation`),
@@ -8348,8 +8348,6 @@ function costProfileDraft(profileKey, selectedComponent, scenario = state.scenar
         ? Number(current.conversion_scratch_capacity_bytes) : 0,
       activation_fp32_to_fp16_elements_per_ns: nonnegativeProfileNumber(current.activation_fp32_to_fp16_elements_per_ns),
       conversion_contract_basis: String(current.conversion_contract_basis || ""),
-      conversion_read_energy_pj_per_byte: nonnegativeProfileNumber(current.conversion_read_energy_pj_per_byte),
-      conversion_write_energy_pj_per_byte: nonnegativeProfileNumber(current.conversion_write_energy_pj_per_byte),
       ...(current.tile_m == null ? {} : { tile_m: Number(current.tile_m) }),
       ...(current.tile_k == null ? {} : { tile_k: Number(current.tile_k) }),
       ...(current.tile_n == null ? {} : { tile_n: Number(current.tile_n) }),
@@ -8581,9 +8579,6 @@ function costProfileFieldUnit(field, label = "") {
   if (/bandwidth_gb_s|带宽（gb\/s/.test(key)) return "GB/s";
   if (/frequency_ghz|频率（ghz/.test(key)) return "GHz";
   if (/latency_ns|launch_ns|mispredict_ns|dispatch_ns|延迟（ns/.test(key)) return "ns";
-  if (/energy_pj_per_byte|能耗（pj\/b/.test(key)) return "pJ/B";
-  if (/energy_pj_per_op|能耗（pj\/op/.test(key)) return "pJ/op";
-  if (/eval_energy_pj|launch_energy_pj|dispatch_energy_pj/.test(key)) return "pJ";
   if (/capacity_bytes|line_bytes|transaction_bytes|scratch_capacity_bytes|容量（b/.test(key)) return "B";
   if (/ops_per_cycle|ops\/cycle/.test(key)) return "OPS/cycle";
   if (/cycles/.test(key)) return "cycles";
@@ -8616,7 +8611,6 @@ function cacheHierarchyCostProfileMarkup(profileKey, profile) {
         ${costProfileNumberField("读端口（ports）", profileKey, `cache_hierarchy.levels.${index}.read_ports`, level.read_ports, "positive_integer")}
         ${costProfileNumberField("写端口（ports）", profileKey, `cache_hierarchy.levels.${index}.write_ports`, level.write_ports, "positive_integer")}
         ${costProfileNumberField("最大并发请求（requests，depth）", profileKey, `cache_hierarchy.levels.${index}.max_outstanding`, level.max_outstanding, "positive_integer")}
-        ${costProfileNumberField("能耗（pJ/B）", profileKey, `cache_hierarchy.levels.${index}.energy_pj_per_byte`, level.energy_pj_per_byte)}
         ${costProfileTextField("Cache 资源 ID", profileKey, `cache_hierarchy.levels.${index}.resource_id`, level.resource_id)}
       </div>
     </section>`).join("");
@@ -8664,7 +8658,6 @@ function memoryCostProfileMarkup(profileKey, component) {
       <div class="field-grid-2">
         ${costProfileNumberField("可达效率（0–1）", profileKey, "efficiency", profile.efficiency, "efficiency")}
         ${costProfileNumberField("实测有效带宽覆盖（GB/s，可选）", profileKey, "measured_effective_bandwidth_gb_s", profile.measured_effective_bandwidth_gb_s, "optional_positive")}
-        ${costProfileNumberField("内存能耗（pJ/B）", profileKey, "energy_pj_per_byte", profile.energy_pj_per_byte)}
         ${costProfileNumberField("读取带宽（GB/s，可选）", profileKey, "read_bandwidth_gb_s", profile.read_bandwidth_gb_s, "optional_positive")}
         ${costProfileNumberField("写入带宽（GB/s，可选）", profileKey, "write_bandwidth_gb_s", profile.write_bandwidth_gb_s, "optional_positive")}
         ${costProfileNumberField("读取延迟（ns）", profileKey, "read_latency_ns", profile.read_latency_ns ?? 0, "nonnegative")}
@@ -8704,7 +8697,7 @@ function gpuCostProfileMarkup(component) {
     ${gpuDenseThroughputMarkup(profile)}
     <details class="inspector-advanced-profile">
       <summary>内部 GPU 分析参数（Optional analytical parameters）</summary>
-      <p class="muted">以下字段保留为可编辑高级参数。占用率、可达效率、标量/SFU 速率、Cache 时序、启动开销、能耗与资源 ID 不是上述公开 Dense 峰值的替代值。</p>
+      <p class="muted">以下字段保留为可编辑高级参数。占用率、可达效率、标量/SFU 速率、Cache 时序、启动开销与资源 ID 不是上述公开 Dense 峰值的替代值。</p>
       <div class="field-grid-2">
         ${costProfileNumberField("MMA M（elements）", "gpu", "tensor_core.mma_m", tensorCore.mma_m, "positive_integer")}
         ${costProfileNumberField("MMA N（elements）", "gpu", "tensor_core.mma_n", tensorCore.mma_n, "positive_integer")}
@@ -8719,10 +8712,6 @@ function gpuCostProfileMarkup(component) {
         ${costProfileNumberField("占用率（ratio 0–1）", "gpu", "occupancy", profile.occupancy, "efficiency")}
         ${costProfileNumberField("可达效率（ratio 0–1）", "gpu", "attainable_efficiency", profile.attainable_efficiency, "efficiency")}
         ${costProfileNumberField("Kernel 启动（ns）", "gpu", "kernel_launch_ns", profile.kernel_launch_ns)}
-        ${costProfileNumberField("Tensor 能耗（pJ/op）", "gpu", "tensor_energy_pj_per_op", profile.tensor_energy_pj_per_op)}
-        ${costProfileNumberField("标量能耗（pJ/op）", "gpu", "scalar_energy_pj_per_op", profile.scalar_energy_pj_per_op)}
-        ${costProfileNumberField("SFU 能耗（pJ/op）", "gpu", "special_function_energy_pj_per_op", profile.special_function_energy_pj_per_op)}
-        ${costProfileNumberField("启动能耗（pJ）", "gpu", "launch_energy_pj", profile.launch_energy_pj)}
         ${costProfileTextField("标量资源 ID", "gpu", "scalar_resource_id", profile.scalar_resource_id)}
         ${costProfileTextField("SFU 资源 ID", "gpu", "special_function_resource_id", profile.special_function_resource_id)}
         ${costProfileTextField("启动资源 ID", "gpu", "launch_resource_id", profile.launch_resource_id)}
@@ -8757,7 +8746,7 @@ function cpuCostProfileMarkup(component) {
     <div class="readout"><span>量化 Dot Capability</span><strong>${escapeHtml(quantizedDotSummary)}</strong></div>
     <details class="inspector-advanced-profile">
       <summary>内部 CPU Pipeline / Cache 参数（Optional analytical parameters）</summary>
-      <p class="muted">Decode/Issue/Retire 宽度、执行单元数、ROB/LSQ/MLP、可达效率、Dispatch、Cache 时序与能耗通常需要微架构资料或本地校准。</p>
+      <p class="muted">Decode/Issue/Retire 宽度、执行单元数、ROB/LSQ/MLP、可达效率、Dispatch、Cache 时序通常需要微架构资料或本地校准。</p>
       <div class="field-grid-2">
         ${costProfileNumberField("Decode Width（instructions/cycle）", "cpu", "pipeline.decode_width", pipeline.decode_width, "positive_integer")}
         ${costProfileNumberField("Issue Width（instructions/cycle）", "cpu", "pipeline.issue_width", pipeline.issue_width, "positive_integer")}
@@ -8776,11 +8765,6 @@ function cpuCostProfileMarkup(component) {
         ${costProfileTextField("Pipeline 资源 ID", "cpu", "pipeline.resource_id", pipeline.resource_id)}
         ${costProfileNumberField("可达效率（ratio 0–1）", "cpu", "attainable_efficiency", profile.attainable_efficiency, "efficiency")}
         ${costProfileNumberField("Dispatch 延迟（ns）", "cpu", "dispatch_ns", profile.dispatch_ns)}
-        ${costProfileNumberField("GEMM 能耗（pJ/op）", "cpu", "gemm_energy_pj_per_op", profile.gemm_energy_pj_per_op)}
-        ${costProfileNumberField("逐元素能耗（pJ/op）", "cpu", "elementwise_energy_pj_per_op", profile.elementwise_energy_pj_per_op)}
-        ${costProfileNumberField("归约能耗（pJ/op）", "cpu", "reduction_energy_pj_per_op", profile.reduction_energy_pj_per_op)}
-        ${costProfileNumberField("SFU 能耗（pJ/op）", "cpu", "special_function_energy_pj_per_op", profile.special_function_energy_pj_per_op)}
-        ${costProfileNumberField("Dispatch 能耗（pJ）", "cpu", "dispatch_energy_pj", profile.dispatch_energy_pj)}
         ${costProfileTextField("Profile 名称", "cpu", "name", profile.name)}
       </div>
       ${cacheHierarchyCostProfileMarkup("cpu", profile)}
@@ -8795,7 +8779,7 @@ function cimCostProfileMarkup(component) {
   const conversionOpen = conversionMode !== "disabled" || arithmeticMode === "fp16_fp32_analytical";
   return `<section class="inspector-section cost-profile-section" data-profile-section="cim">
     <h3>Digital SRAM-CIM V4 执行成本 Profile</h3>
-    <p class="muted">CIM 只承载 GEMM primitive；阵列、搬入、激活、NoC、累加与外围阶段分别计费。所有带宽均为 GB/s，延迟为 ns，能耗按字段标注。</p>
+    <p class="muted">CIM 只承载 GEMM primitive；阵列、搬入、激活、NoC、累加与外围阶段分别计费。所有带宽均为 GB/s，延迟为 ns。</p>
     <div class="field-grid-2">
       ${costProfileNumberField("阵列数量（arrays）", "cim", "array_count", profile.array_count, "positive_integer")}
       ${costProfileNumberField("P_M（rows/eval）", "cim", "p_m", profile.p_m, "positive_integer")}
@@ -8819,13 +8803,6 @@ function cimCostProfileMarkup(component) {
       ${costProfileNumberField("外围延迟（ns）", "cim", "peripheral_latency_ns", profile.peripheral_latency_ns)}
       ${costProfileNumberField("累加器位宽（bits）", "cim", "accumulator_bits", profile.accumulator_bits, "positive_integer")}
       ${costProfileNumberField("累加器保护位（bits）", "cim", "accumulator_guard_bits", profile.accumulator_guard_bits, "nonnegative_integer")}
-      ${costProfileNumberField("阵列评估能耗（pJ/eval）", "cim", "eval_energy_pj", profile.eval_energy_pj)}
-      ${costProfileNumberField("权重装载能耗（pJ/B）", "cim", "load_energy_pj_per_byte", profile.load_energy_pj_per_byte)}
-      ${costProfileNumberField("激活搬运能耗（pJ/B）", "cim", "activation_energy_pj_per_byte", profile.activation_energy_pj_per_byte)}
-      ${costProfileNumberField("输出搬运能耗（pJ/B）", "cim", "output_energy_pj_per_byte", profile.output_energy_pj_per_byte)}
-      ${costProfileNumberField("NoC 能耗（pJ/B）", "cim", "noc_energy_pj_per_byte", profile.noc_energy_pj_per_byte)}
-      ${costProfileNumberField("累加能耗（pJ/op）", "cim", "accumulator_energy_pj_per_op", profile.accumulator_energy_pj_per_op)}
-      ${costProfileNumberField("外围能耗（pJ/element）", "cim", "peripheral_energy_pj_per_element", profile.peripheral_energy_pj_per_element)}
       ${costProfileTextField("阵列资源 ID", "cim", "array_resource_id", profile.array_resource_id)}
       ${costProfileTextField("装载资源 ID", "cim", "load_resource_id", profile.load_resource_id)}
       ${costProfileTextField("激活资源 ID", "cim", "activation_resource_id", profile.activation_resource_id)}
@@ -8847,8 +8824,6 @@ function cimCostProfileMarkup(component) {
         ${costProfileNumberField("转换 scratch 容量（B）", "cim", "conversion_scratch_capacity_bytes", profile.conversion_scratch_capacity_bytes, "nonnegative_integer")}
         ${costProfileNumberField("激活 FP32→FP16 吞吐（elements/ns）", "cim", "activation_fp32_to_fp16_elements_per_ns", profile.activation_fp32_to_fp16_elements_per_ns, "nonnegative")}
         ${costProfileTextField("转换契约依据（启用转换时必填）", "cim", "conversion_contract_basis", profile.conversion_contract_basis)}
-        ${costProfileNumberField("转换读取能耗（pJ/B）", "cim", "conversion_read_energy_pj_per_byte", profile.conversion_read_energy_pj_per_byte, "nonnegative")}
-        ${costProfileNumberField("转换写入能耗（pJ/B）", "cim", "conversion_write_energy_pj_per_byte", profile.conversion_write_energy_pj_per_byte, "nonnegative")}
         ${conversionMode === "packed_to_fp16_tiled_cold" ? costProfileNumberField("Tile M（elements）", "cim", "tile_m", profile.tile_m, "positive_integer") : ""}
         ${conversionMode === "packed_to_fp16_tiled_cold" ? costProfileNumberField("Tile K（elements，需为 256 倍数）", "cim", "tile_k", profile.tile_k, "positive_integer") : ""}
         ${conversionMode === "packed_to_fp16_tiled_cold" ? costProfileNumberField("Tile N（elements）", "cim", "tile_n", profile.tile_n, "positive_integer") : ""}
@@ -9209,39 +9184,6 @@ function componentCapacityNote(component) {
 
 function hbfMediaMarkup() { return ""; }
 
-function thermalOperatingPointMarkup(element) {
-  const point = asObject(state.scenario?.hardware?.metadata?.thermal_operating_point);
-  const metadata = asObject(element?.metadata);
-  const derating = asObject(metadata.thermal_derating);
-  if (!Object.keys(point).length && !Object.keys(derating).length && !metadata.thermal_domain_id) return "";
-  const domain = String(derating.domain_id || metadata.thermal_domain_id || "");
-  const sameDomain = Boolean(domain && domain === point.domain_id);
-  const enabled = (sameDomain && point.enabled === true && point.mode === "static_derating_only")
-    || Boolean(derating.domain_id && derating.mode === "static_operating_point");
-  const factors = sameDomain && enabled ? point : {};
-  const link = Boolean(element?.link_id);
-  const readout = (label, value) => `<div class="readout"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "—")}</strong></div>`;
-  const status = enabled ? uiText("已应用", "Applied") : !sameDomain ? uiText("未作用于此对象", "Not applied to this object") : uiText("未应用", "Not applied");
-  return `<details class="inspector-section thermal-operating-point">
-    <summary><span>${uiText(link ? "链路静态热降额（只读状态）" : "静态热工作点（只读状态）", link ? "Link static thermal derating (read-only)" : "Static thermal operating point (read-only)")}</span><span class="section-summary-state ${enabled ? "is-active" : ""}">${status}</span></summary>
-    <div class="inspector-section-body">
-      <p class="muted">${uiText("仅展示带有后端应用标记的静态降额。修改 JSON 中的 enabled 不会重新计算 Profile；必须从未降额基线应用工作点。此处不推导温度、功耗或动态节流。", "Shows static derating with a backend application marker only. Editing enabled in JSON does not recompute profiles; apply a point to the unmodified baseline. No temperature, power, or dynamic throttling is inferred.")}</p>
-      <div class="readout-grid">
-        ${readout(uiText("对象热域", "Object thermal domain"), domain || "—")}
-        ${readout(uiText("已应用", "Applied"), enabled ? "true" : "false")}
-        ${!link ? readout(uiText("频率比例（%）", "Frequency scale (%)"), formatRatioPercent(factors.frequency_scale)) + readout(uiText("内存带宽比例（%）", "Memory bandwidth scale (%)"), formatRatioPercent(factors.memory_bandwidth_scale)) : ""}
-        ${link ? readout(uiText("链路带宽比例（%）", "Link bandwidth scale (%)"), formatRatioPercent(factors.link_bandwidth_scale)) : ""}
-        ${readout(uiText("延迟比例（%）", "Latency scale (%)"), formatRatioPercent(factors.latency_scale))}
-        ${readout(uiText("依据", "Evidence"), enabled ? derating.evidence || factors.evidence || "—" : "—")}
-      </div>
-    </div>
-  </details>`;
-}
-
-function thermalLinkMarkup(link) {
-  return thermalOperatingPointMarkup(link);
-}
-
 function renderComponentInspector(componentId) {
   const component = state.scenario.hardware.components.find((item) => item.component_id === componentId);
   if (!component) {
@@ -9283,6 +9225,7 @@ function renderComponentInspector(componentId) {
       <h3>物理内存核心配置（Canonical physical_memory_config）</h3>
       <p class="muted">只有显式配置且通过后端几何校验，才会启用 DDR / LPDDR / HBM / SSD / HBF 物理核心。组件容量、带宽和旧 profile 不会自动转换为物理配置。</p>
       <textarea data-inspector-physical-config rows="12" spellcheck="false" aria-label="physical_memory_config JSON">${escapeHtml(physicalMemoryConfig ? JSON.stringify(physicalMemoryConfig, null, 2) : "")}</textarea>
+      ${dramBankGroupTimingMarkup(physicalMemoryConfig)}
       ${physicalMemoryConfig
         ? `<div class="readout"><span>物理核心状态</span><strong>已显式配置 · ${escapeHtml(String(physicalMemoryConfig.kind || "").toUpperCase())}</strong></div>`
         : `<div class="readout"><span>物理核心状态</span><strong>未启用：缺少 physical_memory_config</strong></div>`}
@@ -9311,14 +9254,12 @@ function renderComponentInspector(componentId) {
     ${capabilityFields ? `<section class="inspector-section"><h3>物理容量与传输能力（Physical Capacity & Transport Capability）</h3>${capabilityFields}${capacityNote ? `<p class="muted">${capacityNote}</p>` : ""}${hbfReadOnlyNote}</section>` : ""}
     ${costProfileMarkup}
     ${hbfMediaMarkupHtml}
-    ${thermalOperatingPointMarkup(component)}
     ${profile.latencyDma ? `<section class="inspector-section">
       <h3>延迟与数据搬移（Latency & DMA）</h3>
       <div class="field-grid-2">
         ${profileBackedTransportMarkup}
         ${metadataField("DMA 带宽（DMA Bandwidth, Gb/s）", "dma_bandwidth_gbps", metadata.dma_bandwidth_gbps ?? 0, { helpKey: "dma_bandwidth", unit: "Gb/s" })}
         ${metadataField("DMA 延迟（DMA Latency, ns）", "dma_latency_ns", metadata.dma_latency_ns ?? 0, { helpKey: "dma_latency", unit: "ns" })}
-        ${metadataField("DMA 能耗（DMA Energy, pJ/byte）", "dma_energy_pj_per_byte", metadata.dma_energy_pj_per_byte ?? 0, { helpKey: "dma_energy", unit: "pJ/B" })}
         ${metadataField("DMA 资源 ID（DMA Resource ID）", "dma_resource_id", metadata.dma_resource_id ?? `component.${component.component_id}.dma`, { type: "text", min: "", step: "", helpKey: "dma_resource" })}
         ${storageTransportProfile ? metadataField("最大并发请求（Max Outstanding Requests, depth）", "max_outstanding_requests", metadata.max_outstanding_requests ?? 1, { min: 1, step: 1, helpKey: "outstanding_requests", unit: "depth" }) : ""}
       </div>
@@ -9366,6 +9307,30 @@ function renderComponentInspector(componentId) {
     markScenarioChanged("", { mappingImpact: true, mappingReason: "physical_memory_config 已更新，映射需要重新生成。" });
     renderComponentInspector(component.component_id);
   });
+  $$('[data-inspector-bank-group-timing]', dom.inspectorContent).forEach((control) => control.addEventListener("change", () => {
+    const field = control.dataset.inspectorBankGroupTiming;
+    const value = Number(control.value);
+    if (!control.value.trim() || !Number.isFinite(value) || value < 0) {
+      toast("Bank group 时序无效", "时序必须是非负有限数；输入 0 可关闭该项约束。", "error", 6000);
+      renderComponentInspector(component.component_id);
+      return;
+    }
+    const current = physicalMemoryConfigForComponent(component);
+    let parsed;
+    try {
+      parsed = validatePhysicalMemoryConfig({ ...current, [field]: value }, component);
+    } catch (error) {
+      toast("物理配置无效", chineseMessage(error), "error", 7000);
+      renderComponentInspector(component.component_id);
+      return;
+    }
+    if (Object.is(current[field] ?? 0, value)) return;
+    const historyBefore = topologyHistorySnapshot();
+    component.metadata.physical_memory_config = parsed;
+    commitTopologyHistory(historyBefore, "配置 Bank group 时序", { mappingImpact: true });
+    markScenarioChanged("", { mappingImpact: true, mappingReason: "Bank group 时序已更新，执行配置需要重新生成。" });
+    renderComponentInspector(component.component_id);
+  }));
   hydrateConceptHelp(dom.inspectorContent);
   $$('[data-inspector-metadata-field]', dom.inspectorContent).forEach((control) => control.addEventListener("change", () => {
     component.metadata = asObject(component.metadata);
@@ -9512,7 +9477,7 @@ function renderLinkInspector(linkId) {
         : inputField("延迟（Latency, ns）", "latency_ns", link.latency_ns ?? 0, { scope: "link", type: "number", min: 0, step: "any", helpKey: "link_latency", unit: "ns" })}
       <label class="checkbox-field"><span data-concept-help="bidirectional_link">双向传输（Bidirectional）</span><input type="checkbox" data-inspector-scope="link" data-inspector-field="bidirectional" ${link.bidirectional !== false ? "checked" : ""}></label>
     </section>
-    ${thermalOperatingPointMarkup(link)}`;
+    `;
   bindInspectorFields();
   hydrateConceptHelp(dom.inspectorContent);
 }
@@ -9914,7 +9879,6 @@ function componentPresetFactLabel(key) {
     write_latency_ns: "写入延迟（Write Latency, ns）",
     transfer_granularity_bytes: "传输粒度（Transfer Granularity, B/KB…PB）",
     dma_latency_ns: "DMA 延迟（DMA Latency, ns）",
-    dma_energy_pj_per_byte: "DMA 能耗（DMA Energy, pJ/byte）",
     dma_resource: "DMA 资源 ID（DMA Resource ID）",
     max_outstanding_requests: "最大并发请求数（Max Outstanding Requests）",
     physical_unit_kind: "物理单元类型（Physical Unit Kind）",
@@ -9949,8 +9913,6 @@ function componentPresetListText(value, fallback = "—", key = "") {
     if (/(?:^|_)ops_per_s$/i.test(normalizedKey)) return formatOps(Number(value));
     if (/(?:^|_)latency_ns$/i.test(normalizedKey)) return formatUnit(value, "ns");
     if (/(?:^|_)frequency_ghz$/i.test(normalizedKey)) return formatUnit(value, "GHz");
-    if (/(?:^|_)power_w$|(?:^|_)watts$/i.test(normalizedKey)) return formatUnit(value, "W");
-    if (/(?:^|_)energy_pj_per_(byte|op)$/i.test(normalizedKey)) return formatUnit(value, normalizedKey.includes("per_byte") ? "pJ/B" : "pJ/op");
     if (/(^|_)(ratio|scale|efficiency)$/i.test(normalizedKey)) return formatUnit(value, "(0–1)");
   }
   if (key === "physical_unit_count_status" || key === "unit_count_status") {
@@ -18698,16 +18660,6 @@ function formatResultDurationNs(value) {
   return resultWithUnit(ns / 1_000_000_000, "s");
 }
 
-function formatResultEnergyPj(value) {
-  if (value == null || !Number.isFinite(Number(value))) return { html: "NA", text: "NA" };
-  const pj = Number(value);
-  if (Math.abs(pj) < 1_000) return resultWithUnit(pj, "pJ");
-  if (Math.abs(pj) < 1_000_000) return resultWithUnit(pj / 1_000, "nJ");
-  if (Math.abs(pj) < 1_000_000_000) return resultWithUnit(pj / 1_000_000, "µJ");
-  if (Math.abs(pj) < 1_000_000_000_000) return resultWithUnit(pj / 1_000_000_000, "mJ");
-  return resultWithUnit(pj / 1_000_000_000_000, "J");
-}
-
 function formatResultRate(value, unit) {
   const number = Number(value);
   if (!Number.isFinite(number)) return { html: "NA", text: "NA" };
@@ -19625,7 +19577,7 @@ function renderResults() {
       copy.textContent = uiText("重新运行以生成与当前 JSON 一致的 ANALYTICAL 报告。", "Run again to generate an ANALYTICAL report that matches the current JSON.");
     } else {
       heading.textContent = uiText("尚无仿真报告", "No simulation report yet");
-      copy.textContent = uiText("校验当前场景后运行，以查看延迟、吞吐、能耗、瓶颈与关键路径。", "Validate and run the current scenario to inspect latency, throughput, energy, bottlenecks, and the critical path.");
+      copy.textContent = uiText("校验当前场景后运行，以查看延迟、吞吐、瓶颈与关键路径。", "Validate and run the current scenario to inspect latency, throughput, bottlenecks, and the critical path.");
     }
     return;
   }
@@ -19648,7 +19600,6 @@ function renderResults() {
     metricCell({ text: uiText(`端到端延迟（E2E · ${boundaryLabel}）`, `End-to-End Latency (E2E) · ${boundaryLabel}`), percentile: 50 }, formatResultDurationNs(useEngineBoundary ? summary.engine_e2e_ns?.p50 : summary.e2e_ns?.p50), resultWithUnit(useEngineBoundary ? summary.engine_e2e_ns?.p50 : summary.e2e_ns?.p50, "ns")),
     metricCell({ text: uiText("Token 吞吐（Token Throughput）", "Token Throughput") }, formatResultRate(throughput.visible_output_tokens_per_s, "tok/s"), resultWithUnit(throughput.visible_output_tokens_per_s, "tokens/s"), "is-io"),
     metricCell({ text: uiText("请求吞吐（Request Throughput）", "Request Throughput") }, formatResultRate(throughput.requests_per_s, "req/s"), resultWithUnit(throughput.requests_per_s, "requests/s"), "is-io"),
-    metricCell({ text: uiText("总能耗（Total Energy）", "Total Energy") }, formatResultEnergyPj(summary.total_energy_pj), resultWithUnit(summary.total_energy_pj, "pJ"), "is-accent"),
   ].join("");
   renderRuntime(report);
   renderComponentTimeseries(report);
@@ -19670,7 +19621,6 @@ function renderComparison() {
   const comparison = asObject(payload.comparison);
   const latency = comparison.latency_speedup;
   const throughput = comparison.throughput_speedup;
-  const energy = comparison.energy_ratio;
   const item = (label, value, favorable) => {
     const formatted = formatResultNumber(value);
     return `<span class="comparison-item ${favorable === true ? "is-favorable" : favorable === false ? "is-unfavorable" : ""}">${escapeHtml(label)}<strong>${formatted.html}${formatted.text === "NA" ? "" : "×"}</strong></span>`;
@@ -19681,7 +19631,6 @@ function renderComparison() {
     <span class="comparison-label">${escapeHtml(uiText("GPU 基线比较", "GPU Baseline Comparison"))}</span>
     ${item(uiText("延迟加速", "Latency Speedup"), latency, latency == null ? null : latency > 1)}
     ${item(uiText("吞吐加速", "Throughput Speedup"), throughput, throughput == null ? null : throughput > 1)}
-    ${item(uiText("能耗比（候选 / 基线）", "Energy Ratio (Candidate / Baseline)"), energy, energy == null ? null : energy < 1)}
     <span class="comparison-item">${escapeHtml(uiText("候选", "Candidate"))}<strong>${candidate.html}</strong></span>
     <span class="comparison-item">${escapeHtml(uiText("基线", "Baseline"))}<strong>${baseline.html}</strong></span>`;
 }

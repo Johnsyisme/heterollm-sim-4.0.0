@@ -50,7 +50,6 @@ def _task_resource_intervals(
                 start_ns=start_ns,
                 end_ns=start_ns + demand.service_ns,
                 bytes_moved=demand.bytes_moved,
-                energy_pj=demand.energy_pj,
             )
             for demand in demands
         ]
@@ -60,60 +59,52 @@ def _task_resource_intervals(
     if isinstance(payloads, Mapping):
         for resource_id, values in payloads.items():
             for item in values or ():
-                if isinstance(item, (tuple, list)) and len(item) >= 4:
-                    begin, end, moved, energy = item[:4]
+                if isinstance(item, (tuple, list)) and len(item) >= 3:
+                    begin, end, moved = item[:3]
                     intervals.append(ResourceInterval(
                         resource_id=str(resource_id), start_ns=begin, end_ns=end,
-                        bytes_moved=int(moved), energy_pj=float(energy),
-                    ))
+                        bytes_moved=int(moved)))
     reservations = metadata.get("physical_resource_intervals", ())
     # Retained stages are exact even when another request in this task
     # exceeded its detail bound. A partial record is not an invalid record.
     # Only remove the stage copy of an already retained payload. Identical
     # reservations on separate lanes are real work and must retain multiplicity.
-    payload_copies = Counter((item.resource_id, item.start_ns, item.end_ns, item.bytes_moved, item.energy_pj)
+    payload_copies = Counter((item.resource_id, item.start_ns, item.end_ns, item.bytes_moved)
                              for item in intervals)
     for item in reservations:
         if isinstance(item, (tuple, list)) and len(item) >= 3:
             resource_id, begin, end = item[:3]
             moved = int(item[3]) if len(item) > 3 else 0
-            energy = float(item[4]) if len(item) > 4 else 0.0
         else:
             resource_id = getattr(item, "resource_id", None)
             begin = getattr(item, "start_ns", None)
             end = getattr(item, "end_ns", None)
             moved = int(getattr(item, "bytes", 0))
-            energy = float(getattr(item, "energy_pj", 0.0))
-        key = (resource_id, begin, end, moved, energy)
+        key = (resource_id, begin, end, moved)
         if payload_copies[key]:
             payload_copies[key] -= 1
             continue
         if resource_id is not None and begin is not None and end is not None:
             intervals.append(ResourceInterval(
                 resource_id=str(resource_id), start_ns=begin, end_ns=end,
-                bytes_moved=moved, energy_pj=energy,
-            ))
+                bytes_moved=moved))
     if not intervals and not physical.get("details_truncated", False):
         raw = physical.get("resource_intervals", {})
         resource_bytes = physical.get("resource_bytes", {})
-        resource_energy = physical.get("resource_energy_pj", {})
         if isinstance(raw, Mapping):
             for resource_id, values in raw.items():
                 valid = [item for item in values or ()
                          if isinstance(item, (tuple, list)) and len(item) >= 2]
                 moved = int(resource_bytes.get(resource_id, 0))
-                energy = float(resource_energy.get(resource_id, 0.0))
-                if len(valid) > 1 and (moved or energy):
+                if len(valid) > 1 and moved:
                     raise ValueError(
-                        f"physical resource {resource_id!r} requires per-interval byte/energy "
+                        f"physical resource {resource_id!r} requires per-interval byte "
                         "payloads; aggregate costs cannot be assigned to multiple intervals")
                 for item in valid:
                     begin, end = item[:2]
                     intervals.append(ResourceInterval(
                         resource_id=str(resource_id), start_ns=begin, end_ns=end,
-                        bytes_moved=moved,
-                        energy_pj=energy,
-                    ))
+                        bytes_moved=moved))
 
     # Physical tasks retain ordinary compute/link demands alongside replaced
     # memory previews.  Do not invent intervals when physical detail is absent.
@@ -127,9 +118,7 @@ def _task_resource_intervals(
                 resource_id=demand.resource_id,
                 start_ns=start_ns,
                 end_ns=start_ns + demand.service_ns,
-                bytes_moved=demand.bytes_moved,
-                energy_pj=demand.energy_pj,
-            ))
+                bytes_moved=demand.bytes_moved))
     return intervals
 
 
