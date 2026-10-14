@@ -14,6 +14,73 @@ from .scalable_serving import (
 )
 
 
+def execution_time_breakdown(records, *, origin_ns=None, end_ns=None, host_stages=None):
+    """Describe overlapping host/non-host task intervals, not a serial split.
+
+    These are unions of task spans, including waits within a task; they are
+    not hardware utilization. In particular device time is not the residual
+    after subtracting host work from wall time. The explicit window may add
+    idle time before the first or after the last task.
+    """
+    rows = tuple(records)
+    host_stages = frozenset(host_stages if host_stages is not None else (
+        "host_prefix", "host_target_frontend", "host_suffix", "gpu_consumer_frontend"))
+    host, device = [], []
+    host_task_time = 0.0
+    for row in rows:
+        start, end = float(row.start_ns), float(row.end_ns)
+        if not isfinite(start) or not isfinite(end) or start < 0 or end < start:
+            raise ValueError("execution time intervals must be finite and ordered")
+        if row.metadata.get("orchestration_stage") in host_stages:
+            host.append((start, end))
+            host_task_time += end - start
+        else:
+            device.append((start, end))
+
+    def merge(intervals):
+        merged = []
+        for start, end in sorted(intervals):
+            if start == end:
+                continue
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    first = min((float(row.start_ns) for row in rows), default=0.0)
+    last = max((float(row.end_ns) for row in rows), default=first)
+    origin = first if origin_ns is None else float(origin_ns)
+    finish = last if end_ns is None else float(end_ns)
+    if (not isfinite(origin) or not isfinite(finish) or origin < 0 or finish < origin
+            or (rows and (origin > first or finish < last))):
+        raise ValueError("execution time window must contain all task intervals")
+    host_union, device_union = merge(host), merge(device)
+    host_ns = sum(end - start for start, end in host_union)
+    device_ns = sum(end - start for start, end in device_union)
+    total_ns = sum(end - start for start, end in merge((*host_union, *device_union)))
+    # Intersect the two disjoint lists directly, avoiding subtraction of
+    # nearly equal accumulated times for a small overlap.
+    overlap = 0.0
+    left = right = 0
+    while left < len(host_union) and right < len(device_union):
+        h_start, h_end = host_union[left]
+        d_start, d_end = device_union[right]
+        overlap += max(0.0, min(h_end, d_end) - max(h_start, d_start))
+        if h_end <= d_end:
+            left += 1
+        else:
+            right += 1
+    return {
+        "host_orchestration_ns": host_ns,
+        "device_execution_ns": device_ns,
+        "host_task_time_ns": host_task_time,
+        "host_device_overlap_ns": overlap,
+        "execution_idle_ns": max(0.0, finish - origin - total_ns),
+        "execution_time_semantics": "overlapping_task_interval_unions",
+    }
+
+
 class LiveCohortMetrics:
     """One cohort's realized events, with the closed-schedule reduction rules.
 
@@ -153,7 +220,11 @@ class LiveCohortMetrics:
         host = tuple(row for row in summary.execution_records
                      if row.metadata.get("orchestration_stage") in {
                          "host_prefix", "host_target_frontend", "host_suffix", _GPU_CONSUMER_FRONTEND_STAGE})
-        host_ns = sum(row.end_ns - row.start_ns for row in host)
+        origin = self.origin_ns if self.origin_ns is not None else min(
+            (row.start_ns for row in summary.execution_records), default=0.0)
+        time_breakdown = execution_time_breakdown(
+            summary.execution_records, origin_ns=origin,
+            end_ns=max((row.end_ns for row in summary.execution_records), default=origin))
         return {
             "task_count": summary.task_count,
             "resource_accounted_bytes": summary.bytes_moved,
@@ -166,13 +237,12 @@ class LiveCohortMetrics:
             "dram_traffic": _summarize_dram_task_traffic(tasks, resource_owners=self.resource_owners),
             "storage_traffic": _summarize_nand_task_traffic(tasks, resource_owners=self.resource_owners),
             "execution_stage_makespan_ns": summary.makespan_ns,
-            "host_orchestration_ns": host_ns,
+            **time_breakdown,
             "host_orchestration_task_count": len(host),
             "host_submission_count": sum(int(row.metadata.get("submission_count", 0)) for row in host),
-            "device_execution_ns": max(0.0, summary.makespan_ns - host_ns),
             "physical_execution_scope": "persistent_live_kernel",
             "cost_duration_semantics": "live_cohort_span",
         }
 
 
-__all__ = ["LiveCohortMetrics"]
+__all__ = ["LiveCohortMetrics", "execution_time_breakdown"]

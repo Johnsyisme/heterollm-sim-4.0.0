@@ -129,11 +129,11 @@ def test_native_tensor_energy_uses_the_same_issued_tiles_as_service(m):
     assert demand.service_ns == issued / (gpu.tensor_core.peak_tops("fp16") * 1000.)
 
 
-def test_native_mmq_keeps_source_extent_and_fused_epilogue_cost():
+def test_native_mmq_keeps_unfused_source_extent():
     source = derive_mmq_work(m=17, k=256, n=129, weight_format="Q4_K", sm_count=1,
                              shared_memory_per_block=65536)
     capability = KernelCapability("source_mmq", ("q4_k",), "fp32", "prefill", "tensor",
-        "analytical", internal_dtype="int8", output_bits=32, epilogue="activation")
+        "analytical", internal_dtype="int8", output_bits=32)
     gpu = GPUProfile(TensorCoreProfile(1, 1, 1.),
         CacheHierarchyProfile((CacheLevelProfile("cache", 1024, 64, 0, 1000.),)),
         scalar_lanes_per_sm=32, scalar_ops_per_cycle=1, reduction_ops_per_cycle_per_sm=1,
@@ -143,15 +143,12 @@ def test_native_mmq_keeps_source_extent_and_fused_epilogue_cost():
     work = GemmWorkload(17, 256, 129, activation_bits=32, weight_bits=4, output_bits=32,
         activation_dtype="fp32", packed_weight_formats=("q4_k",), execution_phase="prefill",
         weight_storage_bytes=source.logical_weight_bytes,
-        activation_storage_bytes=source.consumer_unique_bytes, mmq_work=source,
-        epilogue_operations=11, epilogue_transcendental_operations=7, epilogue_name="activation")
+        activation_storage_bytes=source.consumer_unique_bytes, mmq_work=source)
     result = estimate_kernel(gpu, HBMProfile(1000.), work)
     demands = {d.resource_id: d for d in result.phases[-1].demands}
     tensor = demands[gpu.tensor_core.resource_id]
     assert tensor.work_units == source.source_nominal_arithmetic_operations
     assert tensor.energy_pj == source.source_nominal_arithmetic_operations * 2.
     assert result.useful_ops == work.operations
-    assert demands[gpu.scalar_resource_id].work_units == 11
-    assert demands[gpu.scalar_resource_id].energy_pj == 33.
-    assert demands[gpu.special_function_resource_id].work_units == 7
-    assert demands[gpu.special_function_resource_id].energy_pj == 35.
+    assert demands[gpu.scalar_resource_id].work_units == 0
+    assert demands[gpu.special_function_resource_id].work_units == 0

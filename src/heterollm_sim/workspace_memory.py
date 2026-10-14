@@ -61,6 +61,7 @@ def physical_workspace_bound(tasks):
         default_owner = (task.metadata.get("physical_owner")
                          or task.metadata.get("stateful_l2", {}).get("memory_resource"))
         configurations = task.metadata.get("physical_memory_configs", {})
+        external_keys = {tuple(key) for key in task.metadata.get("physical_external_allocations", ())}
         for row in UnifiedEventKernel._physical_descriptor_rows(task):
             identity = row.get("buffer_id") or row.get("tensor_id")
             if not identity:
@@ -70,6 +71,10 @@ def physical_workspace_bound(tasks):
                 identity = task.task_id + str(identity)[len("@tasklocal"):]
             generation = int(row.get("allocation_generation", row.get("generation", 0)))
             key = (str(owner), str(identity), generation)
+            if key in external_keys:
+                # Pool-owned KV is already reserved by the serving ledger;
+                # it is neither fresh workspace nor a second resident copy.
+                continue
             if row.get("alias_of"):
                 target_id = str(row["alias_of"])
                 if target_id.startswith("@tasklocal"):

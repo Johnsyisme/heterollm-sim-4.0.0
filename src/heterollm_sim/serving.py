@@ -3252,7 +3252,7 @@ class _KVLedger:
         byte_count = pages * self.policy.bytes_per_page
         if pages <= 0:
             return True
-        if self.offload_used_bytes + byte_count > self.policy.offload_capacity_bytes:
+        if self.paged_pool is None and self.offload_used_bytes + byte_count > self.policy.offload_capacity_bytes:
             return False
         if self.paged_pool is not None:
             target = self.policy.offload_component
@@ -3265,6 +3265,11 @@ class _KVLedger:
                 or not self.paged_pool.components[page.owner_component].writable
                 for page in pool_pages
             ):
+                return False
+            target_bytes = sum(self.paged_pool.allocation_bytes(target, page.bytes) for page in pool_pages)
+            if (self.paged_pool.component_stats()[target]["pool_bytes"] + target_bytes
+                    > self.policy.offload_capacity_bytes
+                    or not self.physical.can_adjust(target, target_bytes)):
                 return False
             snapshot = self._snapshot_paged_pool_state()
             try:
@@ -3343,7 +3348,8 @@ class _KVLedger:
         # A physical-capacity preflight avoids partially moving a cohort when
         # the active target has no room.  ``restore_page`` performs the same
         # check again and is the authority for multi-tier pools.
-        if not self.physical.can_adjust(target, len(pages) * page_bytes):
+        if not self.physical.can_adjust(target, sum(
+                self.paged_pool.allocation_bytes(target, page.bytes) for page in pages)):
             return 0
         snapshot = self._snapshot_paged_pool_state()
         try:
@@ -3386,7 +3392,8 @@ class _KVLedger:
             return ()
         pages = tuple(page for page in pool.request_pages(request.spec.request_id)
                       if page.owner_component == source)[:min(max(0, page_count), request.swapped_pages)]
-        if not pages or not self.physical.can_adjust(target, sum(page.bytes for page in pages)):
+        if not pages or not self.physical.can_adjust(target, sum(
+                pool.allocation_bytes(target, page.bytes) for page in pages)):
             return ()
         prepared = []
         try:
@@ -3439,6 +3446,11 @@ class _KVLedger:
         pages = tuple(page for page in pool.request_pages(request.spec.request_id)
                       if page.owner_component == self.policy.cache_component)
         if len(pages) != request.kv_pages:
+            return 0
+        target = self.policy.offload_component
+        if not target or (pool.component_stats()[target]["pool_bytes"] + sum(
+                pool.allocation_bytes(target, page.bytes) for page in pages)
+                > self.policy.offload_capacity_bytes):
             return 0
         snapshot = self._snapshot_paged_pool_state()
         try:
@@ -3494,7 +3506,10 @@ class _KVLedger:
                 return False
             return self.physical.can_adjust(
                 target_component,
-                restore_bytes + extra_bytes,
+                sum(self.paged_pool.allocation_bytes(target_component, page.bytes)
+                    for page in pages if page.owner_component == self.policy.offload_component)
+                + (target - total_pages) * self.paged_pool.allocation_bytes(
+                    target_component, self.policy.bytes_per_page),
             )
         return self.physical.can_transfer(
             self.policy.offload_component,
@@ -5846,6 +5861,8 @@ class _OnlineRuntime:
                     arrival_ns=lambda _request: self.now,
                     namespace="serving:" + str(id(self)),
                     energy_pj_per_byte_by_component=transfer_energy_rates,
+                    cache_states=self._execution_resource_kernel._l2_states,
+                    cache_owners=self._execution_resource_kernel._physical_allocation_cache_owners,
                 )
                 paged_pool.set_transfer_executor(
                     self._paged_pool_transfer_executor
@@ -6051,12 +6068,15 @@ class _OnlineRuntime:
                 "duration_ns": duration,
                 "physical_start_ns": declared_start,
                 "physical_completion_ns": declared_completion,
+                "energy_pj": transfer.energy_pj,
                 "feedback_boundary": "pool_transfer_complete",
             }
             self.events.append(ServingEvent(start, "kv_pool_transfer_start", details=details))
             self.events.append(ServingEvent(end, "kv_pool_transfer_complete", details=details))
             if transfer.kind in {"offload", "restore"}:
                 self.swap_transfer_time_ns += additional_wait
+                if transfer.energy_pj is not None:
+                    self.swap_transfer_energy_pj += transfer.energy_pj
             elif transfer.kind == "prefetch":
                 self.prefetch_events += 1
                 self.prefetch_bytes += int(transfer.bytes)
@@ -7284,8 +7304,9 @@ class _OnlineRuntime:
     ) -> BatchCost:
         """Account for physical service demand and resident-page migration.
 
-        The lowerer supplies the work demand.  GPU/HBM service rates come from
-        the declared profiles, while migration is derived from the active
+        The lowerer supplies GPU work and Core-executed memory service. GPU
+        compute can use the declared analytical rate; memory must not acquire
+        another aggregate bandwidth floor. Migration is derived from the active
         working-set shortfall and the actual host backing path.  Custom
         lowerers stay unchanged unless they explicitly opt in through metadata.
         """
@@ -7312,10 +7333,13 @@ class _OnlineRuntime:
 
         self._ensure_resource_profiles()
         snapshot = dict(self._resource_snapshot(cohort.items))
-        host_ns = max(0.0, float(metadata.get("host_orchestration_ns", 0.0)))
+        explicit_dag = metadata.get("execution_stage_source") == "executed_task_dag_kernel_timeline"
+        host_ns = (0.0 if explicit_dag else
+                   max(0.0, float(metadata.get("host_orchestration_ns", 0.0))))
         device_ns = max(
             0.0,
             float(
+                cost.duration_ns if explicit_dag else
                 metadata.get("device_execution_ns", cost.duration_ns - host_ns)
             ),
         )
@@ -7342,15 +7366,8 @@ class _OnlineRuntime:
             0.0,
             float(getattr(self._gpu_profile, "attainable_tops", 0.0)) * 1_000.0,
         )
-        hbm_rate = max(
-            0.0,
-            float(
-                getattr(self._hbm_profile, "effective_bandwidth_gb_s", 0.0)
-            ),
-        )
         gpu_demand_ns = operations / gpu_rate if gpu_rate > 0 else 0.0
-        hbm_demand_ns = hbm_bytes / hbm_rate if hbm_rate > 0 else 0.0
-        shared_service_ns = max(device_ns, gpu_demand_ns, hbm_demand_ns)
+        shared_service_ns = max(device_ns, gpu_demand_ns)
         actual_spill = max(0, int(snapshot.get("actual_spill_bytes", 0)))
         spill_pages = max(0, int(snapshot.get("spill_page_count", 0)))
         cache_component = snapshot.get("physical_cache_component")
@@ -7374,7 +7391,7 @@ class _OnlineRuntime:
         if self.residency_manager is not None:
             # The unified owner-aware pool below is the sole migration
             # authority when an adapter declares shared weight/KV/state
-            # residency.  Retain this method's compute/HBM roofline, but do
+            # residency. Retain this method's compute envelope, but do
             # not also run the legacy role-local spill approximation.
             target_kv_pages = 0
             target_state_allocations = 0
@@ -7487,9 +7504,8 @@ class _OnlineRuntime:
                 "resource_contention_gpu_operations": operations,
                 "resource_contention_hbm_bytes": hbm_bytes,
                 "resource_contention_gpu_service_rate_ops_per_ns": gpu_rate,
-                "resource_contention_hbm_service_rate_bytes_per_ns": hbm_rate,
                 "resource_contention_gpu_demand_ns": gpu_demand_ns,
-                "resource_contention_hbm_demand_ns": hbm_demand_ns,
+                "resource_contention_memory_cost_source": "lowerer_memory_execution",
                 "resource_contention_shared_service_ns": shared_service_ns,
                 "resource_contention_actual_spill_bytes": actual_spill,
                 "resource_contention_spill_page_count": spill_pages,
@@ -7515,7 +7531,8 @@ class _OnlineRuntime:
                 "resource_contention_logical_reservation_bytes": (
                     snapshot.get("logical_reservation_bytes", 0)
                 ),
-                "device_execution_ns": adjusted_device_ns,
+                **({"resource_contention_adjusted_envelope_ns": adjusted_device_ns}
+                   if explicit_dag else {"device_execution_ns": adjusted_device_ns}),
             }
         )
         return BatchCost(
@@ -9798,10 +9815,11 @@ class _OnlineRuntime:
         self.residency_fault_batches += fault_batch_count
         self.residency_clean_eviction_batches += clean_eviction_batch_count
         snapshot = manager.snapshot()
+        explicit_dag = metadata.get("execution_stage_source") == "executed_task_dag_kernel_timeline"
         base_device_ns = max(
             0.0,
             float(
-                metadata.get(
+                cost.duration_ns if explicit_dag else metadata.get(
                     "device_execution_ns",
                     cost.duration_ns
                     - max(
@@ -9940,7 +9958,8 @@ class _OnlineRuntime:
                     + writeback_ns
                     + clean_discard_ns
                 ),
-                "device_execution_ns": base_device_ns + migration_ns,
+                **({"owner_residency_adjusted_envelope_ns": base_device_ns + migration_ns}
+                   if explicit_dag else {"device_execution_ns": base_device_ns + migration_ns}),
             }
         )
         return BatchCost(
@@ -15470,6 +15489,26 @@ class _OnlineRuntime:
     def _execute_cohort(self, cohort: BatchCohort) -> None:
         self._residency_cohort_consumer_ids = set()
         cohort = self._with_kv_scan_lower_bound(cohort)
+        if self._paged_pool_transfer_executor is not None:
+            executor = self._paged_pool_transfer_executor
+            pool = self.ledger.paged_pool
+            table = {}
+            for request_id in dict.fromkeys(cohort.request_ids):
+                pages = pool.request_pages(request_id)
+                if any(page.logical_page_id in pool._pending_moves for page in pages):
+                    raise RuntimeError("GPU KV access cannot consume an in-flight pool page")
+                table[request_id] = tuple({
+                    "buffer_id": executor._binding(page).allocation.buffer_id,
+                    "allocation_generation": page.allocation_generation,
+                    "physical_owner": executor._binding(page).owner,
+                    "component_id": page.owner_component,
+                    "base_address": executor.address(page),
+                    "size_bytes": executor._binding(page).allocation.size_bytes,
+                    "logical_page_id": page.logical_page_id,
+                } for page in pages)
+            cohort = replace(cohort, metadata={**cohort.metadata,
+                "physical_kv_page_table": {"tokens_per_page": pool.tokens_per_page,
+                    "requests": table}})
         with self._cuda_graph_runtime.scope(cohort, self.now) as cuda_transition:
             cost = _lower_cost(self.lowerer, self.plan.scenario, cohort)
         planning_energy_pj = cost.energy_pj
@@ -15518,21 +15557,19 @@ class _OnlineRuntime:
                     stage_fallback_reason or "empty execution stage graph"
                 )
             )
-        host_orchestration_is_explicit = bool(
+        has_explicit_execution_dag = bool(
             stages
-            and cost.metadata.get(
-                "execution_stages_include_host_orchestration"
-            )
-            is True
             and cost.metadata.get("execution_stage_source")
             == "executed_task_dag_kernel_timeline"
         )
-        host_ns = 0.0 if host_orchestration_is_explicit else reported_host_ns
+        # Task-interval unions may overlap and exclude idle gaps. They are
+        # diagnostics, never an additive replacement for the DAG envelope.
+        host_ns = 0.0 if has_explicit_execution_dag else reported_host_ns
         device_ns = max(
             0.0,
             float(
                 cost.duration_ns
-                if host_orchestration_is_explicit
+                if has_explicit_execution_dag
                 else cost.metadata.get(
                     "device_execution_ns", cost.duration_ns - host_ns
                 )

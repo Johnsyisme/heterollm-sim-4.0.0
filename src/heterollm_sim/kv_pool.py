@@ -179,6 +179,7 @@ class KvPoolTransfer:
     duration_ns: float
     start_ns: Optional[float] = None
     completion_ns: Optional[float] = None
+    energy_pj: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -218,8 +219,14 @@ class KvPoolTransferPlan:
     # Cancellation drains already-submitted work and releases only this copy's
     # destination. Unlike admission rollback it never rewinds shared calendars.
     cancel: Optional[Callable[[], Mapping[str, Any]]] = field(default=None, repr=False, compare=False)
+    energy_pj: Optional[float] = None
 
     def __post_init__(self) -> None:
+        if self.energy_pj is not None:
+            energy = float(self.energy_pj)
+            if not isfinite(energy) or energy < 0:
+                raise KvPoolError("transfer plan energy_pj must be finite and non-negative")
+            object.__setattr__(self, "energy_pj", energy)
         try:
             duration = float(self.duration_ns)
         except (TypeError, ValueError) as error:
@@ -360,6 +367,50 @@ class _LedgerAdapter:
             return bool(method(source, target, int(bytes_)))
         return self.can_adjust(source, -int(bytes_)) and self.can_adjust(target, int(bytes_))
 
+    def adjust_many(self, deltas: Mapping[str, int]) -> bool:
+        """Apply distinct physical footprints, reverting rejected callbacks."""
+        if not all(self.can_adjust(component, delta) for component, delta in deltas.items()):
+            return False
+        if self._adjust_callback is None and self._can_adjust_callback is None:
+            method = getattr(self.ledger, "adjust_many", None)
+            if method is not None:
+                return bool(method(deltas))
+        changed = []
+        def undo():
+            while changed:
+                component, delta = changed.pop()
+                if not self.adjust(component, -delta):
+                    raise RuntimeError("KV pool ledger could not reverse failed capacity adjustment")
+        try:
+            for component, delta in deltas.items():
+                if not self.adjust(component, delta):
+                    undo()
+                    return False
+                changed.append((component, delta))
+        except Exception:
+            # Exceptions are outside the boolean callback contract. Restore
+            # earlier successful entries before propagating the failure.
+            undo()
+            raise
+        return True
+
+    def can_transfer_sized(self, source: str, target: str, source_bytes: int, target_bytes: int) -> bool:
+        if source_bytes == target_bytes:
+            return self.can_transfer(source, target, source_bytes)
+        if self._transfer_callback is not None and self._adjust_callback is None and self.ledger is self._local:
+            raise KvPoolUnsupported("unequal physical footprints require ledger adjust callbacks")
+        # The pool already owns this source page. Minimal external ledgers
+        # need only expose can_adjust/adjust, not a readable usage mapping.
+        return (self.can_adjust(source, -source_bytes)
+                and self.can_adjust(target, target_bytes))
+
+    def transfer_sized(self, source: str, target: str, source_bytes: int, target_bytes: int) -> bool:
+        if source_bytes == target_bytes:
+            return self.transfer(source, target, source_bytes)
+        if not self.can_transfer_sized(source, target, source_bytes, target_bytes):
+            return False
+        return self.adjust_many({source: -source_bytes, target: target_bytes})
+
     def transfer(self, source: str, target: str, bytes_: int) -> bool:
         if self._transfer_callback is not None:
             result = bool(self._transfer_callback(source, target, int(bytes_)))
@@ -427,6 +478,15 @@ class DynamicKVPool:
             if isinstance(value, bool) or int(value) <= 0:
                 raise KvPoolError("page_bytes_by_layer values must be positive")
         self.components: Dict[str, KvPoolComponent] = {item.component_id: item for item in normalized}
+        self._allocation_granularity = {}
+        for item in normalized:
+            raw = item.metadata.get("physical_memory_config")
+            alignment = 1
+            if raw is not None:
+                from .memory_types import DramConfig, NandConfig, parse_physical_memory_config
+                config = raw if isinstance(raw, (DramConfig, NandConfig)) else parse_physical_memory_config(raw)
+                alignment = config.burst_bytes if isinstance(config, DramConfig) else config.page_bytes
+            self._allocation_granularity[item.component_id] = int(alignment)
         self.tokens_per_page = int(tokens_per_page)
         self.default_page_bytes = int(page_bytes)
         self.page_bytes_by_layer = {str(key): int(value) for key, value in (page_bytes_by_layer or {}).items()}
@@ -447,7 +507,7 @@ class DynamicKVPool:
         # receives an immutable page description so it can resolve a real
         # physical address.  A shared event queue should return a two-phase
         # transfer plan; a number is retained only for pure timing estimates.
-        self._transfer_executor = transfer_executor
+        self._transfer_executor = None
         self.topology = topology
         explicit_offload = {str(item) for item in (offload_components or ())}
         unknown = explicit_offload - set(self.components)
@@ -471,6 +531,7 @@ class DynamicKVPool:
         self._clock = 0
         self._events: List[KvPoolTransfer] = []
         self._last_error: Optional[str] = None
+        self.set_transfer_executor(transfer_executor)
 
     @property
     def last_error(self) -> Optional[str]:
@@ -502,7 +563,34 @@ class DynamicKVPool:
 
         if transfer_executor is not None and not callable(transfer_executor):
             raise KvPoolError("transfer_executor must be callable")
+        if self._pending_moves:
+            raise KvPoolError("cannot replace transfer executor with in-flight pages")
+        footprint = getattr(transfer_executor, "allocation_bytes", None)
+        granularity = dict(self._allocation_granularity)
+        if callable(footprint):
+            for component in self.components:
+                value = footprint(component, 1)
+                if type(value) is not int or value <= 0:
+                    raise KvPoolError("physical allocation granularity must be a positive integer")
+                granularity[component] = value
+        totals = dict.fromkeys(self.components, 0)
+        for page in self._pages.values():
+            unit = granularity[page.owner_component]
+            totals[page.owner_component] += ((page.bytes + unit - 1) // unit) * unit
+        deltas = {component: total - self._owned_bytes.get(component, 0)
+                  for component, total in totals.items() if total != self._owned_bytes.get(component, 0)}
+        if deltas and self._transfer_executor is not None and self._pages:
+            raise KvPoolError("cannot change allocation granularity of already bound pages")
+        if deltas and not self._ledger.adjust_many(deltas):
+            raise KvPoolError("existing pages exceed capacity at physical allocation granularity")
+        self._allocation_granularity = granularity
+        self._owned_bytes = defaultdict(int, {key: value for key, value in totals.items() if value})
         self._transfer_executor = transfer_executor
+
+    def allocation_bytes(self, component_id: str, payload_bytes: int) -> int:
+        """Reserved capacity for one allocation; transfer payload is unchanged."""
+        unit = self._allocation_granularity[component_id]
+        return ((payload_bytes + unit - 1) // unit) * unit
 
     @property
     def capacity_bytes_by_component(self) -> Mapping[str, int]:
@@ -722,7 +810,8 @@ class DynamicKVPool:
                 continue
             if not self._reachable(request_component, component_id, bytes_):
                 continue
-            if self._component_free(component_id) < bytes_ or not self._ledger.can_adjust(component_id, bytes_):
+            reserved = self.allocation_bytes(component_id, bytes_)
+            if self._component_free(component_id) < reserved or not self._ledger.can_adjust(component_id, reserved):
                 continue
             bandwidth = max(float(component.write_bandwidth_gbps), float(component.read_bandwidth_gbps), 0.0)
             # More free bytes first; then faster links/memory and lower local latency.
@@ -737,7 +826,7 @@ class DynamicKVPool:
 
     def _register_page(self, page: KvPage) -> None:
         self._pages[page.logical_page_id] = page
-        self._owned_bytes[page.owner_component] += page.bytes
+        self._owned_bytes[page.owner_component] += self.allocation_bytes(page.owner_component, page.bytes)
         self._bindings[page.logical_page_id].add(page.request_id)
 
     def _free_page(self, page_id: int) -> None:
@@ -747,10 +836,11 @@ class DynamicKVPool:
         page = self._pages.get(page_id)
         if page is None:
             return
-        if not self._ledger.adjust(page.owner_component, -page.bytes):
+        reserved = self.allocation_bytes(page.owner_component, page.bytes)
+        if not self._ledger.adjust(page.owner_component, -reserved):
             raise RuntimeError("KV pool physical ledger rejected page release")
         self._pages.pop(page_id, None)
-        self._owned_bytes[page.owner_component] -= page.bytes
+        self._owned_bytes[page.owner_component] -= reserved
         if self._owned_bytes[page.owner_component] <= 0:
             self._owned_bytes.pop(page.owner_component, None)
         self._bindings.pop(page_id, None)
@@ -803,7 +893,7 @@ class DynamicKVPool:
         if not candidates:
             return None
         owner = candidates[0]
-        if not self._ledger.adjust(owner, bytes_):
+        if not self._ledger.adjust(owner, self.allocation_bytes(owner, bytes_)):
             return None
         token_start = logical_index * self.tokens_per_page
         token_end = token_start + self.tokens_per_page
@@ -1128,7 +1218,7 @@ class DynamicKVPool:
             self._touch(page)
 
     def evict(self, bytes_needed: int, *, component_ids: Optional[Iterable[str]] = None) -> int:
-        """Evict unbound, unpinned LRU pages and return freed bytes."""
+        """Evict unbound, unpinned LRU pages and return freed physical bytes."""
 
         if isinstance(bytes_needed, bool) or int(bytes_needed) < 0:
             raise KvPoolError("bytes_needed must be non-negative")
@@ -1145,7 +1235,7 @@ class DynamicKVPool:
                 break
             # Drop the prefix reference (the only legal unbound reference).
             self._free_page(page.logical_page_id)
-            freed += page.bytes
+            freed += self.allocation_bytes(page.owner_component, page.bytes)
         return freed
 
     def _move(self, page: KvPage, target_component: str, *, kind: str) -> bool:
@@ -1169,7 +1259,9 @@ class DynamicKVPool:
         if not self._reachable(page.owner_component, target_component, page.bytes):
             self._last_error = "no topology route from {} to {}".format(page.owner_component, target_component)
             return False
-        if not self._ledger.can_transfer(page.owner_component, target_component, page.bytes):
+        source_bytes = self.allocation_bytes(page.owner_component, page.bytes)
+        target_bytes = self.allocation_bytes(target_component, page.bytes)
+        if not self._ledger.can_transfer_sized(page.owner_component, target_component, source_bytes, target_bytes):
             self._last_error = "target component has insufficient physical capacity: " + target_component
             return False
         source = page.owner_component
@@ -1181,7 +1273,7 @@ class DynamicKVPool:
         except KvPoolError as error:
             self._last_error = str(error)
             raise
-        if not self._ledger.transfer(source, target_component, page.bytes):
+        if not self._ledger.transfer_sized(source, target_component, source_bytes, target_bytes):
             try:
                 self._run_transfer_hook(plan, "rollback")
             except KvPoolError:
@@ -1199,7 +1291,7 @@ class DynamicKVPool:
                 rollback_error = hook_error
             reverted = False
             try:
-                reverted = self._ledger.transfer(target_component, source, page.bytes)
+                reverted = self._ledger.transfer_sized(target_component, source, target_bytes, source_bytes)
             except BaseException as ledger_error:
                 rollback_error = rollback_error or ledger_error
             if not reverted:
@@ -1212,8 +1304,8 @@ class DynamicKVPool:
                     "paged_pool transfer commit failed and rollback was incomplete"
                 ) from rollback_error
             raise
-        self._owned_bytes[source] -= page.bytes
-        self._owned_bytes[target_component] += page.bytes
+        self._owned_bytes[source] -= source_bytes
+        self._owned_bytes[target_component] += target_bytes
         page.allocation_generation += 1
         page.owner_component = target_component
         page.resident_tier = target.tier
@@ -1227,6 +1319,7 @@ class DynamicKVPool:
             plan.duration_ns,
             plan.start_ns,
             plan.completion_ns,
+            plan.energy_pj,
         ))
         self._last_error = None
         return True
@@ -1249,17 +1342,18 @@ class DynamicKVPool:
             self._last_error = "invalid or already pending asynchronous restore"
             return None
         source = page.owner_component
+        target_bytes = self.allocation_bytes(target_component, page.bytes)
         self._require_storage_bandwidth(self.components[source], read=True)
         self._require_storage_bandwidth(target, read=False)
         if (not self._reachable(source, target_component, page.bytes)
-                or not self._ledger.can_adjust(target_component, page.bytes)):
+                or not self._ledger.can_adjust(target_component, target_bytes)):
             self._last_error = "asynchronous restore has no route or destination capacity"
             return None
         plan = self._transfer_plan(page, source, target_component, page.bytes, staged=True)
         if plan.start_ns is None or plan.completion_ns is None:
             self._run_transfer_hook(plan, "rollback")
             raise KvPoolUnsupported("asynchronous restore requires absolute physical completion timestamps")
-        if not self._ledger.adjust(target_component, page.bytes):
+        if not self._ledger.adjust(target_component, target_bytes):
             self._run_transfer_hook(plan, "rollback")
             self._last_error = "physical ledger rejected asynchronous restore reservation"
             return None
@@ -1272,12 +1366,13 @@ class DynamicKVPool:
         """Undo a just-prepared restore; callers abort a batch in reverse order."""
         page = self.page(logical_page_id)
         _source, target, _generation, _kind = self._pending_moves[logical_page_id]
-        if not self._ledger.adjust(target, -page.bytes):
+        target_bytes = self.allocation_bytes(target, page.bytes)
+        if not self._ledger.adjust(target, -target_bytes):
             raise KvPoolError("could not release asynchronous restore reservation")
         try:
             self._run_transfer_hook(plan, "rollback")
         except BaseException:
-            if not self._ledger.adjust(target, page.bytes):
+            if not self._ledger.adjust(target, target_bytes):
                 raise KvPoolUnsupported("could not restore failed KV abort reservation")
             raise
         del self._pending_moves[logical_page_id]
@@ -1293,16 +1388,18 @@ class DynamicKVPool:
             raise KvPoolError("cannot consume a KV transfer before its completion")
         if page.owner_component != source or page.allocation_generation != generation:
             raise KvPoolError("in-flight KV source identity changed")
-        if not self._ledger.adjust(source, -page.bytes):
+        source_bytes = self.allocation_bytes(source, page.bytes)
+        target_bytes = self.allocation_bytes(target, page.bytes)
+        if not self._ledger.adjust(source, -source_bytes):
             raise KvPoolError("could not release completed KV transfer source")
         try:
             self._run_transfer_hook(plan, "commit")
         except BaseException:
-            if not self._ledger.adjust(source, page.bytes):
+            if not self._ledger.adjust(source, source_bytes):
                 raise KvPoolUnsupported("could not restore failed KV transfer source reservation")
             raise
-        self._owned_bytes[source] -= page.bytes
-        self._owned_bytes[target] += page.bytes
+        self._owned_bytes[source] -= source_bytes
+        self._owned_bytes[target] += target_bytes
         page.owner_component = target
         page.resident_tier = self.components[target].tier
         page.allocation_generation += 1
@@ -1310,7 +1407,7 @@ class DynamicKVPool:
         del self._pending_moves[logical_page_id]
         self._events.append(KvPoolTransfer(
             kind, logical_page_id, source, target, page.bytes,
-            plan.duration_ns, plan.start_ns, plan.completion_ns))
+            plan.duration_ns, plan.start_ns, plan.completion_ns, plan.energy_pj))
 
     def cancel_prepared_restore(self, logical_page_id: int, plan: KvPoolTransferPlan,
                                 *, now_ns: float) -> Mapping[str, Any]:
@@ -1324,12 +1421,13 @@ class DynamicKVPool:
             raise KvPoolError("in-flight KV source identity changed")
         if plan.cancel is None:
             raise KvPoolUnsupported("executor does not support cost-preserving cancellation")
-        if not self._ledger.adjust(target, -page.bytes):
+        target_bytes = self.allocation_bytes(target, page.bytes)
+        if not self._ledger.adjust(target, -target_bytes):
             raise KvPoolError("could not release cancelled restore reservation")
         try:
             billed = plan.cancel()
         except BaseException:
-            if not self._ledger.adjust(target, page.bytes):
+            if not self._ledger.adjust(target, target_bytes):
                 raise KvPoolUnsupported("could not restore failed KV cancellation reservation")
             raise
         del self._pending_moves[logical_page_id]
@@ -1394,6 +1492,9 @@ class DynamicKVPool:
                 "capacity_bytes": int(component.capacity_bytes),
                 "used_bytes": int(self._component_used(component_id)),
                 "pool_bytes": int(self._owned_bytes.get(component_id, 0)),
+                "logical_pool_bytes": sum(page.bytes for page in self._pages.values()
+                                          if page.owner_component == component_id),
+                "allocation_granularity_bytes": self._allocation_granularity[component_id],
                 "free_bytes": int(self._component_free(component_id)),
                 "page_count": int(page_counts.get(component_id, 0)),
                 "active": component.active,

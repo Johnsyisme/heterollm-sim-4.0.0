@@ -597,6 +597,8 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
                                                    if not attention else None))
     if kernel is None:
         return None
+    if not attention and workload.mmvq_issue_contract is not None:
+        raise ValueError('native kernel model and separate MMVQ issue bound cannot be combined')
     if kernel.samples and kernel.cache_protocol != workload.cache_protocol:
         raise ValueError('measured kernel cache protocol differs from workload')
     source_surface_excluded = False
@@ -720,18 +722,19 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
     active = min(1.0, ctas / gpu.sm_count)
     efficiency = kernel.attainable_efficiency * residency['occupancy'] * active
     if attention:
-        tiled_workload = (replace(workload, query_tile_tokens=kernel.attention_query_tile,
-                                  key_tile_tokens=kernel.attention_kv_tile)
-                          if stream_k is not None else workload)
+        # Once a native descriptor is selected, its tile geometry governs
+        # causal execution as well as stream-K. Workload defaults must not
+        # turn a one-query decode kernel into a 64-query prefill tile.
+        tiled_workload = replace(workload, query_tile_tokens=kernel.attention_query_tile,
+                                 key_tile_tokens=kernel.attention_kv_tile)
         attention_work = attention_tile_work(tiled_workload)
         if stream_k is not None and not workload.causal_query_positions:
             attention_work = {**attention_work, 'executed_pairs':
                 math.ceil(m / kernel.attention_query_tile) * kernel.attention_query_tile
                 * math.ceil(n / kernel.attention_kv_tile) * kernel.attention_kv_tile}
-        if stream_k is not None:
-            attention_work.update(query_tile_tokens=kernel.attention_query_tile,
-                                  key_tile_tokens=kernel.attention_kv_tile,
-                                  tile_source='kernel_descriptor')
+        attention_work.update(query_tile_tokens=kernel.attention_query_tile,
+                              key_tile_tokens=kernel.attention_kv_tile,
+                              tile_source='kernel_descriptor')
         if kernel.samples and workload.causal_query_positions:
             raise ValueError('rectangular attention sample does not cover causal visibility')
         ratio = attention_work['executed_pairs'] / (workload.batch_tokens * workload.context_tokens)
@@ -764,7 +767,11 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
         if internal_dtype not in gpu.tensor_core.supported_dtypes:
             raise ValueError('kernel tensor primitive unsupported by GPU')
         issued = operations
-        if not attention and workload.mmq_work is None:
+        if attention:
+            mma_work = attention_mma_work(tiled_workload, gpu.tensor_core,
+                                          round_attention_tiles=stream_k is not None)
+            issued = mma_work['issued_tensor_operations']
+        elif workload.mmq_work is None:
             tile = gpu.tensor_core
             issued = math.ceil(m / tile.mma_m) * math.ceil(n / tile.mma_n) * math.ceil(k / tile.mma_k) * tile.operations_per_mma
         dot_ns = issued / (gpu.tensor_core.peak_tops(internal_dtype) * 1000 * efficiency)
@@ -896,6 +903,8 @@ def estimate_kernel(gpu, hbm, workload, *, attention=False):
              'epilogue': kernel.epilogue,
              'output_bits': kernel.output_bits, 'accumulator_bits': kernel.accumulator_bits,
              **({'attention_tile_work': attention_work} if attention else {}),
+             **({'attention_mma_work': mma_work}
+                if attention and kernel.compute_primitive == 'tensor' else {}),
              'attention_model': ('flash_prefill' if phase == 'prefill' else 'paged_decode') if attention else None}
     phases = []
     # Graph replay launch is owned by the graph lifecycle, not charged per node.
@@ -1453,3 +1462,37 @@ def attention_tile_work(workload):
         skipped += total_tiles - visible_tiles
     return {'useful_pairs': sum(p + 1 for p in positions), 'executed_pairs': executed,
             'causal_tiles_skipped': skipped, 'causal_positions_bound': True}
+
+
+def attention_mma_work(workload, tensor_core, *, round_attention_tiles=False):
+    """Count independent QK/PV MMA tiles, including per-head tail padding.
+
+    Causal and stream-K execution uses explicit attention tiles. Each surviving
+    key tile is a separate softmax/PV step, so partial MMA lanes cannot be
+    packed with another head or another key tile. Ordinary rectangular work
+    retains the existing whole-matrix tiling contract.
+    """
+    ceil_div = lambda value, width: (value + width - 1) // width
+    head_dim = workload.hidden_size // workload.score_heads
+    positions = workload.causal_query_positions
+    qk = pv = 0
+    if positions or round_attention_tiles:
+        qtile, ktile = workload.query_tile_tokens, workload.key_tile_tokens
+        key_tile_steps = (sum(ceil_div(positions[min(first + qtile, len(positions)) - 1] + 1, ktile)
+                              for first in range(0, workload.batch_tokens, qtile))
+                          if positions else ceil_div(workload.batch_tokens, qtile)
+                          * ceil_div(workload.context_tokens, ktile))
+        qk = (ceil_div(qtile, tensor_core.mma_m) * key_tile_steps
+              * ceil_div(ktile, tensor_core.mma_n) * ceil_div(head_dim, tensor_core.mma_k))
+        pv = (ceil_div(qtile, tensor_core.mma_m) * ceil_div(head_dim, tensor_core.mma_n)
+              * key_tile_steps * ceil_div(ktile, tensor_core.mma_k))
+    else:
+        qk = (ceil_div(workload.batch_tokens, tensor_core.mma_m)
+              * ceil_div(workload.context_tokens, tensor_core.mma_n) * ceil_div(head_dim, tensor_core.mma_k))
+        pv = (ceil_div(workload.batch_tokens, tensor_core.mma_m)
+              * ceil_div(head_dim, tensor_core.mma_n) * ceil_div(workload.context_tokens, tensor_core.mma_k))
+    qk *= workload.score_heads
+    pv *= workload.score_heads
+    return {'qk_mma_count': qk, 'pv_mma_count': pv, 'head_dim': head_dim,
+            'issued_tensor_operations': (qk + pv) * tensor_core.operations_per_mma,
+            'scope': 'independent heads and executed attention tiles; KV storage unchanged'}

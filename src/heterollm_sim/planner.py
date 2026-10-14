@@ -3680,7 +3680,9 @@ def _attach_planned_l2(task: TaskSpec) -> TaskSpec:
         read, write = cost["activation_bytes"] + cost["weight_bytes"], cost["output_bytes"]
     else:
         read, write = cost.get("read_bytes", 0), cost.get("write_bytes", 0)
-    explicit = task.metadata.get("buffer_accesses")
+    # A preceding analytical cache projection is only a static miss estimate.
+    # Stateful L2 must see the original accesses and decide hits itself.
+    explicit = task.metadata.get("logical_buffer_accesses", task.metadata.get("buffer_accesses"))
     paged = task.metadata.get("paged_buffer_accesses")
     if paged is not None:
         if explicit is not None:
@@ -3688,7 +3690,22 @@ def _attach_planned_l2(task: TaskSpec) -> TaskSpec:
         from dataclasses import asdict
         explicit = [asdict(a) for spec in paged for a in paged_buffer_accesses(**spec)]
     if explicit is not None:
-        accesses = tuple(CacheAccess(**row) for row in explicit)
+        cache_rows = []
+        for row in explicit:
+            normalized = dict(row)
+            # Physical range projection may carry both spellings. Preserve
+            # the range and reject contradictory values, rather than passing
+            # physical descriptor aliases to the typed cache contract.
+            for alias, canonical in (("byte_count", "size_bytes"),
+                                     ("allocation_size_bytes", "buffer_size_bytes"),
+                                     ("generation", "allocation_generation")):
+                if alias in normalized:
+                    value = normalized.pop(alias)
+                    if canonical in normalized and normalized[canonical] != value:
+                        raise ValueError("conflicting cache access {} and {}".format(alias, canonical))
+                    normalized[canonical] = value
+            cache_rows.append(CacheAccess(**normalized))
+        accesses = tuple(cache_rows)
         if sum(a.size_bytes for a in accesses if a.operation == "read") != read or sum(a.size_bytes for a in accesses if a.operation == "write") != write:
             raise ValueError("buffer_accesses must cover all physical reads/writes exactly")
     else:
@@ -15766,6 +15783,33 @@ def _generic_kv_contract(builder, scenario, plan, rank, layer, *,
             "write_positions": materialized, "capacity_tokens": extent,
             "id": "kv:{}:{}:rank{}:tp{}:pp{}".format(request_id, layer.layer_id,
                                                       rank.rank, rank.tp_rank, rank.pp_rank)})
+    page_table = getattr(builder, "_physical_kv_page_table", None)
+    if page_table is not None:
+        if plan.world_size != 1:
+            raise ValueError("physical paged KV currently requires a single rank; distributed page layout is not declared")
+        tokens_per_page = int(page_table["tokens_per_page"])
+        layer_offset = 0
+        total_page_bytes = 0
+        found = False
+        for current_layer in _execution_layers(scenario):
+            if current_layer.is_linear_attention:
+                continue
+            if current_layer.layer_id == layer.layer_id:
+                layer_offset = total_page_bytes
+                found = True
+            total_page_bytes += 2 * _kv_tensor_bytes(scenario, current_layer, plan.tp_degree, 1) * tokens_per_page
+        if not found:
+            raise ValueError("physical paged KV layer is absent from the page layout")
+        cache, _offload, _ratio = _kv_components(scenario, rank, rank.component_id, layer)
+        for owner in result["owners"]:
+            pages = page_table["requests"].get(owner["request_id"])
+            if pages is None:
+                raise ValueError("physical paged KV has no page table for request " + owner["request_id"])
+            if any(page["size_bytes"] < total_page_bytes or page["component_id"] != cache for page in pages):
+                raise ValueError("physical paged KV layout or active component does not match the declared pool pages")
+            owner["pages"] = pages
+        result.update(schema="physical-paged-kv/v1", tokens_per_page=tokens_per_page,
+                      layer_offset_bytes=layer_offset)
     return result
 
 
@@ -15783,6 +15827,11 @@ def _generic_kv_gemm_dequant(scenario, layer, tp_degree, read_tokens, workload):
 
 
 def _generic_kv_persistence(contract):
+    if contract.get("schema") == "physical-paged-kv/v1":
+        pages = tuple(page for owner in contract["owners"] for page in owner["pages"])
+        return {"persistent_buffer_ids": tuple(dict.fromkeys(page["buffer_id"] for page in pages)),
+            "physical_external_allocations": tuple(dict.fromkeys((page["physical_owner"],
+                page["buffer_id"], page["allocation_generation"]) for page in pages))}
     request_buffers = {owner["request_id"]: [owner["id"] + ":k", owner["id"] + ":v"]
                        for owner in contract["owners"]}
     return {"persistent_request_buffers": request_buffers,
@@ -15790,6 +15839,8 @@ def _generic_kv_persistence(contract):
 
 
 def _generic_kv_accesses(contract, part, *, write=False):
+    if contract.get("schema") == "physical-paged-kv/v1":
+        return _paged_kv_accesses(contract, part, write=write)
     accesses = []
     for owner in contract["owners"]:
         base = {"buffer_id": owner["id"] + ":" + part,
@@ -15811,6 +15862,38 @@ def _generic_kv_accesses(contract, part, *, write=False):
                 runs.append((position, position + 1))
         accesses.extend({**base, "offset_bytes": start * contract["row_bytes"],
             "size_bytes": (end - start) * contract["row_bytes"]} for start, end in runs)
+    return accesses
+
+
+def _paged_kv_accesses(contract, part, *, write=False):
+    """Split logical K/V token spans into the pool's actual page allocations."""
+    accesses = []
+    per_page = contract["tokens_per_page"]
+    row_bytes = contract["row_bytes"]
+    part_offset = contract["layer_offset_bytes"] + (per_page * row_bytes if part == "v" else 0)
+    for owner in contract["owners"]:
+        ranges = [(position, 1) for position in owner["write_positions"]] if write else owner["read_ranges"]
+        for first, count in ranges:
+            while count:
+                index, within = divmod(first, per_page)
+                if index >= len(owner["pages"]):
+                    raise ValueError("physical paged KV access exceeds the request's live pages")
+                page = owner["pages"][index]
+                taken = min(count, per_page - within)
+                offset = part_offset + within * row_bytes
+                access = {"buffer_id": page["buffer_id"],
+                    "allocation_generation": page["allocation_generation"],
+                    "buffer_size_bytes": page["size_bytes"],
+                    "operation": "write" if write else "read", "offset_bytes": offset,
+                    "size_bytes": taken * row_bytes}
+                if accesses and all(accesses[-1].get(key) == access.get(key) for key in (
+                        "buffer_id", "allocation_generation", "operation")) and (
+                        accesses[-1]["offset_bytes"] + accesses[-1]["size_bytes"] == offset):
+                    accesses[-1]["size_bytes"] += access["size_bytes"]
+                else:
+                    accesses.append(access)
+                first += taken
+                count -= taken
     return accesses
 
 
@@ -18917,6 +19000,12 @@ def _compile_parallel_layer(
         cache_key += (output_selection,)
     capture_dependencies = tuple(dependencies) + ((output_indices_dependency,) if output_selection is not None and output_indices_dependency is not None else ())
     prefix = "{}.{}".format(phase, layer.layer_id)
+    if any(component.metadata.get("physical_memory_config") is not None
+           for component in scenario.hardware.components):
+        # Physical descriptors include request-owned buffers and integer
+        # allocation generations that string-only template rebinding cannot
+        # safely reconstruct. Keep exact replay within the same request.
+        cache_key += (builder.request.request_id,)
     template = _task_segment_cache_get(cache, cache_key)
     if template is not None:
         replayed = template.replay(
@@ -19036,6 +19125,43 @@ def _add_qkv_projection_bias(
     return end
 
 
+def _add_tp_residuals(
+    builder, scenario, router, plan, layer, ranks, prefix, kind, token_batch,
+    collective_end, metadata_by_rank, *, targets_by_rank=None, extra_dependencies=None,
+):
+    """Add each replicated residual only after summing the TP partials."""
+    ends = []
+    elements = token_batch * layer.hidden_size
+    bits = _activation_storage_bits(layer, scenario)
+    for rank in ranks:
+        if rank.rank not in metadata_by_rank:
+            continue
+        metadata = metadata_by_rank[rank.rank]
+        extra = (extra_dependencies or {}).get(rank.rank, ())
+        residual, component = _add_rank_primitive(
+            builder, scenario, router, plan, rank, OperatorClass.ELEMENTWISE,
+            ElementwiseWorkload(
+                elements=elements, operations_per_element=1, input_count=2,
+                input_bits=bits, output_bits=bits, name=kind + "_residual",
+                **({"dependency_depth": 1,
+                    "working_set_bytes": _activation_bytes(layer, elements * 3, scenario=scenario),
+                    "reuse_factor": 2.0} if kind == "attention" else {}),
+            ),
+            "{}.{}.residual".format(layer.layer_id, kind),
+            "{}.rank{:03d}.{}_residual".format(prefix, rank.rank, kind),
+            tuple(dict.fromkeys((collective_end, *extra))),
+            source_component_id=(builder.rank_value_component((collective_end,), rank.rank)
+                                 or rank.component_id),
+            target_component_id=(targets_by_rank or {}).get(rank.rank),
+            fallback_keys=("{}.norm".format(layer.layer_id),), metadata=metadata,
+        )
+        builder.record_rank_value(residual, rank.rank, component)
+        ends.append(residual)
+    return (_add_join(builder, prefix + "." + kind + "_residual.complete", ends,
+                      metadata={"event_kind": kind + "_residual_barrier", "layer_id": layer.layer_id})
+            if ends else collective_end)
+
+
 def _compile_parallel_layer_body(
     builder: _TaskBuilder,
     scenario: ScenarioConfig,
@@ -19094,12 +19220,6 @@ def _compile_parallel_layer_body(
     tail_rows = output_selection.ffn_rows if output_selection is not None else token_batch
     stage = plan.stage_for_layer(layer)
     tp_ranks = plan.tp_group(stage, 0)
-    hidden_shard = shard_extent(
-        layer.hidden_size,
-        plan.tp_degree,
-        0,
-        allow_padding=plan.allow_padding,
-    )
     attention_execution = _attention_execution_descriptor(layer)
     source_geometry = _qwen35_attention_source_work(layer)
     head_dim = (
@@ -19214,6 +19334,8 @@ def _compile_parallel_layer_body(
         scenario=scenario,
     )
     rank_ends: List[str] = []
+    pending_residual_metadata = {}
+    pending_residual_inputs = {}
     prefix = "{}.{}".format(phase, layer.layer_id)
     logical_context_tokens = (kv_read_tokens + kv_materialized_tokens
         if scenario.workload.metadata.get("native_rope_source_contract") is not None
@@ -19273,6 +19395,9 @@ def _compile_parallel_layer_body(
         if source_f32:
             context_tokens = source_f32_kv["attention_read_tokens"]
             kv_read_tokens = context_tokens
+        if getattr(builder, "_physical_kv_page_table", None) is not None and (
+                source_f32 or native_qkv_output or source_attention is not None):
+            raise ValueError("physical paged KV does not support an undeclared native/source KV page layout")
         generic_kv = None if source_f32 or native_qkv_output or source_attention is not None else _generic_kv_contract(
             builder, scenario, plan, rank, layer, token_batch=token_batch,
             context_tokens=context_tokens, history_tokens=kv_read_tokens,
@@ -19322,13 +19447,13 @@ def _compile_parallel_layer_body(
         )
         activation_bits = _activation_storage_bits(layer, scenario)
         hidden_elements = max(
-            1, token_batch * hidden_shard.local_size
+            1, token_batch * layer.hidden_size
         )
         rank_meta = {
             "phase": phase,
             "layer_id": layer.layer_id,
             "stage": stage,
-            "shard_padding": hidden_shard.padding,
+            "shard_padding": 0,
             "sequence_mixer": "full_attention",
             "coverage_component": "full_attention",
         }
@@ -20742,7 +20867,7 @@ def _compile_parallel_layer_body(
             if _is_cim(_component(scenario, output_target))
             else output_target
         )
-        tail_elements = tail_rows * hidden_shard.local_size
+        tail_elements = tail_rows * layer.hidden_size
         residual_inputs = (output,)
         if output_selection is not None and output_selection.position == "before_last_ffn" and tail_rows:
             if output_indices_dependency is None:
@@ -20785,6 +20910,13 @@ def _compile_parallel_layer_body(
                 residual = (_add_join(builder, prefix + ".selected_residual_inputs", residual_inputs, metadata=rank_meta)
                             if output_selection is not None else output)
                 residual_component = output_component
+            elif plan.tp_degree > 1:
+                # Output projection produces a full-width partial sum on
+                # each rank. The replicated input must not enter all-reduce.
+                pending_residual_metadata[rank.rank] = {
+                    **rank_meta, **residual_norm_audit, "event_kind": "attention_residual"}
+                pending_residual_inputs[rank.rank] = residual_inputs[1:]
+                residual, residual_component = output, output_component
             else:
                 residual, residual_component = _add_rank_primitive(
                     builder,
@@ -20873,6 +21005,10 @@ def _compile_parallel_layer_body(
             "sequence_mixer": "full_attention",
             "coverage_component": "full_attention",
         },
+    )
+    attention_end = _add_tp_residuals(
+        builder, scenario, router, plan, layer, tp_ranks, prefix, "attention", tail_rows,
+        attention_end, pending_residual_metadata, extra_dependencies=pending_residual_inputs,
     )
     if layer.is_moe:
         return _compile_parallel_moe(
@@ -20983,6 +21119,12 @@ def _compile_parallel_linear_mixer(
         if state_runtime.uses_temporary_state:
             cache_key += (builder.request.request_id,)
     prefix = "{}.{}".format(phase, layer.layer_id)
+    if any(component.metadata.get("physical_memory_config") is not None
+           for component in scenario.hardware.components):
+        # Physical descriptors include request-owned buffers and integer
+        # allocation generations that string-only template rebinding cannot
+        # safely reconstruct. Keep exact replay within the same request.
+        cache_key += (builder.request.request_id,)
     template = _task_segment_cache_get(cache, cache_key)
     if template is not None:
         runtime_override_rules: Tuple[
@@ -21101,6 +21243,8 @@ def _compile_parallel_linear_mixer_uncached(
         math.ceil(geometry.recurrent_state_elements / float(plan.tp_degree))
     )
     rank_ends: List[str] = []
+    pending_residual_metadata = {}
+    pending_residual_targets = {}
     scaling = "O(T)" if token_batch > 1 or phase.startswith("prefill") else "O(1)"
     for rank in ranks:
         target = _parallel_target(scenario, layer, "linear_attention", rank)
@@ -21549,42 +21693,47 @@ def _compile_parallel_linear_mixer_uncached(
                 else target
             )
         )
-        residual, residual_component = _add_rank_primitive(
-            builder,
-            scenario,
-            router,
-            plan,
-            rank,
-            OperatorClass.ELEMENTWISE,
-            ElementwiseWorkload(
-                elements=hidden_elements,
-                operations_per_element=1,
-                input_count=2,
-                input_bits=activation_bits,
-                output_bits=activation_bits,
-                name="linear_attention_residual",
-            ),
-            "{}.linear_attention.residual".format(layer.layer_id),
-            "{}.rank{:03d}.linear_attention_residual".format(prefix, rank.rank),
-            (output,),
-            source_component_id=output_component,
-            target_component_id=recurrent_target,
-            fallback_keys=("{}.norm".format(layer.layer_id),),
-            metadata={**metadata, "linear_op": "residual"},
-        )
-        output = _return_rank_value(
-            builder,
-            router,
-            plan,
-            rank,
-            residual,
-            residual_component,
-            _activation_bytes(layer, hidden_elements, scenario=scenario),
-            name="{}.rank{:03d}.linear_attention_residual.output_to_gpu".format(
-                prefix, rank.rank
-            ),
-            metadata=metadata,
-        )
+        if plan.tp_degree > 1:
+            pending_residual_metadata[rank.rank] = {**metadata, "linear_op": "residual"}
+            pending_residual_targets[rank.rank] = recurrent_target
+            builder.record_rank_value(output, rank.rank, output_component)
+        else:
+            residual, residual_component = _add_rank_primitive(
+                builder,
+                scenario,
+                router,
+                plan,
+                rank,
+                OperatorClass.ELEMENTWISE,
+                ElementwiseWorkload(
+                    elements=hidden_elements,
+                    operations_per_element=1,
+                    input_count=2,
+                    input_bits=activation_bits,
+                    output_bits=activation_bits,
+                    name="linear_attention_residual",
+                ),
+                "{}.linear_attention.residual".format(layer.layer_id),
+                "{}.rank{:03d}.linear_attention_residual".format(prefix, rank.rank),
+                (output,),
+                source_component_id=output_component,
+                target_component_id=recurrent_target,
+                fallback_keys=("{}.norm".format(layer.layer_id),),
+                metadata={**metadata, "linear_op": "residual"},
+            )
+            output = _return_rank_value(
+                builder,
+                router,
+                plan,
+                rank,
+                residual,
+                residual_component,
+                _activation_bytes(layer, hidden_elements, scenario=scenario),
+                name="{}.rank{:03d}.linear_attention_residual.output_to_gpu".format(
+                    prefix, rank.rank
+                ),
+                metadata=metadata,
+            )
         scan_for_state = _return_rank_value(
             builder,
             router,
@@ -21706,7 +21855,7 @@ def _compile_parallel_linear_mixer_uncached(
                 metadata=metadata,
             )
         )
-    return _add_collective_tasks(
+    collective_end = _add_collective_tasks(
         builder,
         scenario,
         router,
@@ -21727,6 +21876,10 @@ def _compile_parallel_linear_mixer_uncached(
             "context_scaling": scaling,
             "state_bytes": state_bytes * plan.tp_degree,
         },
+    )
+    return _add_tp_residuals(
+        builder, scenario, router, plan, layer, ranks, prefix, "linear_attention", token_batch,
+        collective_end, pending_residual_metadata, targets_by_rank=pending_residual_targets,
     )
 
 
@@ -21786,6 +21939,12 @@ def _compile_parallel_dense_mlp(
         len(tuple(dependencies)),
         builder._last_coherent_dma_task is not None,
     )
+    if any(component.metadata.get("physical_memory_config") is not None
+           for component in scenario.hardware.components):
+        # Physical descriptors include request-owned buffers and integer
+        # allocation generations that string-only template rebinding cannot
+        # safely reconstruct. Keep exact replay within the same request.
+        cache_key += (builder.request.request_id,)
     template = _task_segment_cache_get(cache, cache_key)
     if template is not None:
         replayed = template.replay(
@@ -21838,12 +21997,6 @@ def _compile_parallel_dense_mlp_uncached(
     stage = plan.stage_for_layer(layer)
     ranks = plan.tp_group(stage, 0)
     gated_mlp = bool(getattr(layer, "gated_mlp", True))
-    up_shard = shard_extent(
-        (2 if gated_mlp else 1) * layer.intermediate_size,
-        plan.tp_degree,
-        0,
-        allow_padding=plan.allow_padding,
-    )
     down_shard = shard_extent(
         layer.intermediate_size,
         plan.tp_degree,
@@ -21851,6 +22004,7 @@ def _compile_parallel_dense_mlp_uncached(
         allow_padding=plan.allow_padding,
     )
     ends = []
+    pending_residual_metadata = {}
     for rank in ranks:
         activation_bits = _activation_storage_bits(layer, scenario)
         hidden_elements = max(1, token_batch * layer.hidden_size)
@@ -21999,7 +22153,7 @@ def _compile_parallel_dense_mlp_uncached(
             layer,
             token_batch,
             layer.hidden_size,
-            up_shard.local_size,
+            (2 if gated_mlp else 1) * down_shard.local_size,
             name="mlp_up_tp",
             projection_id=("mlp.up_gate" if gated_mlp else "mlp.up"),
             projection_tp_degree=plan.tp_degree,
@@ -22278,6 +22432,11 @@ def _compile_parallel_dense_mlp_uncached(
             if _is_cim(_component(scenario, target))
             else target
         )
+        if plan.tp_degree > 1:
+            pending_residual_metadata[rank.rank] = {**ffn_meta, "event_kind": "mlp_residual"}
+            builder.record_rank_value(down, rank.rank, down_component)
+            ends.append(down)
+            continue
         residual, residual_component = _add_rank_primitive(
             builder,
             scenario,
@@ -22315,7 +22474,7 @@ def _compile_parallel_dense_mlp_uncached(
                 metadata=ffn_meta,
             )
         )
-    return _add_collective_tasks(
+    collective_end = _add_collective_tasks(
         builder,
         scenario,
         router,
@@ -22333,6 +22492,10 @@ def _compile_parallel_dense_mlp_uncached(
             "ffn_path": "dense",
             "coverage_component": "dense_ffn",
         },
+    )
+    return _add_tp_residuals(
+        builder, scenario, router, plan, layer, ranks, prefix, "mlp", token_batch,
+        collective_end, pending_residual_metadata,
     )
 
 
@@ -23153,12 +23316,6 @@ def _compile_parallel_shared_expert(
     up_projection = "up_gate" if gated_mlp else "up"
     stage = plan.stage_for_layer(layer)
     ranks = plan.tp_group(stage, 0)
-    up_shard = shard_extent(
-        (2 if gated_mlp else 1) * layer.shared_expert_intermediate_size,
-        plan.tp_degree,
-        0,
-        allow_padding=plan.allow_padding,
-    )
     down_shard = shard_extent(
         layer.shared_expert_intermediate_size,
         plan.tp_degree,
@@ -23189,7 +23346,7 @@ def _compile_parallel_shared_expert(
             layer,
             token_batch,
             layer.hidden_size,
-            up_shard.local_size,
+            (2 if gated_mlp else 1) * down_shard.local_size,
             name="moe_shared_expert_up_tp",
             f32_storage=_f32_hidden_storage_enabled(scenario),
         )
@@ -23646,13 +23803,7 @@ def _compile_parallel_final_norm(
     stage = plan.pp_degree - 1
     ends: Dict[int, str] = {}
     for rank in plan.tp_group(stage, 0):
-        hidden_shard = shard_extent(
-            hidden_size,
-            plan.tp_degree,
-            rank.tp_rank,
-            allow_padding=plan.allow_padding,
-        )
-        hidden_elements = max(1, batch_tokens * hidden_shard.local_size)
+        hidden_elements = max(1, batch_tokens * hidden_size)
         metadata = {
             "stage": stage,
             "phase": phase,
@@ -23660,8 +23811,8 @@ def _compile_parallel_final_norm(
             "model_operator_kind": final_norm.op_kind,
             "output_tensor_id": output_tensor_id,
             "hidden_size": hidden_size,
-            "hidden_shard_size": hidden_shard.local_size,
-            "shard_padding": hidden_shard.padding,
+            "hidden_shard_size": hidden_size,
+            "shard_padding": 0,
         }
         if output_selection is not None:
             metadata["final_layer_output_selection"] = _selection_audit(output_selection, "final_norm")
@@ -23672,7 +23823,7 @@ def _compile_parallel_final_norm(
         elif native_norm is not None:
             ends[rank.rank] = _add_llama_final_norm(
                 builder, scenario, router, plan, rank, native_norm, phase, dependencies,
-                hidden_elements, batch_tokens, hidden_shard.local_size, metadata)
+                hidden_elements, batch_tokens, hidden_size, metadata)
             continue
         norm_reduce, norm_component = _add_rank_primitive(
             builder,
@@ -23690,7 +23841,7 @@ def _compile_parallel_final_norm(
                 output_bits=max(16, activation_bits),
                 dependency_depth=max(
                     1,
-                    int(math.ceil(math.log2(max(1, hidden_shard.local_size)))),
+                    int(math.ceil(math.log2(max(1, hidden_size)))),
                 ),
                 working_set_bytes=int(
                     math.ceil(hidden_elements * activation_bits / 8.0)
@@ -25713,7 +25864,7 @@ def _serving_invocation_segment_binding(
         builder._last_coherent_dma_task is not None,
     )
     if any(component.metadata.get("physical_memory_config") is not None for component in scenario.hardware.components):
-        key += (group.context_tokens, group.kv_read_tokens, group.request_ids,
+        key += (builder.request.request_id, group.context_tokens, group.kv_read_tokens, group.request_ids,
                 tuple(lane.context_tokens for lane in group.lanes))
     if scenario.workload.metadata.get("native_rope_source_contract") is not None:
         # Source cache writes contain token offsets and transposed V ranges.
@@ -25754,7 +25905,7 @@ def _compile_or_replay_serving_invocation(
                   if group.nonflash_kv_view.get("applied") is True else 0)
     attention_context_tokens = physical_k or group.kv_scan_tokens or group.context_tokens
     attention_kv_read_tokens = physical_k or max(group.kv_read_tokens, group.kv_scan_tokens)
-    binding = _serving_invocation_segment_binding(
+    binding = None if getattr(builder, "_physical_kv_page_table", None) is not None else _serving_invocation_segment_binding(
         builder,
         scenario,
         plan,
@@ -26976,6 +27127,8 @@ def _serving_cohort_cache_key(cohort: object) -> Tuple[object, ...]:
         *((kv_scan_tokens,) if kv_scan_tokens else ()),
         *(("q4_mma_view_lower_bound", q4_view_tokens) if q4_view_tokens else ()),
         *scan_prefix_identity,
+        *(("physical_kv_pages", repr(metadata["physical_kv_page_table"]))
+          if metadata.get("physical_kv_page_table") is not None else ()),
         *(("retained_slot_rows", metadata.get("llama_cpp_kv_occupied_rows"))
           if metadata.get("llama_cpp_retained_kv_bound") is not None else ()),
     )
@@ -28979,6 +29132,8 @@ def _estimate_serving_cohort_cost(
     hardware model as static runs.
     """
 
+    from .live_execution_metrics import execution_time_breakdown
+
     lowering = _lower_serving_cohort(
         scenario,
         cohort,
@@ -29014,10 +29169,6 @@ def _estimate_serving_cohort_cost(
         if task.metadata.get("orchestration_stage")
         in {"host_prefix", "host_target_frontend", "host_suffix", _GPU_CONSUMER_FRONTEND_STAGE}
     )
-    host_orchestration_ns = sum(
-        max((demand.service_ns for demand in task.demands), default=0.0)
-        for task in host_orchestration_tasks
-    )
     raw_invocation_groups = lowering.extra_metadata.get(
         "operator_invocation_groups", ()
     )
@@ -29039,10 +29190,6 @@ def _estimate_serving_cohort_cost(
         in {"host_prefix", "host_target_frontend", "host_suffix", _GPU_CONSUMER_FRONTEND_STAGE}
     )
     execution_stages_include_host_orchestration = bool(explicit_host_stages)
-    if execution_stages_include_host_orchestration:
-        host_orchestration_ns = sum(
-            float(stage["service_ns"]) for stage in explicit_host_stages
-        )
     return {
         "duration_ns": summary.makespan_ns,
         "energy_pj": summary.energy_pj,
@@ -29073,9 +29220,10 @@ def _estimate_serving_cohort_cost(
                 resource_owners=lowering.schedule.resource_owners,
             ),
             "linear_state_bytes": summary.linear_state_bytes,
-            "host_orchestration_ns": host_orchestration_ns,
-            "device_execution_ns": max(
-                0.0, summary.makespan_ns - host_orchestration_ns
+            **execution_time_breakdown(
+                summary.execution_records,
+                origin_ns=0.0,
+                end_ns=summary.makespan_ns,
             ),
             "host_orchestration_task_count": len(
                 host_orchestration_tasks
@@ -29579,6 +29727,7 @@ def _lower_serving_cohort(
         output_tokens=0,
     )
     builder = _TaskBuilder(request)
+    builder._physical_kv_page_table = getattr(cohort, "metadata", {}).get("physical_kv_page_table")
     start = builder.add(
         cohort_id + ".start",
         TaskCategory.POLICY,
@@ -31572,7 +31721,10 @@ def _layer_gemm(
     if not isinstance(f32_storage, bool):
         raise ValueError("f32_storage must be boolean")
     declared_f32_storage = f32_storage
-    output_storage_bits = 32 if declared_f32_storage else max(16, activation_bits)
+    # Ordinary analytical graphs declare their activation storage through
+    # the layer precision. Accumulation precision is a separate contract;
+    # widening only GEMM outputs would disagree with every next consumer.
+    output_storage_bits = 32 if declared_f32_storage else activation_bits
     materialized_projection = None
     if projection_id is not None:
         if not isinstance(projection_id, str) or not projection_id.strip():

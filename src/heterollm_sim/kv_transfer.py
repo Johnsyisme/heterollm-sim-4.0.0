@@ -55,11 +55,15 @@ class PhysicalKVTransferExecutor:
         arrival_ns: Optional[float | Callable[[KvPoolTransferRequest], float]] = 0.0,
         namespace: str = "kv-pool",
         energy_pj_per_byte_by_component: Optional[Mapping[str, float]] = None,
+        cache_states: Optional[Mapping[str, Any]] = None,
+        cache_owners: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.runtime = runtime or PhysicalRuntimeContext()
         self.topology = topology
         self.arrival_ns = arrival_ns
         self.namespace = str(namespace)
+        self.cache_states = {} if cache_states is None else cache_states
+        self.cache_owners = {} if cache_owners is None else cache_owners
         if not self.namespace:
             raise ValueError("namespace must be non-empty")
         self.components = self._component_map(hardware)
@@ -166,6 +170,14 @@ class PhysicalKVTransferExecutor:
         request = str(getattr(page, "request_id", "request"))
         return "{}:{}:page:{}".format(self.namespace, request, self._page_id(page))
 
+    def allocation_bytes(self, component_id: str, payload_bytes: int) -> int:
+        """Capacity footprint of an independently aligned physical page."""
+        if type(payload_bytes) is not int or payload_bytes < 0:
+            raise ValueError("page payload bytes must be a non-negative integer")
+        service = self._ensure_service(component_id)
+        alignment = self._allocator(service.physical_owner).alignment_bytes
+        return ((payload_bytes + alignment - 1) // alignment) * alignment
+
     def bind_page(self, page: Any) -> int:
         """Allocate and bind one page at its declared owner component."""
         page_id = self._page_id(page)
@@ -189,7 +201,7 @@ class PhysicalKVTransferExecutor:
             return existing.allocation.base_address
         service = self._ensure_service(component_id)
         allocator = self._allocator(service.physical_owner)
-        allocation = allocator.allocate(self._buffer_id(page), size, generation)
+        allocation = allocator.allocate(self._buffer_id(page), self.allocation_bytes(component_id, size), generation)
         self._bindings[page_id] = _PageBinding(
             page_id, str(getattr(page, "request_id", "request")),
             str(getattr(page, "layer_group", "kv")), component_id,
@@ -212,6 +224,8 @@ class PhysicalKVTransferExecutor:
     def address(self, page: Any, offset_bytes: int = 0, size_bytes: Optional[int] = None) -> int:
         binding = self._binding(page)
         size = binding.bytes - int(offset_bytes) if size_bytes is None else int(size_bytes)
+        if int(offset_bytes) < 0 or size < 0 or int(offset_bytes) + size > binding.bytes:
+            raise ValueError("KV access exceeds logical page payload")
         return binding.allocation.address(int(offset_bytes), size)
 
     def release_page(self, page: Any) -> None:
@@ -235,6 +249,36 @@ class PhysicalKVTransferExecutor:
             active.core.discard_staged_pages(allocation.base_address, rounded_bytes,
                                             now_ns=active.clock_ns)
         allocator.release(buffer_id, generation)
+        for cache in self._owner_caches(owner):
+            cache.discard_buffer(buffer_id, generation)
+
+    def _owner_caches(self, owner):
+        return tuple(self.cache_states[key][1] for key in self.cache_owners.get(owner, ())
+                     if key in self.cache_states)
+
+    def _snapshot_caches(self):
+        return {key: (state[0], state[1], copy.deepcopy(vars(state[1])))
+                for key, state in self.cache_states.items()}
+
+    def _restore_caches(self, snapshot):
+        self.cache_states.clear()
+        for key, (signature, cache, state) in snapshot.items():
+            vars(cache).clear()
+            vars(cache).update(copy.deepcopy(state))
+            self.cache_states[key] = (signature, cache)
+
+    def _flush_source_caches(self, binding, arrival_ns):
+        """Make dirty GPU cache lines visible before the migration source read."""
+        current, phases = arrival_ns, []
+        for cache in self._owner_caches(binding.owner):
+            flush = cache.flush(binding.allocation.buffer_id, allocation_generation=binding.generation)
+            for access in flush.backing_accesses:
+                address = binding.allocation.address(access.offset_bytes, access.size_bytes)
+                bills = self._price_chunks(binding.component_id, AccessKind.WRITE,
+                    address, access.size_bytes, arrival_ns=current, caller_managed_transaction=True)
+                phases.extend({"kind": "source_cache_writeback", **bill} for bill in bills)
+                current = float(bills[-1]["completion_ns"]) if bills else current
+        return current, phases
 
     def _arrival(self, request: Optional[KvPoolTransferRequest], value: Optional[float]) -> float:
         if value is not None:
@@ -289,13 +333,21 @@ class PhysicalKVTransferExecutor:
         saved_runtime = self.runtime.snapshot()
         saved_counters = dict(self.counters)
         cost_count = len(self._cost_phases)
+        cache_transactions = []
         try:
+            for _key, (_signature, cache) in self.cache_states.items():
+                cache_transactions.append((cache, cache.begin_transaction()))
             yield
         except Exception:
             self.runtime.restore(saved_runtime)
             self.counters = saved_counters
             del self._cost_phases[cost_count:]
+            for cache, transaction in reversed(cache_transactions):
+                cache.rollback_transaction(transaction)
             raise
+        else:
+            for cache, transaction in cache_transactions:
+                cache.commit_transaction(transaction)
 
     def _record_memory_cost(self, component_id, kind, bill):
         owner = self.services[component_id].physical_owner
@@ -326,6 +378,7 @@ class PhysicalKVTransferExecutor:
             "resource_busy_by_direction_ns": {direction: dict(raw.get("resource_busy_ns", {}))},
             "direction_semantics": "attributed to the submitted transaction direction; a NAND write may include RMW reads"})
         self._cost_phases.append(raw)
+        return raw
 
     def _submit_link_phase(self, hop, size, arrival_ns):
         """Use the same payload-wire and inflight-credit contract as DAG hops."""
@@ -465,8 +518,9 @@ class PhysicalKVTransferExecutor:
                 amount = min(amount, chunk - (address + offset) % granularity)
             bill = price(kind, amount, page_offset_bytes=address + offset,
                          runtime=self.runtime, arrival_ns=current)
-            self._record_memory_cost(component_id, kind, bill)
-            results.append(dict(bill))
+            recorded = self._record_memory_cost(component_id, kind, bill)
+            results.append({**bill, **{key: recorded[key] for key in (
+                "energy_pj", "resource_energy_pj", "resource_interval_payloads")}})
             current = float(bill.get("completion_ns", current))
             offset += amount
         if kind is AccessKind.READ:
@@ -495,7 +549,7 @@ class PhysicalKVTransferExecutor:
         with self._io_transaction():
             binding = self._binding(page)
             size = binding.bytes - int(offset_bytes) if size_bytes is None else int(size_bytes)
-            address = binding.allocation.address(int(offset_bytes), size)
+            address = self.address(page, int(offset_bytes), size)
             total: dict[str, Any] = {"operation": kind.value, "logical_bytes": 0}
             for bill in self._price_chunks(binding.component_id, kind, address, size,
                     arrival_ns=self._arrival(None, arrival_ns), caller_managed_transaction=True):
@@ -550,6 +604,7 @@ class PhysicalKVTransferExecutor:
         target_service = self._ensure_service(target_component)
         target_owner = target_service.physical_owner
         snapshot = self.runtime.snapshot()
+        cache_snapshot = self._snapshot_caches()
         bindings_snapshot = copy.deepcopy(self._bindings)
         events_snapshot = len(self.events)
         counters_snapshot = copy.deepcopy(self.counters)
@@ -560,10 +615,13 @@ class PhysicalKVTransferExecutor:
         start = self._arrival(request, None)
         phases: list[dict[str, Any]] = []
         try:
-            target_alloc = target_allocator.allocate(self._buffer_id(request), binding.bytes, target_generation)
+            target_alloc = target_allocator.allocate(self._buffer_id(request),
+                self.allocation_bytes(target_component, binding.bytes), target_generation)
             source_addr = binding.allocation.base_address
+            source_start, writebacks = self._flush_source_caches(binding, start)
+            phases.extend(writebacks)
             read_bills = self._price_chunks(binding.component_id, AccessKind.READ, source_addr,
-                                            binding.bytes, arrival_ns=start, caller_managed_transaction=True)
+                                            binding.bytes, arrival_ns=source_start, caller_managed_transaction=True)
             current = float(read_bills[-1].get("completion_ns", start)) if read_bills else start
             for bill in read_bills:
                 phases.append({"kind": "source_read", **bill})
@@ -575,7 +633,8 @@ class PhysicalKVTransferExecutor:
                 relay_owner = self._ensure_service(stage).physical_owner
                 relay_allocator = self._allocator(relay_owner)
                 relay_allocation = relay_allocator.allocate(
-                    self._buffer_id(request) + ":relay:" + stage, binding.bytes, target_generation)
+                    self._buffer_id(request) + ":relay:" + stage,
+                    self.allocation_bytes(stage, binding.bytes), target_generation)
                 temp_allocations.append((relay_owner, relay_allocation.buffer_id, target_generation))
                 relay_bills = self._price_chunks(stage, AccessKind.WRITE, relay_allocation.base_address,
                     binding.bytes, arrival_ns=current, caller_managed_transaction=True)
@@ -599,6 +658,7 @@ class PhysicalKVTransferExecutor:
             completion = float(target_bills[-1].get("completion_ns", current)) if target_bills else current
         except Exception:
             self.runtime.restore(snapshot)
+            self._restore_caches(cache_snapshot)
             self._bindings = bindings_snapshot
             self.counters = counters_snapshot
             del self._cost_phases[cost_count:]
@@ -615,12 +675,13 @@ class PhysicalKVTransferExecutor:
         plan = KvPoolTransferPlan(
             duration_ns=max(0.0, completion - start), start_ns=start,
             completion_ns=completion,
+            energy_pj=sum(phase.get("energy_pj", 0.0) for phase in phases),
             commit=lambda: self._commit_transfer(page_id, target_component, target_owner, target_alloc,
                                                  target_generation, phases, temp_allocations, state,
                                                  expected_token=phase_token),
             rollback=lambda: self._rollback_transfer(snapshot, bindings_snapshot, counters_snapshot, events_snapshot, target_component,
                                                      target_owner, target_alloc, temp_allocations, state,
-                                                     expected_token=phase_token, cost_count=cost_count),
+                                                     expected_token=phase_token, cost_count=cost_count, cache_snapshot=cache_snapshot),
         )
         return plan
 
@@ -642,6 +703,7 @@ class PhysicalKVTransferExecutor:
         target_service = self._ensure_service(target_component)
         target_owner = target_service.physical_owner
         snapshot = self.runtime.snapshot()
+        cache_snapshot = self._snapshot_caches()
         bindings_snapshot = copy.deepcopy(self._bindings)
         events_snapshot = len(self.events)
         counters_snapshot = copy.deepcopy(self.counters)
@@ -651,7 +713,7 @@ class PhysicalKVTransferExecutor:
         start = self._arrival(request, None)
         try:
             target_alloc = self._allocator(target_owner).allocate(
-                self._buffer_id(request), binding.bytes, target_generation)
+                self._buffer_id(request), self.allocation_bytes(target_component, binding.bytes), target_generation)
             # Allocate relay buffers before beginning I/O, so a later phase
             # cannot discover an unreserved capacity requirement.
             downstream = []
@@ -666,19 +728,21 @@ class PhysicalKVTransferExecutor:
                     relay_owner = self._ensure_service(component).physical_owner
                     allocator = self._allocator(relay_owner)
                     allocation = allocator.allocate(self._buffer_id(request) + ":relay:" + component,
-                                                    binding.bytes, target_generation)
+                                                    self.allocation_bytes(component, binding.bytes), target_generation)
                     temp_allocations.append((relay_owner, allocation.buffer_id, target_generation))
                     downstream.extend((
                         ("relay_write", component, allocation.base_address, AccessKind.WRITE),
                         ("relay_read", component, allocation.base_address, AccessKind.READ)))
                 source = component
+            source_start, writebacks = self._flush_source_caches(binding, start)
             read_bills = self._price_chunks(binding.component_id, AccessKind.READ,
-                binding.allocation.base_address, binding.bytes, arrival_ns=start,
+                binding.allocation.base_address, binding.bytes, arrival_ns=source_start,
                 caller_managed_transaction=True)
-            phases = tuple({"kind": "source_read", **bill} for bill in read_bills)
+            phases = (*writebacks, *({"kind": "source_read", **bill} for bill in read_bills))
             ready = float(read_bills[-1].get("completion_ns", start)) if read_bills else start
         except Exception:
             self.runtime.restore(snapshot)
+            self._restore_caches(cache_snapshot)
             self._bindings = bindings_snapshot
             self.counters = counters_snapshot
             del self._cost_phases[cost_count:]
@@ -730,12 +794,13 @@ class PhysicalKVTransferExecutor:
 
             return KvPoolTransferPlan(
                 duration_ns=max(0.0, phase_end - start), start_ns=start, completion_ns=phase_end,
+                energy_pj=sum(phase.get("energy_pj", 0.0) for phase in completed_phases),
                 commit=(lambda: self._commit_transfer(page_id, target_component, target_owner, target_alloc,
                     target_generation, list(completed_phases), temp_allocations, state,
                     expected_token=token)) if final else None,
                 rollback=lambda: self._rollback_transfer(snapshot, bindings_snapshot, counters_snapshot,
                     events_snapshot, target_component, target_owner, target_alloc, temp_allocations, state,
-                    expected_token=token, cost_count=cost_count),
+                    expected_token=token, cost_count=cost_count, cache_snapshot=cache_snapshot),
                 advance=None if final else advance,
                 cancel=lambda: self._cancel_transfer(page_id, target_component, target_owner,
                     target_alloc, target_generation, completed_phases, temp_allocations, state,
@@ -869,7 +934,7 @@ class PhysicalKVTransferExecutor:
     def _rollback_transfer(self, snapshot: Mapping[str, Any], bindings: Mapping[int, _PageBinding],
                            counters: Mapping[str, Any], events_len: int, target_component: str, target_owner: str,
                            target_alloc: PhysicalAllocation, temp_allocations: list[tuple[str, str, int]],
-                           state: dict[str, Any], *, expected_token=None, cost_count=0) -> None:
+                           state: dict[str, Any], *, expected_token=None, cost_count=0, cache_snapshot=None) -> None:
         callback_state = state
         state = self._transfer_state(state)
         if state["done"]:
@@ -878,6 +943,8 @@ class PhysicalKVTransferExecutor:
             raise KvPoolError("only a just-prepared physical transfer can be rolled back")
         self._check_phase_token(state, expected_token)
         self.runtime.restore(snapshot)
+        if cache_snapshot is not None:
+            self._restore_caches(cache_snapshot)
         self._bindings = copy.deepcopy(bindings)
         self.counters = copy.deepcopy(counters)
         del self.events[events_len:]
@@ -889,12 +956,14 @@ class PhysicalKVTransferExecutor:
 
     def snapshot(self) -> dict[str, Any]:
         return {"runtime": self.runtime.snapshot(), "bindings": copy.deepcopy(self._bindings),
+                "cache_states": self._snapshot_caches(),
                 "events": copy.deepcopy(self.events), "counters": copy.deepcopy(self.counters),
                 "cost_phases": tuple(self._cost_phases),
                 "async_plan_states": copy.deepcopy(self._async_plan_states)}
 
     def restore(self, snapshot: Mapping[str, Any]) -> None:
         self.runtime.restore(snapshot["runtime"])
+        self._restore_caches(snapshot.get("cache_states", {}))
         self._bindings = copy.deepcopy(snapshot["bindings"])
         self.events = copy.deepcopy(snapshot["events"])
         self.counters = copy.deepcopy(snapshot["counters"])

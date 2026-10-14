@@ -332,6 +332,11 @@ class GemmWorkload:
                 raise ValueError("MMVQ issue bound excludes mismatched runtime, fused epilogue and other partial costs")
         if sum(work is not None for work in (self.mmq_work, self.mmvq_work, self.mmvf_work)) > 1:
             raise ValueError("MMQ, MMVQ and MMVF source work are mutually exclusive")
+        if (self.mmq_work is not None or self.mmvq_work is not None) and (
+            self.epilogue_name or self.epilogue_operations
+            or self.epilogue_transcendental_operations or self.epilogue_output_elements
+        ):
+            raise ValueError("MMQ/MMVQ source work is unfused; epilogue requires a separate operator")
         if self.mmvf_work is not None:
             if not isinstance(self.mmvf_work, MMVFWork):
                 raise ValueError("mmvf_work must be an MMVFWork or None")

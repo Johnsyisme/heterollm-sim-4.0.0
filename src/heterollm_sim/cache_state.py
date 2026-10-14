@@ -190,6 +190,7 @@ class CacheFlushResult:
     buffer_id: Optional[str]
     flushed_lines: int
     writeback_bytes: int
+    backing_accesses: Tuple[CacheAccess, ...] = ()
 
     @property
     def backing_write_bytes(self) -> int:
@@ -683,7 +684,9 @@ class ExplicitCacheState:
         self._remember_buffer(key, None)
         self._buffer_sizes.pop(key, None)
 
-    def flush(self, buffer_id: Optional[str] = None) -> CacheFlushResult:
+    def flush(self, buffer_id: Optional[str] = None, *, allocation_generation: Optional[int] = None) -> CacheFlushResult:
+        if allocation_generation is not None and (type(allocation_generation) is not int or allocation_generation < 0):
+            raise CacheStateError("allocation_generation must be a non-negative integer or None")
         if buffer_id is not None and (
             not isinstance(buffer_id, str) or not buffer_id.strip()
         ):
@@ -691,13 +694,20 @@ class ExplicitCacheState:
         normalized = None if buffer_id is None else buffer_id.strip()
         flushed_lines = 0
         writeback_bytes = 0
+        backing_accesses = []
         for key, line in tuple(self._lines.items()):
             if normalized is not None and key[0] != normalized:
+                continue
+            if allocation_generation is not None and line.allocation_generation != allocation_generation:
                 continue
             if not line.dirty:
                 continue
             flushed_lines += 1
             writeback_bytes += line.size_bytes
+            backing_accesses.append(CacheAccess.write(line.buffer_id,
+                line.line_index * self.line_bytes, line.size_bytes,
+                buffer_size_bytes=self._buffer_sizes[(line.buffer_id, line.allocation_generation)],
+                allocation_generation=line.allocation_generation))
             self._set_line(key, CacheLine(
                 line.buffer_id,
                 line.line_index,
@@ -706,7 +716,7 @@ class ExplicitCacheState:
                 line.allocation_generation,
             ))
         self._flush_writeback_bytes += writeback_bytes
-        return CacheFlushResult(normalized, flushed_lines, writeback_bytes)
+        return CacheFlushResult(normalized, flushed_lines, writeback_bytes, tuple(backing_accesses))
 
     def resident_lines(self) -> Tuple[CacheLine, ...]:
         """Return lines in LRU-to-MRU order."""

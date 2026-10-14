@@ -888,6 +888,9 @@ class UnifiedEventKernel:
         # completes.  Weight generations (normally zero) intentionally remain
         # resident for the lifetime of this kernel.
         self._physical_allocation_uses: Dict[Tuple[str, str, int], int] = {}
+        # Page-pool allocations are borrowed by a cohort. The pool owns their
+        # migration generations and release, even when the generation is > 0.
+        self._external_physical_allocation_keys: Set[Tuple[str, str, int]] = set()
         self._physical_allocation_task_keys: Dict[
             str, Tuple[Tuple[str, str, int], ...]
         ] = {}
@@ -1033,6 +1036,19 @@ class UnifiedEventKernel:
         representation details.
         """
 
+        external_keys = set()
+        for task in tasks:
+            declared = task.metadata.get("physical_external_allocations", ())
+            if not isinstance(declared, (tuple, list)):
+                raise ValueError("physical_external_allocations must be a sequence of owner/buffer/generation keys")
+            for key in declared:
+                if (not isinstance(key, (tuple, list)) or len(key) != 3
+                        or any(not isinstance(value, str) or not value for value in key[:2])
+                        or type(key[2]) is not int or key[2] < 0):
+                    raise ValueError("physical_external_allocations requires owner, buffer id, and non-negative integer generation")
+                external_keys.add(tuple(key))
+        self._external_physical_allocation_keys.update(external_keys)
+
         for task in tasks:
             declared = task.metadata.get("persistent_request_buffers", {})
             if not declared:
@@ -1055,9 +1071,9 @@ class UnifiedEventKernel:
                     owner = row.get("physical_owner") or default_owner
                     if buffer_id in identities and owner:
                         generation = int(row.get("allocation_generation", row.get("generation", 0)))
-                        self._request_physical_buffers.setdefault(request, set()).add(
-                            (str(owner), str(buffer_id), generation)
-                        )
+                        key = (str(owner), str(buffer_id), generation)
+                        if key not in self._external_physical_allocation_keys:
+                            self._request_physical_buffers.setdefault(request, set()).add(key)
 
         alias_targets = {}
         for task in tasks:
@@ -1152,10 +1168,11 @@ class UnifiedEventKernel:
             # registered even when this cohort has no later use; the runtime
             # may consult resident weights through cache/L2 state after the
             # task that first touched them.
-            if key[2] > 0:
+            if key[2] > 0 and key not in self._external_physical_allocation_keys:
                 self._pending_physical_releases[key] = self._physical_allocation_last_end.pop(key)
             else:
                 self._physical_allocation_last_end.pop(key, None)
+            self._external_physical_allocation_keys.discard(key)
 
     def release_request_physical_allocations(self, request_id: str) -> None:
         """Release explicitly request-owned buffers after their last use.
@@ -1348,15 +1365,11 @@ class UnifiedEventKernel:
             effective_ready_ns = earliest_start_ns
         from .data_motion import is_physical_task, physical_task_demands
         demands = physical_task_demands(task) if is_physical_task(task) else task.demands
-        if is_physical_task(task):
-            # Host/link resources are owned by the physical core but are not
-            # known until submission. Include the explicit configured host ID
-            # in readiness so an ordinary reservation cannot overlap it.
-            config = task.metadata.get("physical_memory_config", {})
-            if isinstance(config, Mapping):
-                host_id = config.get("metadata", {}).get("host_resource_id")
-                if host_id:
-                    demands = tuple(demands) + (ResourceDemand(str(host_id), 0.0),)
+        # Core stages consult the same lane calendar as ordinary tasks. Do
+        # not gate the entire NAND request on its eventual host transfer:
+        # array work may overlap a busy wire, and the Core reserves that wire
+        # only when its payload is ready. This also keeps parsed configs and
+        # equivalent typed configs on the same execution path.
         if demands:
             demand_iterator = iter(demands)
             resources_ready_ns = self._resource_ready_ns(
@@ -1732,6 +1745,7 @@ class UnifiedEventKernel:
         # future dynamic consumer can use the same allocation generation,
         # so stop automatic reclamation instead of guessing its final use.
         self._physical_allocation_uses.clear()
+        self._external_physical_allocation_keys.clear()
         self._physical_allocation_task_keys.clear()
         self._physical_allocation_last_end.clear()
         self._pending_physical_releases.clear()
@@ -1895,6 +1909,7 @@ class UnifiedEventKernel:
         )
 
         self._physical_allocation_uses.clear()
+        self._external_physical_allocation_keys.clear()
         self._physical_allocation_task_keys.clear()
         self._physical_allocation_last_end.clear()
         self._pending_physical_releases.clear()
