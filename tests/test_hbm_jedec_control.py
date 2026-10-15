@@ -18,13 +18,15 @@ def config(**overrides):
         control_mode="jedec_hbm", command_clock_ns=1., activate_command_cycles=1.5,
         precharge_command_cycles=.5, column_command_cycles=1., activated_row_msb=2,
         activate_to_read_ns=4., activate_to_write_ns=3., precharge_to_activate_ns=3.,
-        minimum_active_ns=7., activate_cycle_ns=10., read_to_precharge_ns=3.,
+        minimum_active_ns=7., maximum_active_ns=35100., activate_cycle_ns=10., read_to_precharge_ns=3.,
         write_to_precharge_ns=4., read_latency_ns=8., write_latency_ns=4.,
         column_same_group_ns=4., column_different_group_ns=2.,
         column_different_sid_ns=3., precharge_to_precharge_ns=2.,
         open_ns=100., close_ns=100., burst_interval_ns=100.,
         write_recovery_ns=100.)
     values.update(overrides)
+    if "maximum_active_ns" not in overrides and values.get("refresh_interval_ns", 0.) > 0:
+        values["maximum_active_ns"] = 9 * values["refresh_interval_ns"]
     return DramConfig(**values)
 
 
@@ -53,6 +55,21 @@ def test_act_occupancy_and_second_edge_array_anchor_are_separate():
     assert result.counters["column_command_bus_busy_ns"] == 1.
     assert not any(key.startswith("dram:bank:") for key in result.counters["resource_busy_ns"])
     assert "refresh_commands" not in result.counters
+
+
+@pytest.mark.parametrize("ras,rp,rc", [(7., 3., 30.), (20., 10., 5.)])
+def test_same_bank_reactivation_enforces_independent_rc_and_ras_rp_constraints(ras, rp, rc):
+    c = config(minimum_active_ns=ras, precharge_to_activate_ns=rp, activate_cycle_ns=rc)
+    core = DramCore(c)
+    first = core.submit(request(c))
+    changed_row = core.submit(request(c, row=1))
+    first_anchor = stage(first, "ACTIVATE").start_ns + c.command_clock_ns
+    precharge = stage(changed_row, "PRECHARGE").start_ns
+    next_act = stage(changed_row, "ACTIVATE").start_ns
+    assert precharge >= first_anchor + ras
+    assert next_act >= precharge + rp
+    assert next_act + c.command_clock_ns >= first_anchor + rc
+    assert next_act + c.command_clock_ns - first_anchor >= max(rc, ras + rp)
 
 
 def test_pseudo_channels_share_ca_but_group_timings_are_independent():
@@ -314,9 +331,8 @@ def test_maximum_active_delays_new_activate_until_a_paced_dq_slot_is_near():
 
 
 def test_maximum_active_reports_an_unreachable_recovery_or_precharge_deadline():
-    c = config(maximum_active_ns=8.)
-    with pytest.raises(ValueError, match="access recovery exceeds the tRASmax"):
-        DramCore(c).submit(request(c, "write"))
+    with pytest.raises(ValueError, match="WRITE recovery cannot fit before tRASmax"):
+        config(maximum_active_ns=8.)
     c = config(maximum_active_ns=20.)
     core = DramCore(c)
     core.submit(request(c))

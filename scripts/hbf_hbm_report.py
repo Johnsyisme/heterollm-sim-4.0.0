@@ -95,10 +95,10 @@ def extension_tables(group):
     n=int(group['id'][:2]); rows=group.get('rows',[]); parts=[]
     if n==20:
         variants = bank_group_variants(group)
-        parts.append('<p id="bank-group">下列是小型合成Dense模型的完整服务，先执行真实prefill，再测Decode。基准分组、分组控制和非零组时序对照的标签均取自结果中实际执行的HBM配置；不按当前目录重新解析profile名称。总bank数及其余条件是否相同，见本组检查与逐点配置。</p>')
-        parts.append('<p>每点一个请求、'+str(group['output_tokens'])+'个输出token；首token来自prefill，Decode TPS只统计之后'+str(group['output_tokens']-1)+'个token。标准CCD约束与合成敏感性时序按保存的来源区分；零值表示关闭该项约束，不表示器件真实延迟为零。具体执行值如下。</p>')
+        parts.append('<p id="bank-group">下列是小型合成Dense模型的完整服务，先执行真实prefill，再测Decode。平坦分组、标准分组和合成时序对照的标签均取自结果中实际执行的HBM配置；不按当前目录重新解析profile名称。总bank数及其余条件是否相同，见本组检查与逐点配置。</p>')
+        parts.append('<p>每点一个请求、'+str(group['output_tokens'])+'个输出token；首token来自prefill，Decode TPS只统计之后'+str(group['output_tokens']-1)+'个token。标准CCD约束与合成敏感性时序按保存的来源区分；已知硬下限不得关闭，未知额外门控的零值仅表示未模拟，不表示器件真实延迟为零。具体执行值如下。</p>')
         parts.append(table(('配置ID','实际分组与时序'),[(v['profile'],v['label_zh']) for v in variants]))
-        parts.append(table(('上下文','KV放置','基准分组Decode TPS','分组控制Decode TPS','非零组时序Decode TPS','非零/控制'),[
+        parts.append(table(('上下文','KV放置','平坦分组Decode TPS','标准分组Decode TPS','合成时序Decode TPS','合成/标准'),[
             (r['prompt_tokens'],r['placement'],number(r['baseline_decode_tps'],2),number(r['geometry_control_decode_tps'],2),
              number(r['bank_group_decode_tps'],2),number(r['timing_over_control_tps'],5)) for r in group.get('comparisons',[])]))
         records=[(v['profile'],r['owner'],r['config']) for v in variants for r in v['records']]
@@ -114,8 +114,9 @@ def extension_tables(group):
              number(config.get('four_activate_window_ns')),
              '/'.join(number(config.get(k)) for k in _BANK_GROUP_TIMING_FIELDS[5:7]))
             for profile,owner,config in records]))
-        parts.append(table(('配置','owner','控制逻辑范围','时序验证','未知参数'),[
+        parts.append(table(('配置','owner','控制逻辑范围','已知时序约束检查','厂商速度档验证','未知参数'),[
             (profile,owner,config.get('metadata',{}).get('control_status'),
+             config.get('metadata',{}).get('timing_constraint_validation'),
              config.get('metadata',{}).get('timing_validation'),
              '、'.join(config['metadata']['unknown_parameters'])
              if isinstance(config.get('metadata',{}).get('unknown_parameters'),list) else None)
@@ -198,7 +199,7 @@ def render_report(report):
         '<p>GPU侧继续使用聚合简化模型估算计算和启动时间。上层算子与KV管理器生成实际读写请求；'
         'HBM统一交给DRAM Core处理地址、行/Bank、命令和数据通道、排队与完成时间；HBF交给NAND Core处理页读取与编程。'
         'KV迁移按源内存读取、链路传输、目标内存写入的依赖顺序执行。调度器组合这些依赖与重叠，不再额外叠加HBM聚合带宽耗时。</p>')
-    parts.append('<p>标准参考几何不等于完整JEDEC协议仿真：当前仍未建模刷新、SID专用时序、同一物理通道两个伪通道的命令共享，以及两个1KiB有效寻址页共享一次2KiB激活的命中行为。具体器件型号、速度档和阵列时序仍是未知项或明确的分析假设，实际取值和来源保存在每点Core配置中。</p>')
+    parts.append('<p>标准参考几何不等于完整JEDEC协议仿真。jedec_hbm 路径执行共享行/列命令接口、PC/SID与激活页状态，以及已配置的刷新约束；已知时序硬下限对手动实验值同样生效。初始化、训练、低功耗及完整PHY行为仍不在普通读写子集内。具体执行范围、刷新是否启用、约束检查状态和未知参数以每点保存的Core配置为准，不能据此推断已验证某个厂商速度档。</p>')
     if core.get('all_full_serving_hbm_verified'):
         parts.append('<p><strong>本报告 '+str(core['verified_hbm_dram_core_rows'])+' / '+str(core['full_serving_rows'])+
             ' 个完整服务点均记录到实际HBM DRAM Core执行。</strong>证据来自持久在线服务运行时的实际提交，排除规划预演、隔离重放与服务启动前初始化。'

@@ -195,9 +195,11 @@ _HBM_MICRO_REFERENCE_DEFAULTS = {
 # references, not evidence of a particular GPU's undisclosed memory parts.
 _HBM_REFERENCE_PROFILES = {
     "hbm3e_reference": "standard",
+    "hbm3e_reference_flat": "flat",
     "hbm3e_reference_flat_zero": "flat",
     "hbm3e_reference_synthetic_timing": "timed",
     "hbm4_reference": "standard",
+    "hbm4_reference_flat": "flat",
     "hbm4_reference_flat_zero": "flat",
     "hbm4_reference_synthetic_timing": "timed",
     "published_hbm": "timed",

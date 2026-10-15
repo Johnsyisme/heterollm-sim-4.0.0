@@ -354,7 +354,7 @@ def make_hbm_geometry_config(
                                 cycles=(read_latency_ns if name == "read_latency_ns" else write_latency_ns) / clock_ns)
     record(("column_same_group_ns", "column_different_group_ns", "precharge_to_precharge_ns"),
            "standard_minimum", organization_source,
-           "AC table: tCCDS=2CK; tCCDL=max(4CK,2.8ns) for HBM2 or max(4CK,2.5ns) for HBM3/4; tPPD=2CK")
+           "AC table: tCCDS=2CK; tCCDL=max(4CK,2.8ns) for HBM2 or max(4CK,2.5ns) for HBM3/4; HBM2 Table33 PRE spacing=1CK, HBM3/4 tPPD=2CK")
     record(("column_different_sid_ns",), "selected_reference", organization_source,
            "4CK selected from vendor-specific tCCDR range; applies only to READs across SID, not a measured part timing")
     record(("minimum_active_ns", "precharge_to_activate_ns", "activate_cycle_ns", "close_ns"),

@@ -3724,6 +3724,7 @@ function normalizeIssue(issue, source, severity) {
     severity,
     source,
     code: value.code || source,
+    ...(Object.keys(details).length ? { details } : {}),
     message_zh: value.message_zh || value.detail_zh || value.reason_zh || "",
     message_en: value.message_en || value.detail_en || value.reason_en || "",
     message: value.message || value.detail || value.reason || "",
@@ -4798,6 +4799,7 @@ function operationErrorIssues(error, fallbackMessage) {
   const rawIsChinese = hasChineseText(rawMessage);
   return [normalizeIssue({
     code: error?.code || "request_error",
+    details,
     message_zh: error?.message_zh || (rawIsChinese ? rawMessage : "")
       || (hasChineseText(fallbackMessage) ? fallbackMessage : ""),
     message_en: error?.message_en || (!rawIsChinese && rawMessage ? rawMessage : "")
@@ -5144,7 +5146,7 @@ function validatePhysicalMemoryConfig(value, component) {
     if (Object.hasOwn(value, field) && (
       typeof value[field] !== "number" || !Number.isFinite(value[field]) || value[field] < 0
     )) {
-      throw new Error(`physical_memory_config.${field} 必须是非负有限数；0 表示关闭该约束。`);
+      throw new Error(`physical_memory_config.${field} 必须是非负有限数，并满足当前配置的协议下限。`);
     }
   });
   if (nand && typeof value.planes_independent !== "boolean") {
@@ -5220,7 +5222,7 @@ function dramBankGroupTimingMarkup(config) {
       <p class="muted">${uiText("作用域是同一 stack / die / lane / rank。同方向列命令只约束 READ→READ 和 WRITE→WRITE 的命令起点；ACT 是打开行的命令，窗口内最多允许四次 ACT。写转读约束从最后写数据结束算到读命令起点，与数据总线的方向切换时间分别生效。", "Scope is one stack / die / lane / rank. Column intervals constrain READ→READ and WRITE→WRITE command starts. ACT opens a row; its window allows at most four ACTs. Write-to-read intervals run from the last write-data end to the read-command start, separately from data-bus turnaround.")}</p>
       <div class="field-grid-2">${DRAM_BANK_GROUP_TIMING_FIELDS.map(([field, zh, en]) => `<label class="field"><span>${escapeHtml(uiText(zh, en))}（ns）</span><input type="number" min="0" step="any" data-inspector-bank-group-timing="${field}" aria-label="${field}" value="${escapeHtml(config[field] ?? 0)}"></label>`).join("")}</div>
       <p class="muted">${config.control_mode === "jedec_hbm"
-        ? uiText("标准可确定的间隔会随几何与接口频率更新。在此手动填写的数值会标记为实验假设；0 表示停用该项约束，不代表器件允许零间隔。未知器件时序仍须由厂商资料确定。", "Known standard intervals follow geometry and interface frequency. Values entered here are experimental assumptions; zero disables a constraint, not a device guarantee. Unknown device timings still require manufacturer data.")
+        ? uiText("标准可确定的间隔会随几何与接口频率更新。手动值也必须满足已知 JEDEC 下限和耦合约束，否则无法保存。未查明的器件时序仍标为未知；只有这些未知项的 0 表示暂未建模，不代表器件允许零间隔。", "Known standard intervals follow geometry and interface frequency. Manual values must also satisfy known JEDEC minima and coupled constraints or saving fails. Undetermined device timings remain unknown; zero only means an unknown constraint is not modeled, never a zero-delay device guarantee.")
         : uiText("每项 0 表示关闭该项约束，旧配置省略时仍为 0。这里不填入任何厂商默认时序；数值需由用户提供。启用这些约束仍不代表完整 JEDEC 模型，刷新等机制未包括在内。", "Zero disables each constraint; omitted legacy fields remain zero. No vendor timing defaults are supplied; provide values explicitly. These constraints do not make the model a complete JEDEC implementation; refresh and other mechanisms remain outside its scope.")}</p>
     </div>
   </details>`;
@@ -9345,7 +9347,7 @@ function renderComponentInspector(componentId) {
       parsed = validatePhysicalMemoryConfig(JSON.parse(raw), component);
       parsed = await normalizePhysicalMemoryEdit(component.metadata.physical_memory_config, parsed, component);
     } catch (error) {
-      toast("物理配置无效", chineseMessage(error), "error", 7000);
+      showOperationError("物理配置无效", error);
       renderComponentInspector(component.component_id);
       return;
     }
@@ -9359,7 +9361,7 @@ function renderComponentInspector(componentId) {
     const field = control.dataset.inspectorBankGroupTiming;
     const value = Number(control.value);
     if (!control.value.trim() || !Number.isFinite(value) || value < 0) {
-      toast("Bank group 时序无效", "时序必须是非负有限数；输入 0 可关闭该项约束。", "error", 6000);
+      toast("Bank group 时序无效", "时序必须是非负有限数，并满足当前配置的协议下限。", "error", 6000);
       renderComponentInspector(component.component_id);
       return;
     }
@@ -9369,7 +9371,7 @@ function renderComponentInspector(componentId) {
       parsed = validatePhysicalMemoryConfig({ ...current, [field]: value }, component);
       parsed = await normalizePhysicalMemoryEdit(current, parsed, component);
     } catch (error) {
-      toast("物理配置无效", chineseMessage(error), "error", 7000);
+      showOperationError("物理配置无效", error);
       renderComponentInspector(component.component_id);
       return;
     }

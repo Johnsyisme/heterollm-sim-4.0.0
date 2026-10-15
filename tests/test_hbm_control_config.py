@@ -30,7 +30,7 @@ def test_generational_command_clock_latency_and_refresh(generation, density, rf,
     assert config.write_latency_ns == 8 * ck
     assert config.burst_bytes / (config.physical_interface_bandwidth_gb_s / config.lane_count) == 2 * ck
     assert config.column_different_group_ns == 2 * ck
-    assert config.precharge_to_precharge_ns == 2 * ck
+    assert config.precharge_to_precharge_ns == (1 if generation in {"HBM2", "HBM2E"} else 2) * ck
     assert config.maximum_active_ns == 35100
     assert config.refresh_policy == "all_bank"
     assert (config.refresh_interval_ns, config.refresh_cycle_ns) == (3900, rf)
@@ -73,24 +73,25 @@ def test_missing_control_contract_does_not_silently_use_legacy_or_default_fields
         parse_execution_physical_config(payload)
 
 
-def test_zero_experimental_refresh_duration_disables_automatic_refresh():
-    config = reconfigure_physical_config(reference(), overrides={"refresh_cycle_ns": 0.})
-    assert config.refresh_cycle_ns == 0.
-    assert config.refresh_policy == "disabled"
-    assert config.maximum_active_ns == 35100.
-    assert config.metadata["parameter_provenance"]["refresh_cycle_ns"]["status"] == "explicit_assumption"
+def test_known_refresh_minimum_cannot_be_disabled_by_an_experimental_zero():
+    for updates in ({"refresh_cycle_ns": 0.},
+                    {"refresh_cycle_ns": 0., "refresh_policy": "disabled"}):
+        with pytest.raises(ValueError, match="refresh_cycle_ns"):
+            reconfigure_physical_config(reference(), overrides=updates)
 
 
-def test_raw_derived_fields_follow_their_recorded_primary_inputs():
+def test_raw_unchanged_derived_fields_follow_inputs_and_edited_timings_remain_explicit():
     config = reference()
-    # Serialized fields with derived provenance are recomputed. Authored
-    # experiments must use reconfigure or an explicit-assumption provenance.
-    rebuilt = replace(config, command_clock_ns=.9, activate_command_cycles=2,
-                      read_latency_ns=4.5, write_latency_ns=17,
-                      activated_row_msb=0, refresh_cycle_ns=0)
-    for field in ("command_clock_ns", "activate_command_cycles", "read_latency_ns",
-                  "write_latency_ns", "activated_row_msb", "refresh_cycle_ns"):
-        assert getattr(rebuilt, field) == getattr(config, field), field
+    # Unchanged serialized derived values follow the changed primary clock.
+    rebuilt = replace(config, interface_bandwidth_gb_s=256.,
+                      read_bandwidth_gb_s=256., write_bandwidth_gb_s=256.)
+    assert (rebuilt.command_clock_ns, rebuilt.read_latency_ns, rebuilt.write_latency_ns) == (2., 64., 16.)
+    assert rebuilt.refresh_cycle_ns == config.refresh_cycle_ns
+    # Manual edits remain authored values even with old derived source tags.
+    edited = replace(config, read_latency_ns=40., write_latency_ns=10., refresh_cycle_ns=500.)
+    for field, value in (("read_latency_ns", 40.), ("write_latency_ns", 10.), ("refresh_cycle_ns", 500.)):
+        assert getattr(edited, field) == value
+        assert edited.metadata["parameter_provenance"][field]["status"] == "explicit_assumption"
 
 
 def test_overrides_record_assumptions_and_keep_command_anchored_fields_effective():

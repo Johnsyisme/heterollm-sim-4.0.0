@@ -470,12 +470,14 @@ def hbm_protocol_summary(config) -> dict[str, Any]:
     return {
         **{key: values.get(key) for key in (
             "generation", "control_mode", "command_clock_ns", "maximum_active_ns",
+            "column_same_group_ns", "column_different_group_ns", "precharge_to_precharge_ns",
+            "minimum_active_ns", "precharge_to_activate_ns", "activate_cycle_ns",
             "read_latency_ns", "write_latency_ns", "refresh_policy",
             "refresh_interval_ns", "refresh_cycle_ns", "bandwidth_input_mode",
             "interface_bandwidth_gb_s", "data_rate_mt_s", "effective_pin_data_rate_gbps",
             "read_bandwidth_gb_s", "write_bandwidth_gb_s")},
         **{key: metadata.get(key) for key in (
-            "geometry_status", "control_status", "timing_validation", "timing_basis",
+            "geometry_status", "control_status", "timing_validation", "timing_constraint_validation", "timing_basis",
             "unknown_parameters", "unconfigured_timing_parameters", "control_limitations", "accounting_basis",
             "interface_input_scope", "operating_point_basis", "directional_cap_basis")},
     }

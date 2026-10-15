@@ -19,7 +19,7 @@ from hbf_hbm_serving_study import run_case
 from heterollm_sim.memory_types import DRAM_BANK_GROUP_TIMING_FIELDS
 
 PROFILES = (
-    "hbm3e_reference_flat_zero",
+    "hbm3e_reference_flat",
     "hbm3e_reference",
     "hbm3e_reference_synthetic_timing",
 )
@@ -93,13 +93,14 @@ def summarize(rows, *, contexts=CONTEXTS, output=8):
             for config in r["executed_hbm_parameters"].values()) for r in rows),
     }
     return group("20_bank_group_decode", "统一参数入口下的 Bank group Decode 对照", rows, checks,
-        ["同一小Dense完整服务、真实prefill后Decode；平坦分组消融、HBM3E参考组织及合成非零时序对照"],
+        ["同一小Dense完整服务、真实prefill后Decode；平坦分组消融、HBM3E参考组织及合法合成时序对照"],
         ["小Dense为1层256 hidden/512 FFN的合成模型，不是8B/70B性能预测。",
          "标准CCD约束和显式合成组时序均来自统一目录，具体来源分开记录，未校准厂商器件。",
          "只改变分组和显式时序；总bank数量、容量、带宽、GPU、模型及工作量保持一致。",
          "启用组时序时使用精确逐burst路径，大模型的相同矩阵本轮未执行。",
          "参考组织按JEDEC可选密度/层数选择以覆盖用户容量；未核实为目标厂商器件，未知项见metadata。",
-         "平坦分组是有意设置的合成消融，不是JEDEC器件组织；历史profile后缀不代表实际时序，零值只表示该项约束关闭。"],
+         "平坦分组是有意设置的合成消融，不是JEDEC器件组织；所有分支均执行已知时序硬下限。",
+         "未知阵列门控的零值只表示未模拟，不表示JEDEC允许零延迟；实际字段及未知项随结果保存。"],
         comparisons=comparisons, contexts=list(contexts), output_tokens=output,
         hardware_profiles=list(PROFILES),
         parameter_entrypoint="physical_presets.resolve_physical_config -> physical_contract -> scenario -> DramCore/NandCore")

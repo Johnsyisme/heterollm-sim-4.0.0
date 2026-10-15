@@ -18,7 +18,7 @@ def configuration(**changes):
         control_mode="jedec_hbm", command_clock_ns=1., activate_command_cycles=1.5,
         precharge_command_cycles=.5, column_command_cycles=1., activated_row_msb=4,
         activate_to_read_ns=4., activate_to_write_ns=3., precharge_to_activate_ns=3.,
-        minimum_active_ns=7., activate_cycle_ns=10., read_to_precharge_ns=3.,
+        minimum_active_ns=7., maximum_active_ns=35100., activate_cycle_ns=10., read_to_precharge_ns=3.,
         write_to_precharge_ns=4., read_latency_ns=8., write_latency_ns=4.,
         column_same_group_ns=4., column_different_group_ns=2.,
         column_different_sid_ns=3., precharge_to_precharge_ns=2.,
@@ -26,6 +26,8 @@ def configuration(**changes):
         write_to_read_same_group_ns=3., write_to_read_different_group_ns=2.,
         read_to_write_command_ns=7., write_to_read_ns=1., read_to_write_ns=2.)
     values.update(changes)
+    if "maximum_active_ns" not in changes and values.get("refresh_interval_ns", 0.) > 0:
+        values["maximum_active_ns"] = 9 * values["refresh_interval_ns"]
     return DramConfig(**values)
 
 
@@ -153,13 +155,9 @@ def test_maximum_active_delays_activation_until_reserved_dq_slot():
     assert_same(reference, numeric, AccessRequest("late-dq", "read", 0, 32))
 
 
-def test_numeric_rejects_an_impossible_maximum_active_window():
-    c = configuration(minimum_active_ns=1., maximum_active_ns=5.)
-    request = AccessRequest("too-short", "read", 0, 32)
-    for numeric in (False, True):
-        core = DramCore(c, capture_details=False)
-        with pytest.raises(ValueError, match="tRASmax activation window"):
-            execute_hbm_numeric(core, request) if numeric else _Controller(core, request).execute()
+def test_impossible_maximum_active_window_is_rejected_before_either_backend_runs():
+    with pytest.raises(ValueError, match="READ recovery cannot fit before tRASmax"):
+        configuration(minimum_active_ns=1., maximum_active_ns=5.)
 
 
 def test_refresh_cannot_precharge_an_open_row_after_its_deadline():

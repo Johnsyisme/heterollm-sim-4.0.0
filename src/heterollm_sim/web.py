@@ -16,6 +16,7 @@ import sys
 import webbrowser
 
 from . import __version__
+from ._hbm_errors import HBMConfigError
 from .architecture_presets import (
     architecture_preset_detail,
     architecture_preset_page,
@@ -111,6 +112,14 @@ class HttpError(Exception):
     message_en: Optional[str] = None
     diagnostic_id: Optional[str] = None
     exception_type: Optional[str] = None
+
+
+def _hbm_config_http_error(exc: HBMConfigError) -> HttpError:
+    """Keep the API error code stable and retain actionable HBM diagnostics."""
+    return HttpError(
+        422, "invalid_physical_memory_config", exc.message_zh,
+        details=exc.details, message_en=exc.message_en,
+    )
 
 
 def _component_catalog_unavailable_error() -> HttpError:
@@ -843,6 +852,8 @@ class HeteroLLMRequestHandler(BaseHTTPRequestHandler):
                     message_en=str(exc),
                 )
             )
+        except HBMConfigError as exc:
+            self._send_error(_hbm_config_http_error(exc))
         except (OSError, ValueError, TypeError, KeyError) as exc:
             self._send_error(
                 HttpError(
@@ -874,6 +885,8 @@ class HeteroLLMRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HttpError(exc.status, exc.code, str(exc), message_en=str(exc)))
         except KeyError:
             self._send_error(HttpError(404, "not_found", "未找到指定的组件预设", message_en="unknown component preset"))
+        except HBMConfigError as exc:
+            self._send_error(_hbm_config_http_error(exc))
         except (OSError, ValueError, TypeError) as exc:
             self._send_error(HttpError(400, "invalid_component_preset", str(exc), message_en=str(exc)))
         except Exception as exc:
@@ -1139,6 +1152,7 @@ def validation_payload(
                         code,
                         message_zh,
                         message_en,
+                        diagnostic=exc.details if isinstance(exc, HBMConfigError) else None,
                     )
                 ],
             },
@@ -1152,6 +1166,8 @@ def _scenario_failure_diagnostic(exc: BaseException) -> Tuple[str, str, str]:
     """Separate an expected allocation rejection from invalid JSON inputs."""
     from .llama_memory import LlamaDeviceMemoryCapacityError
 
+    if isinstance(exc, HBMConfigError):
+        return "invalid_physical_memory_config", exc.message_zh, exc.message_en
     if isinstance(exc, LlamaDeviceMemoryCapacityError):
         owner = "设备 {} 的显存".format(exc.device) if exc.device else "主机内存"
         message_zh = (
@@ -1402,6 +1418,8 @@ def physical_memory_config_payload(payload: Mapping[str, Any]) -> Dict[str, Any]
         parsed = (reconfigure_physical_config(config, overrides=payload["overrides"])
                   if "overrides" in payload else parse_execution_physical_config(config))
         return to_primitive(parsed)
+    except HBMConfigError as exc:
+        raise _hbm_config_http_error(exc) from exc
     except (ValueError, TypeError, KeyError) as exc:
         raise HttpError(422, "invalid_physical_memory_config", "物理内存配置无效：" + str(exc),
                         message_en=str(exc)) from exc
@@ -1415,6 +1433,8 @@ def scenario_or_http_error(
         return prepare_llama_scenario(
             scenario_from_dict(payload, model_artifact_dir=model_artifact_dir)
         )
+    except HBMConfigError as exc:
+        raise _hbm_config_http_error(exc) from exc
     except (ValueError, TypeError, KeyError) as exc:
         details = validation_payload(payload, model_artifact_dir=model_artifact_dir)
         code, message_zh, message_en = _scenario_failure_diagnostic(exc)

@@ -12,6 +12,7 @@ import hbf_hbm_budget as budget
 import hbf_hbm_media_experiments as media
 import hbf_hbm_sessions as sessions
 from heterollm_sim.memory_types import AccessRequest, make_hbf_config, make_hbm_config
+from heterollm_sim.physical_presets import resolve_physical_config
 
 
 def physical_fields(config):
@@ -85,3 +86,33 @@ def test_program_scan_changes_executed_nand_time_after_catalog_resolution():
         assert row.physical_write_bytes == 16384
         outcomes.append(row.completion_ns)
     assert outcomes[1] - outcomes[0] == 75000.
+
+
+@pytest.mark.parametrize("profile_id", ["research_hbm_package", "hbm3e_reference_flat",
+                                        "hbm3e_reference_synthetic_timing"])
+@pytest.mark.parametrize("field,invalid_value", [
+    ("column_same_group_ns", 3.0),
+    ("column_different_group_ns", 1.0),
+    ("precharge_to_precharge_ns", 1.0),
+    ("maximum_active_ns", 0.0),
+    ("maximum_active_ns", 40000.0),
+])
+def test_research_preset_cannot_override_known_jedec_timing_limits(profile_id, field, invalid_value):
+    inputs = {"capacity_bytes": 1024**2, "stacks": 1, "command_clock_ns": 1.0}
+    baseline = resolve_physical_config(profile_id, overrides=inputs)
+    assert baseline.command_clock_ns == 1.0
+    with pytest.raises(ValueError):
+        resolve_physical_config(profile_id, overrides={**inputs, field: invalid_value})
+
+
+def test_research_timing_sensitivity_accepts_slower_legal_values_and_retains_unknowns():
+    config = resolve_physical_config("hbm3e_reference_synthetic_timing", overrides={
+        "capacity_bytes": 1024**2, "stacks": 1, "command_clock_ns": 1.0,
+        "column_same_group_ns": 8.0, "column_different_group_ns": 4.0,
+        "precharge_to_precharge_ns": 4.0, "activate_cycle_ns": 60.0})
+    assert (config.column_same_group_ns, config.column_different_group_ns,
+            config.precharge_to_precharge_ns) == (8.0, 4.0, 4.0)
+    assert config.activate_cycle_ns == 60.0
+    assert "activate_to_read_ns" in config.metadata["unknown_parameters"]
+    assert config.metadata["timing_validation"] == "not_a_vendor_speed_bin"
+    assert config.metadata["timing_constraint_validation"] == "known_jedec_constraints_checked"

@@ -19,9 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-# Version 7 synchronizes HBM organization, interface clock and dependent timing
-# through the shared configuration contract; old derived values must not resume.
-POINT_RESULT_VERSION = 7
+# Version 8 requires JEDEC timing limits for every HBM input, including fixed
+# experiment values. Earlier results cannot establish this execution contract.
+POINT_RESULT_VERSION = 8
 
 from heterollm_sim.config import model_from_dict
 from heterollm_sim.control_plane_planner import _derive_requirements

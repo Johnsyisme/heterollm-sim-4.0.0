@@ -139,12 +139,16 @@ def test_explicit_experimental_refresh_survives_reconfiguration_as_an_assumption
         assert status(changed, "refresh_cycle_ns") == "explicit_assumption"
 
 
-def test_serialized_derived_values_recompute_but_explicit_assumptions_remain():
+def test_unchanged_derived_values_recompute_but_manually_changed_values_remain():
     old = reference()
     payload = asdict(old)
-    payload.update(dies_per_stack=16, refresh_cycle_ns=888.)
+    payload.update(dies_per_stack=16)
     derived = parse_execution_physical_config(payload)
-    assert derived.refresh_cycle_ns == 490.  # old standard provenance is not an override
+    assert derived.refresh_cycle_ns == 490.  # the unchanged prior table value follows height
+    payload["refresh_cycle_ns"] = 888.
+    edited = parse_execution_physical_config(payload)
+    assert edited.refresh_cycle_ns == 888.  # a manual value cannot hide behind its old source label
+    assert status(edited, "refresh_cycle_ns") == "explicit_assumption"
     payload["metadata"]["parameter_provenance"]["refresh_cycle_ns"] = {
         "status": "explicit_assumption", "source": "test_experiment", "basis": "authored timing input"}
     authored = parse_execution_physical_config(payload)
@@ -275,5 +279,8 @@ def test_synthetic_column_floor_survives_clock_changes_until_explicitly_replaced
     assert provenance["status"] == "explicit_assumption"
     assert "rule" not in provenance
     assert "analytical_floor_ns" not in provenance
-    assert change_clock(fixed, 2.).column_same_group_ns == 7.
+    with pytest.raises(ValueError, match="column_same_group_ns"):
+        change_clock(fixed, 2.)  # 7 ns falls below the new 4 CK = 8 ns minimum.
     assert change_clock(fixed, .5).column_same_group_ns == 7.
+    conservative = reconfigure_physical_config(fixed, overrides={"column_same_group_ns": 9.})
+    assert change_clock(conservative, 2.).column_same_group_ns == 9.

@@ -9,6 +9,7 @@ from dataclasses import asdict, fields, is_dataclass, replace
 from math import gcd
 from typing import Mapping
 from ._hbm_dependencies import normalize_hbm_dependencies
+from ._hbm_errors import HBMConfigError
 
 from .memory_types import (
     DRAM_BANK_GROUP_TIMING_FIELDS, HBM_CONTROL_TIMING_FIELDS,
@@ -112,6 +113,9 @@ def parse_required_physical_config(component_id, kind, raw):
         raise ValueError(prefix + "physical_memory_config missing explicit fields: " + ", ".join(missing))
     try:
         parsed = parse_physical_memory_config(raw)
+    except HBMConfigError as exc:
+        exc.add_context("component {} ({})".format(component_id, kind))
+        raise
     except (TypeError, ValueError) as exc:
         raise ValueError(prefix + "invalid physical_memory_config: " + str(exc)) from exc
     allowed = (

@@ -30,8 +30,11 @@ def test_real_prefill_decode_and_actual_core_configuration_are_verified(rows):
             assert (config["channels"], config["pseudo_channels_per_channel"], config["row_bytes"], config["burst_bytes"]) == (16, 2, 1024, 32)
             assert config["metadata"]["unknown_parameters"]
             assert config["control_mode"] == "jedec_hbm"
-            assert config["column_same_group_ns"] >= 4. * config["command_clock_ns"]
+            assert config["column_same_group_ns"] >= max(4. * config["command_clock_ns"], 2.5)
+            assert config["column_different_group_ns"] >= 2. * config["command_clock_ns"]
+            assert config["precharge_to_precharge_ns"] >= 2. * config["command_clock_ns"]
             assert config["metadata"]["timing_validation"] == "not_a_vendor_speed_bin"
+            assert config["metadata"]["timing_constraint_validation"] == "known_jedec_constraints_checked"
         hbm = [r for r in row["core_execution_audit"]["owners"] if r["memory_kind"] == "HBM"]
         for owner in hbm:
             assert owner["jedec_control_transactions"] == owner["transactions"] > 0

@@ -157,7 +157,7 @@ def test_completion_matrix_requires_executed_group_twenty_rows():
     row = next(r for r in experiments.completion_matrix([
         {"id": "20_bank_group_decode", "status": "passed"}]) if r["groups"] == [20])
     assert row["status"] == "本次未完成"
-    assert study.POINT_RESULT_VERSION == 7
+    assert study.POINT_RESULT_VERSION == 8
 
 
 def test_script_directional_budgets_do_not_change_an_explicit_physical_interface():
@@ -181,7 +181,7 @@ def test_script_directional_budgets_do_not_change_an_explicit_physical_interface
     assert inferred.metadata["interface_input_scope"] == "assumed_peak_equals_max_directional_budget"
 
 
-@pytest.mark.parametrize("version", [None, 6])
+@pytest.mark.parametrize("version", [None, 7])
 def test_group_reuse_rejects_old_or_unknown_execution_versions_before_running(tmp_path, monkeypatch, capsys, version):
     cached = {"id": "01_ideal", "status": "passed", "rows": []}
     if version is not None:
@@ -197,7 +197,7 @@ def test_group_reuse_rejects_old_or_unknown_execution_versions_before_running(tm
     assert not (tmp_path / "results.json").exists()
 
 
-@pytest.mark.parametrize("version", [None, 6])
+@pytest.mark.parametrize("version", [None, 7])
 def test_sustained_reuse_rejects_old_or_unknown_execution_versions_before_running(monkeypatch, version):
     import hbf_hbm_sustained_study as sustained
     cached = {"id": "old-observation"}

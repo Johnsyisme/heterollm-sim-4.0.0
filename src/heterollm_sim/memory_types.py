@@ -11,6 +11,20 @@ from enum import Enum
 import math
 from typing import Any, Mapping, Optional, Tuple
 
+from ._hbm_errors import HBMConfigError
+
+
+def _hbm_config_error(config, field, *, category, rule, requirement_en,
+                      requirement_zh, remedy_zh, remedy_en, label=None,
+                      unit=None, related_values=None, source=None):
+    return HBMConfigError(
+        field=field, value=getattr(config, field), generation=config.generation,
+        clock_ns=config.command_clock_ns, category=category, rule=rule,
+        requirement_en=requirement_en, requirement_zh=requirement_zh,
+        remedy_zh=remedy_zh, remedy_en=remedy_en, label=label, unit=unit,
+        related_values=related_values, source=source,
+    )
+
 
 def _positive_int(name: str, value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -263,8 +277,6 @@ class DramConfig:
             # declarations distinguish derived values from explicit experiments.
             from ._hbm_dependencies import normalize_hbm_dependencies
 
-            if not isinstance(self.metadata, Mapping):
-                raise ValueError("metadata must be a mapping")
             normalized = normalize_hbm_dependencies(vars(self))
             for name, value in normalized.items():
                 object.__setattr__(self, name, value)
@@ -283,6 +295,14 @@ class DramConfig:
             if (isinstance(self.activated_row_msb, bool)
                     or not isinstance(self.activated_row_msb, int)
                     or self.activated_row_msb < 0):
+                if kind is MemoryKind.HBM and self.control_mode == "jedec_hbm":
+                    raise _hbm_config_error(self, "activated_row_msb", category="invalid_input",
+                        rule="invalid_row_address_msb", label="有效行地址最高位",
+                        requirement_en="activated_row_msb must be a non-negative integer or None",
+                        requirement_zh="行地址最高位必须是非负整数，或在不使用该字段时填 null。",
+                        remedy_zh="使用所选代际和 rows_per_bank 对应的有效行地址最高位；建议通过公共配置入口重新生成。",
+                        remedy_en="Use the effective row-address MSB for this generation and rows_per_bank, or regenerate through the public config entry point.",
+                        related_values={"rows_per_bank": self.rows_per_bank})
                 raise ValueError("activated_row_msb must be a non-negative integer or None")
         if self.control_mode == "jedec_hbm":
             _positive_int("rows_per_bank", self.rows_per_bank)
@@ -305,9 +325,35 @@ class DramConfig:
                     or self.burst_bytes != 32 or self.data_width_bits != (64 if hbm2 else 32)
                     or self.row_bytes != 1024 or self.bank_geometry_scope != "per_stack"
                     or self.stack_interface_mode != "independent"):
-                raise ValueError("jedec_hbm control requires PC-mode HBM geometry and independent stack interfaces")
+                expected_geometry = {
+                    "pseudo_channels_per_channel": 2, "subchannels_per_channel": 1,
+                    "ranks_per_channel": 1, "data_lanes": (None, self.channels * 2),
+                    "burst_bytes": 32, "data_width_bits": 64 if hbm2 else 32,
+                    "row_bytes": 1024, "bank_geometry_scope": "per_stack",
+                    "stack_interface_mode": "independent",
+                }
+                conflicts = {name: {"actual": getattr(self, name), "required": required}
+                             for name, required in expected_geometry.items()
+                             if (getattr(self, name) not in required if name == "data_lanes"
+                                 else getattr(self, name) != required)}
+                name = next(iter(conflicts))
+                required = conflicts[name]["required"]
+                raise _hbm_config_error(self, name, category="model_limit",
+                    rule="unsupported_pc_geometry",
+                    requirement_en="jedec_hbm control requires PC-mode HBM geometry and independent stack interfaces",
+                    requirement_zh=f"当前控制器仅支持伪通道模式和独立堆栈接口；{name} 需要为 {required}。",
+                    remedy_zh="按所选 HBM 代际重新生成几何配置，修正列出的冲突字段；不能把等效组织标为此控制器支持的真实组织。",
+                    remedy_en="Regenerate geometry for the selected HBM generation and correct the listed conflicts; an equivalent organization is not supported physical geometry.",
+                    related_values={"conflicts": conflicts, "channels": self.channels})
             if self.activated_row_msb != (None if hbm2 else (self.rows_per_bank - 1).bit_length() - 1):
-                raise ValueError("jedec_hbm activated_row_msb must identify the effective row address MSB")
+                expected_msb = None if hbm2 else (self.rows_per_bank - 1).bit_length() - 1
+                raise _hbm_config_error(self, "activated_row_msb", category="model_limit",
+                    rule="row_address_msb_conflict", label="有效行地址最高位",
+                    requirement_en="jedec_hbm activated_row_msb must identify the effective row address MSB",
+                    requirement_zh=f"当前控制器按有效行地址选择激活页；rows_per_bank={self.rows_per_bank} 时，此字段需要为 {'null' if expected_msb is None else expected_msb}。",
+                    remedy_zh=f"将 activated_row_msb 设为 {'null' if expected_msb is None else expected_msb}，或通过公共配置入口更新行数及其依赖参数。",
+                    remedy_en=f"Set activated_row_msb to {expected_msb}, or update the row count and dependencies through the public config entry point.",
+                    related_values={"rows_per_bank": self.rows_per_bank, "required_value": expected_msb})
         elif self.refresh_policy != "disabled":
             raise ValueError("automatic refresh requires jedec_hbm control")
         if self.refresh_policy == "all_bank" and (self.refresh_interval_ns <= 0 or self.refresh_cycle_ns <= 0):
@@ -326,6 +372,14 @@ class DramConfig:
             # Physical requests are expanded to complete bursts.  A capacity
             # ending in the middle of one burst would therefore allow the
             # last expanded transaction to cross the declared boundary.
+            if kind is MemoryKind.HBM and self.control_mode == "jedec_hbm":
+                raise _hbm_config_error(self, "capacity_bytes", category="model_limit",
+                    rule="capacity_burst_alignment", label="可用容量预算", unit="B",
+                    requirement_en="capacity_bytes must be a multiple of burst_bytes",
+                    requirement_zh=f"当前模型按完整突发传输访问内存，容量预算必须是 {self.burst_bytes} 字节的整数倍。",
+                    remedy_zh=f"将容量预算改为 {self.burst_bytes} 字节的整数倍，且不超过已声明几何的容量。",
+                    remedy_en=f"Set capacity_bytes to a multiple of {self.burst_bytes} bytes within the declared physical capacity.",
+                    related_values={"burst_bytes": self.burst_bytes})
             raise ValueError("capacity_bytes must be a multiple of burst_bytes")
         if self.interleave_bytes is not None:
             _positive_int("interleave_bytes", self.interleave_bytes)
@@ -391,13 +445,45 @@ class DramConfig:
             transfers_per_ck = 2 if generation in {"HBM2", "HBM2E"} else 4
             expected_clock = transfers_per_ck * self.data_width_bits * self.lane_count / (8.0 * physical_bandwidth)
             if not math.isclose(self.command_clock_ns, expected_clock, rel_tol=1e-10):
-                raise ValueError("command_clock_ns conflicts with the JEDEC CK/DQ ratio and physical interface bandwidth")
+                raise _hbm_config_error(self, "command_clock_ns", category="standard_limit",
+                    rule="clock_interface_conflict",
+                    requirement_en="command_clock_ns conflicts with the JEDEC CK/DQ ratio and physical interface bandwidth",
+                    requirement_zh=f"本代际每个命令时钟对应 {transfers_per_ck} 次数据传输；当前接口 {physical_bandwidth:g} GB/s、{self.lane_count} 条数据通道、每通道 {self.data_width_bits} 位，要求时钟周期为 {expected_clock:g} ns。",
+                    remedy_zh=f"将 command_clock_ns 设为 {expected_clock:g} ns，或通过公共配置入口一致地更新物理接口带宽和时序；读写方向限速不会改变物理时钟。",
+                    remedy_en=f"Set command_clock_ns to {expected_clock:g} ns or consistently update the physical interface and dependent timings; directional caps do not change the physical clock.",
+                    related_values={"required_clock_ns": expected_clock, "physical_interface_bandwidth_gb_s": physical_bandwidth,
+                                    "lane_count": self.lane_count, "data_width_bits": self.data_width_bits,
+                                    "transfers_per_command_clock": transfers_per_ck},
+                    source="JESD235B" if hbm2 else "JESD270-4A" if generation == "HBM4" else "JESD238")
         if any(value is not None and value > physical_bandwidth
                for value in (self.read_bandwidth_gb_s, self.write_bandwidth_gb_s)):
+            if kind is MemoryKind.HBM and self.control_mode == "jedec_hbm":
+                name = next(name for name in ("read_bandwidth_gb_s", "write_bandwidth_gb_s")
+                            if getattr(self, name) is not None and getattr(self, name) > physical_bandwidth)
+                raise _hbm_config_error(self, name, category="invalid_input",
+                    rule="directional_bandwidth_exceeds_interface", label="读方向限速" if name.startswith("read") else "写方向限速",
+                    requirement_en="directional bandwidth cannot exceed the physical interface bandwidth",
+                    requirement_zh=f"方向限速是物理接口之上的模型预算，不能超过当前物理接口的 {physical_bandwidth:g} GB/s。",
+                    remedy_zh=f"将该方向限速设为不大于 {physical_bandwidth:g} GB/s；若要更换物理接口速率，请通过公共入口同时更新接口和依赖时序。",
+                    remedy_en=f"Set the directional cap to at most {physical_bandwidth:g} GB/s, or update the physical interface and dependent timings through the public config entry point.",
+                    related_values={"physical_interface_bandwidth_gb_s": physical_bandwidth,
+                                    "read_bandwidth_gb_s": self.read_bandwidth_gb_s,
+                                    "write_bandwidth_gb_s": self.write_bandwidth_gb_s})
             raise ValueError("directional bandwidth cannot exceed the physical interface bandwidth")
         if not isinstance(self.metadata, Mapping):
             raise ValueError("metadata must be a mapping")
         if self.capacity_bytes is not None and self.capacity_bytes > self.computed_capacity_bytes:
+            if kind is MemoryKind.HBM and self.control_mode == "jedec_hbm":
+                raise _hbm_config_error(self, "capacity_bytes", category="invalid_input",
+                    rule="capacity_exceeds_geometry", label="可用容量预算", unit="B",
+                    requirement_en="capacity_bytes cannot exceed the declared physical geometry",
+                    requirement_zh=f"可用容量预算不能超过已声明几何可寻址的 {self.computed_capacity_bytes} 字节。",
+                    remedy_zh=f"将 capacity_bytes 降至不大于 {self.computed_capacity_bytes} 字节，或通过公共入口选择足够的堆栈数与合法组织；容量预算本身不会增加物理行数。",
+                    remedy_en=f"Set capacity_bytes to at most {self.computed_capacity_bytes} bytes, or select sufficient stacks and a supported organization through the public config entry point; a capacity budget does not add physical rows.",
+                    related_values={"computed_capacity_bytes": self.computed_capacity_bytes,
+                                    "stacks": self.stacks, "lane_count": self.lane_count,
+                                    "banks_per_lane": self.bank_count, "rows_per_bank": self.rows_per_bank,
+                                    "row_bytes": self.row_bytes})
             raise ValueError("capacity_bytes cannot exceed the declared physical geometry")
         if self.capacity_bytes is None:
             object.__setattr__(self, "capacity_bytes", self.computed_capacity_bytes)

@@ -11,7 +11,8 @@ from heterollm_sim.event_kernel import UnifiedEventKernel
 from heterollm_sim.ir import ComponentSpec
 from heterollm_sim.memory_service import DRAM_CONTROL_COUNT_FIELDS, DRAM_CONTROL_TIME_FIELDS
 from heterollm_sim.memory_transfer import summarize_batch
-from heterollm_sim.memory_types import AccessRequest, DRAM_BANK_GROUP_TIMING_FIELDS, Operation, make_hbm_config
+from heterollm_sim.memory_types import AccessRequest, Operation, make_hbm_config
+from heterollm_sim.physical_contract import reconfigure_physical_config
 from heterollm_sim.physical_presets import resolve_physical_config
 from heterollm_sim.planner import _summarize_dram_task_traffic
 from heterollm_sim.reporting import _sum_batch_dram_traffic
@@ -39,12 +40,9 @@ def protocol_config():
         "read_bandwidth_gb_s":128., "write_bandwidth_gb_s":128.})
     # Array delays are explicit test assumptions. The standard organization,
     # CA occupancy, CK/DQ ratio and fixed 32-byte bursts remain physical.
-    return replace(config, control_mode="jedec_hbm", command_clock_ns=1.,
-        activate_command_cycles=1.5, precharge_command_cycles=.5, column_command_cycles=1.,
-        activated_row_msb=(config.rows_per_bank - 1).bit_length() - 1,
-        activate_to_read_ns=4., activate_to_write_ns=4.,
-        read_latency_ns=4., write_latency_ns=4., refresh_policy="disabled",
-        **{key:0. for key in DRAM_BANK_GROUP_TIMING_FIELDS})
+    return reconfigure_physical_config(config, overrides={
+        "activate_to_read_ns":4., "activate_to_write_ns":4.,
+        "read_latency_ns":4., "write_latency_ns":4., "refresh_policy":"disabled"})
 
 
 def test_hbm_protocol_state_rollback_keeps_nested_control_state_and_owner_isolation():
